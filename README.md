@@ -25,18 +25,26 @@
 
 | 系统 | 包 | 说明 |
 |---|---|---|
-| **Windows** | `网盘管理-V1.0.0-Windows-完整版-含AI语音模型.zip` | **推荐**，约 1.3 GB，语音识别离线可用 |
-| **Windows** | `网盘管理-V1.0.0-Windows-精简版-不含模型.zip` | 省 460 MB；首次用字幕时联网下模型 |
-| **Linux** | `网盘管理-V1.0.0-Linux-完整版-含AI语音模型.zip` | 同上（x86_64） |
-| **Linux** | `网盘管理-V1.0.0-Linux-精简版-不含模型.zip` | 同上 |
+| **Windows** | `wangpan-manager-V1.0.0-Windows-full-with-whisper-model` | **推荐**：含 AI 语音模型，字幕离线可用 |
+| **Windows** | `wangpan-manager-V1.0.0-Windows-lite-no-model` | 精简版：省 460 MB，首次用字幕时自动联网下模型 |
+| **Linux** | `wangpan-manager-V1.0.0-Linux-full-with-whisper-model` | 完整版（x86_64） |
+| **Linux** | `wangpan-manager-V1.0.0-Linux-lite-no-model` | 精简版（x86_64） |
 
-**怎么用：**
+**怎么下：每个包分成若干 60 MB 分卷**（`.zip.part01`、`.zip.part02` …），
+把**同一个包的所有分卷**下载到**同一个文件夹**，再执行附带的合并脚本：
 
-1. 下载 → **解压到一个普通文件夹**（别放 C 盘根目录、别放需要管理员权限的地方）；
-2. 双击 **`启动.exe`**（Windows）或 **`启动.sh`**（Linux）；
-3. 想放桌面：Windows 双击 `创建桌面图标.bat`，Linux 执行 `创建桌面图标.sh`；
-4. 第一次打开「百度网盘」页 → 点「登录 / 管理」扫码登录，之后就一直记得了。
+1. 先下 `JOIN-AND-EXTRACT-Windows.bat`（Windows）或 `JOIN-AND-EXTRACT-Linux.sh`（Linux），放到那个文件夹里；
+2. 把该包的所有 `.partNN` 一起下到同一文件夹（Windows 精简版还提供整包直下，省事）；
+3. **双击/执行合并脚本** —— 它会自动合并并解压（Windows 用系统自带 `copy` + `tar`，
+   Linux 用 `cat` + `unzip`，**不需要额外装任何东西**）；
+4. 进入解压出来的目录，双击 **`启动.exe`**（Windows）或 **`启动.sh`**（Linux）；
+5. 想放桌面：Windows 双击 `创建桌面图标.bat`，Linux 执行 `创建桌面图标.sh`；
+6. 第一次打开「百度网盘」页 → 点「登录 / 管理」扫码登录，之后就一直记得了。
 
+> **为什么是分卷？** 作者所在网络往 GitHub 直传大文件会被限速/拒收（实测超过约 70 MB
+> 就报 `Error saving asset`），所以改成 60 MB 分卷 + 合并脚本，下载体验反而更稳。
+> 校验用 `SHA256SUMS.txt`（合并后的整包 sha256）。
+>
 > 想看到报错信息？Windows 双击 `启动（看报错）.bat`，会在黑窗口里打印日志。
 
 ---
