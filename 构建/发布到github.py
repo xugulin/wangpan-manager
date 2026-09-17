@@ -91,6 +91,35 @@ def 令牌() -> str:
     raise SystemExit(f"找不到 GitHub 令牌：{令牌文件}（或设 GITHUB_TOKEN）")
 
 
+def 下载地址(名字: str) -> str:
+    """某个资源在 Release 上的下载地址。"""
+    return (f"https://github.com/{拥有人}/{仓库名}/releases/download/"
+            f"{标签}/{名字}")
+
+
+def 资源在不在(名字: str, 大小: int) -> bool:
+    """这个资源到底在不在 Release 上？**只能靠下载地址判断**。
+
+    GitHub 的 ``/releases/{id}/assets`` 会返回过期数据（实测列表里有 5 个、
+    实际只剩 2 个）。按那个列表"跳过已存在的"，会把真正缺失的文件也当成传过了，
+    结果发布包里悄悄少文件。这里发一个 1 字节的 Range 请求，拿到字节、且总长度
+    对得上才算在。
+    """
+    import httpx
+    try:
+        应答 = httpx.get(下载地址(名字),
+                       headers={"Range": "bytes=0-0", "Cache-Control": "no-cache"},
+                       follow_redirects=True, timeout=20.0)
+        if 应答.status_code == 206:
+            长度 = int(应答.headers.get("content-range", "/0").split("/")[-1] or 0)
+            return bool(长度) and abs(长度 - 大小) <= 4096
+        if 应答.status_code == 200:
+            return abs(len(应答.content) - 大小) <= 4096
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
 def 会话():
     import httpx
     return httpx.Client(
@@ -184,11 +213,11 @@ def 确保发布(会话对象) -> dict:
 
 def 传资源(会话对象, 发布: dict, 文件: Path) -> bool:
     名字 = 文件.name
-    已有 = {x["name"]: x for x in 发布.get("assets", [])}
-    if 名字 in 已有:
+    大小 = 文件.stat().st_size
+    # 用下载地址判断是否已经传过（API 的资源列表会返回过期数据，会把缺失的当成已存在）
+    if 资源在不在(名字, 大小):
         说(f"  已存在，跳过：{名字}")
         return True
-    大小 = 文件.stat().st_size
     说(f"  上传 {名字}（{大小 / 1048576:.0f} MB）…")
     开始 = time.time()
     地址 = (f"{上传API}/repos/{拥有人}/{quote(仓库名)}/releases/"
@@ -202,6 +231,10 @@ def 传资源(会话对象, 发布: dict, 文件: Path) -> bool:
                                            "Content-Length": str(大小)})
             if 应答.status_code in (200, 201):
                 break
+            if 应答.status_code == 422 and "already_exists" in 应答.text:
+                # 同名资源已经在库（多半是上次传成功了但没记下来）——这就是成功
+                说(f"  服务端确认已存在，跳过：{名字}")
+                return True
             print(f"  第 {第次} 次失败：{应答.status_code} {应答.text[:160]}", flush=True)
         except Exception as 错:  # noqa: BLE001
             print(f"  第 {第次} 次异常：{错}", flush=True)

@@ -39,11 +39,6 @@ def 期望的包() -> dict[str, int]:
     return 结果
 
 
-def 下载地址(名: str) -> str:
-    return (f"https://github.com/{拥有人}/{更新.仓库名}"
-            f"/releases/download/{更新.版本显示()}/{名}")
-
-
 def 在不在(名: str, 大小: int) -> bool:
     """这个包到底在不在 Release 上？
 
@@ -51,20 +46,8 @@ def 在不在(名: str, 大小: int) -> bool:
     （实测列表里有 5 个、实际只剩 2 个，据此删资源会删错）。只有下载地址是真的：
     这里发一个 1 字节的 Range 请求，能拿到字节、且总长度对得上才算在。
     """
-    import httpx
-    地址 = 下载地址(名)
-    try:
-        应答 = httpx.get(地址, headers={"Range": "bytes=0-0",
-                                     "Cache-Control": "no-cache"},
-                       follow_redirects=True, timeout=40.0)
-        长度 = int(应答.headers.get("content-range", "/0").split("/")[-1] or 0)
-        if 应答.status_code == 206 and 长度:
-            return abs(长度 - 大小) <= 4096
-        if 应答.status_code == 200:          # 不支持 Range 时按整包长度判断
-            return abs(len(应答.content) - 大小) <= 4096
-    except Exception:  # noqa: BLE001
-        return False
-    return False
+    from 构建.发布到github import 资源在不在
+    return 资源在不在(名, 大小)
 
 
 def 主(最多轮数: int, 只: str = "", 每包上限: float = 0.0) -> int:

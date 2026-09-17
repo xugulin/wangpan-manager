@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(项目根))
 
 from 构建.发布到github import 会话, 确保发布, 传资源, 发布目录  # noqa: E402
+from 构建.补齐发布包 import 在不在  # noqa: E402
 
 分卷目录 = 发布目录 / "分卷"
 连接脚本目录 = 发布目录
@@ -174,6 +175,11 @@ def main() -> int:
         for 包, 分卷 in 计划:
             说(f"== {包.name} ==")
             for i, 卷 in enumerate(分卷, 1):
+                # 先探下载地址：已在库的卷直接跳过（API 的资源列表会返回过期数据，
+                # 按它判断会重复上传，白耗本就很紧的带宽）
+                if 在不在(卷.name, 卷.stat().st_size):
+                    说(f"  ↷ 已在库，跳过 {卷.name}")
+                    continue
                 for 试 in range(1, 6):
                     if 传资源(s, 发布, 卷):
                         break
