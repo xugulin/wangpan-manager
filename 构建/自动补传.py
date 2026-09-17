@@ -62,8 +62,8 @@ def 测速(会话对象, 发布: dict) -> float:
 
 def main() -> int:
     解析 = argparse.ArgumentParser(description="链路好时自动补传发布包")
-    解析.add_argument("--阈值", type=float, default=2.0, help="达到这个 MB/s 才开传")
-    解析.add_argument("--间隔", type=int, default=300, help="每轮间隔秒数")
+    解析.add_argument("--间隔", type=int, default=900, help="每轮间隔秒数")
+    解析.add_argument("--阈值", type=float, default=0.0, help="（保留参数，现在不按速度挑）")
     解析.add_argument("--最多轮", type=int, default=0, help="0 = 一直跑")
     参数 = 解析.parse_args()
 
@@ -82,16 +82,14 @@ def main() -> int:
             发布 = 确保发布(s)
             速度 = 测速(s, 发布)
             说(f"  当前上传速度约 {速度:.2f} MB/s")
-            if 速度 >= 参数.阈值:
-                for 名, _ in 缺:
-                    说(f"  链路够快，开始传 {名}")
-                    if 传资源(s, 发布, 发布目录 / 名):
-                        说("   ✓ 传完一个")
-                        缺 = [(n, z) for n, z in 缺 if n != 名]
-                        break          # 一次只传一个，传完重新评估链路
+            # 不按速度挑：实测**慢速反而成功过**（0.16 / 0.46 MB/s 那两次），
+            # 快速连接反倒常被 GitHub 判 500。所以只要链路活着就试，一次只传一个。
+            for 名, _ in 缺:
+                说(f"  试着传 {名}")
+                if 传资源(s, 发布, 发布目录 / 名):
+                    说("   ✓ 传完一个")
                     break
-            else:
-                说("  太慢，先不传（大文件这种速度必失败）")
+                说("  这次没成，下一轮再来")
         if 参数.最多轮 and 轮 >= 参数.最多轮:
             说("达到最多轮数，退出")
             return 1
