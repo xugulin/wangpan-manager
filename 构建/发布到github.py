@@ -27,7 +27,7 @@ from urllib.parse import quote
 令牌文件 = Path.home() / "python" / "令牌" / "github-token.txt"
 
 拥有人 = "xugulin"
-仓库名 = "网盘管理"
+仓库名 = "wangpan-manager"
 标签 = "V1.0.0"
 API = "https://api.github.com"
 上传API = "https://uploads.github.com"

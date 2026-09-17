@@ -180,7 +180,10 @@
 | **QQ** | **894597841**（首选，加好友请说明来意） |
 | **邮箱** | **894597841@163.com** |
 | **GitHub** | [@xugulin](https://github.com/xugulin) |
-| **项目地址** | https://github.com/xugulin/网盘管理 |
+| **项目地址** | https://github.com/xugulin/wangpan-manager |
+
+> 仓库名用英文 `wangpan-manager`：GitHub 不接受中文仓库名（会被清洗成 `-`），
+> 中文名「网盘管理」保留在仓库简介、本标题与软件界面里。
 
 用着有问题、想加新的网盘、想提需求，都可以直接找我。
 

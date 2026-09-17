@@ -35,7 +35,7 @@ __all__ = [
 
 #: GitHub 账号与仓库名（一键更新的地址就是它）
 仓库拥有人 = "xugulin"
-仓库名 = "网盘管理"
+仓库名 = "wangpan-manager"    # GitHub 不接受非 ASCII 仓库名（会变成 "-"），中文名放在简介与 README 标题里
 仓库 = f"{仓库拥有人}/{仓库名}"
 仓库地址 = f"https://github.com/{仓库}"
 发布页 = f"{仓库地址}/releases"
