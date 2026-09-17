@@ -50,7 +50,10 @@ def 卷在不在(卷: Path) -> bool:
 
 
 def 生成说明(整包在的: list[str], 分卷全的: list[str]) -> str:
-    正文 = 说明文件.read_text(encoding="utf-8")
+    # 从"基础正文"出发（说明文件本身是生成结果，直接读它会把下载表一次次追加成好几份）
+    基础 = 项目根 / "构建" / "发布说明-基础.md"
+    正文 = (基础 if 基础.is_file() else 说明文件).read_text(encoding="utf-8")
+    正文 = 正文.split("### 📥 具体下哪些文件？")[0].rstrip() + "\n"
     情况 = []
     for 平台 in ("Windows", "Linux"):
         for 口味, 标签 in (("full-with-whisper-model", "完整版"),
