@@ -77,6 +77,26 @@ def 生成说明(整包在的: list[str], 分卷全的: list[str]) -> str:
     return 正文 + "\n".join(补充) + "\n"
 
 
+def 有上传在跑() -> bool:
+    """本机是不是还有分卷上传器在跑？
+
+    链路被上传占满时，连 github.com 都连不上（探测会全部超时），
+    这时候去核对"包在不在"只会得到一片假阴性 —— 所以先等上传停。
+    """
+    import os
+    for 名 in os.listdir("/proc"):
+        if not 名.isdigit():
+            continue
+        try:
+            with open(f"/proc/{名}/cmdline", "rb") as f:
+                命令 = f.read().decode("utf-8", "ignore")
+        except OSError:
+            continue
+        if "分卷发布" in 命令 or "补齐发布包" in 命令:
+            return True
+    return False
+
+
 def main() -> int:
     解析 = argparse.ArgumentParser(description="等包齐了收尾")
     解析.add_argument("--等待", action="store_true", help="循环等到齐")
@@ -85,6 +105,12 @@ def main() -> int:
     期望 = 期望的包()
     计划 = 分卷计划()
     while True:
+        if 有上传在跑():
+            说("还有上传器在跑（这时探测会全是假阴性），先等它结束")
+            if not 参数.等待:
+                return 1
+            time.sleep(300)
+            continue
         整包在的, 分卷全的, 还缺的 = [], [], []
         for 名, 大小 in 期望.items():
             if 在不在(名, 大小):

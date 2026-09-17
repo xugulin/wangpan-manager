@@ -109,7 +109,7 @@ def 资源在不在(名字: str, 大小: int) -> bool:
     try:
         应答 = httpx.get(下载地址(名字),
                        headers={"Range": "bytes=0-0", "Cache-Control": "no-cache"},
-                       follow_redirects=True, timeout=20.0)
+                       follow_redirects=True, timeout=8.0)   # 探测只为"快速判断在不在"：慢了就直接试传，靠 422 兜底
         if 应答.status_code == 206:
             长度 = int(应答.headers.get("content-range", "/0").split("/")[-1] or 0)
             return bool(长度) and abs(长度 - 大小) <= 4096

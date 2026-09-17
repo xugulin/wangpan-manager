@@ -172,6 +172,7 @@ def main() -> int:
         s.get("https://api.github.com/user").raise_for_status()
         发布 = 确保发布(s)
         失败 = 0
+        连败 = 0
         for 包, 分卷 in 计划:
             说(f"== {包.name} ==")
             for i, 卷 in enumerate(分卷, 1):
@@ -182,12 +183,21 @@ def main() -> int:
                     continue
                 for 试 in range(1, 6):
                     if 传资源(s, 发布, 卷):
+                        连败 = 0
                         break
                     说(f"  重试 {卷.name}（第 {试} 次失败后换连接）")
                     time.sleep(10)
                 else:
                     失败 += 1
+                    连败 += 1
                     说(f"  ✗ {卷.name} 五次都没传上去")
+                # GitHub 的资源存储会阶段性抽风（500 Error saving asset /
+                # Error creating asset temp dir）。连着几个卷都传不上去就别硬顶了，
+                # 歇 5 分钟再继续，成功率明显更高。
+                if 连败 >= 3:
+                    说("  连败 3 次，说明对面在抽风：歇 5 分钟再继续")
+                    time.sleep(300)
+                    连败 = 0
             说(f"   {包.name} 的分卷处理完（{i}/{len(分卷)}）")
         for 脚本文件 in 脚本:
             传资源(s, 发布, 脚本文件)
