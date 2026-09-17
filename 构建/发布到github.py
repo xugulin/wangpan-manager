@@ -1,0 +1,253 @@
+"""把源码与发布包发到 GitHub（仓库 + Release + 四个压缩包）。
+
+用法（项目根下）::
+
+    运行环境/venv/bin/python 构建/发布到github.py --检查          # 只看要发什么，不动手
+    运行环境/venv/bin/python 构建/发布到github.py --源码          # 建仓库 + 推源码
+    运行环境/venv/bin/python 构建/发布到github.py --发布包        # 建 Release + 传压缩包
+    运行环境/venv/bin/python 构建/发布到github.py --全部
+
+令牌从 ``~/python/令牌/github-token.txt``（或环境变量 ``GITHUB_TOKEN``）读，
+**只在本进程内存里用**，不写进仓库、不写进 .git/config。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+项目根 = Path(__file__).resolve().parent.parent
+发布目录 = 项目根 / "构建" / "发布"
+令牌文件 = Path.home() / "python" / "令牌" / "github-token.txt"
+
+拥有人 = "xugulin"
+仓库名 = "网盘管理"
+标签 = "V1.0.0"
+API = "https://api.github.com"
+上传API = "https://uploads.github.com"
+
+仓库简介 = ("绿色免安装的网盘管家：百度 / 夸克 / 光鸭一个界面全搞定 —— "
+        "跨网盘互传、直接在线看 4K 视频、本地与云端两种 AI、解压即用不污染系统")
+
+发布说明 = """## 网盘管理 V1.0.0 · 首个正式版 🎉
+
+**绿色免安装：解压就能用** —— 不用装 Python、不写注册表、不装系统包、不碰你的用户目录；
+不想用了直接删文件夹，不留任何残留。
+
+### 📦 下载哪个包？
+
+| 你的系统 | 推荐 | 说明 |
+|---|---|---|
+| Windows 10/11 | `Windows-完整版-含AI语音模型.zip` | 含语音识别模型，AI 字幕离线可用 |
+| Windows 10/11 | `Windows-精简版-不含模型.zip` | 小 460 MB，首次用字幕时自动联网下模型 |
+| Linux x86_64 | `Linux-完整版-含AI语音模型.zip` | 同上 |
+| Linux x86_64 | `Linux-精简版-不含模型.zip` | 同上 |
+
+**用法**：解压 → 双击 `启动.exe`（Windows）或 `启动.sh`（Linux）→ 在网盘页点「登录 / 管理」扫码。
+想放桌面：Windows 双击 `创建桌面图标.bat`，Linux 执行 `创建桌面图标.sh`。
+
+### ✨ 这个版本能做什么
+
+- **一个界面管三个网盘**：百度网盘 / 夸克网盘 / 光鸭云盘，**同一家网盘还能挂多个账号**；
+- **跨网盘互传**：直链 + 多线程 + 分片 + **断点续传**，未完成的批次可暂停 / 恢复；
+- **直接看网盘里的 4K 视频**：内置 libvlc，免下载播放，边下边播 + 本地缓存；
+- **两种 AI 都能用**：本地（Ollama / OpenAI 兼容端点，离线免费、数据不出本机）
+  与云端 DeepSeek（余额、价格表、时段策略、预算熔断，**不会悄悄烧钱**）；
+- **AI 自动生成中文字幕**：faster-whisper，纯 CPU 可跑，音视频不上传；
+- **敏感词库 + 上传前自动改名**，并记录改名历史；
+- **设置页一键更新**：从本仓库拉最新版，只覆盖程序本体，不动你的配置与登录凭证；
+- 10 套主题（Dracula / Nord / Tokyo Night / Catppuccin…）。
+
+### 🖥 系统要求
+
+- Windows 10 / 11 **64 位**，或 Linux **x86_64**；
+- 播放需要系统有 VLC 运行库（大多数桌面发行版自带；Windows 包内已含所需运行库说明见包内说明）。
+
+### 📇 联系作者
+
+- QQ：**894597841**（首选，加好友请说明来意）
+- 邮箱：**894597841@163.com**
+- GitHub：[@xugulin](https://github.com/xugulin)
+
+用着有问题、想加新的网盘、想提需求，都可以直接找我。
+提问题时可以在「设置 → 关于」点「复制环境信息」，把那段贴给我，能省很多来回。
+
+**首个正式版，欢迎反馈问题与建议 🙏**
+"""
+
+
+def 令牌() -> str:
+    值 = (os.environ.get("GITHUB_TOKEN") or "").strip()
+    if 值:
+        return 值
+    if 令牌文件.is_file():
+        return 令牌文件.read_text(encoding="utf-8").strip()
+    raise SystemExit(f"找不到 GitHub 令牌：{令牌文件}（或设 GITHUB_TOKEN）")
+
+
+def 会话():
+    import httpx
+    return httpx.Client(
+        headers={"Authorization": f"Bearer {令牌()}",
+                 "Accept": "application/vnd.github+json",
+                 "User-Agent": "wangpan-manager-release",
+                 "X-GitHub-Api-Version": "2022-11-28"},
+        timeout=httpx.Timeout(60.0, write=600.0, read=600.0),
+        follow_redirects=True)
+
+
+def 说(文本: str):
+    print(f"[{time.strftime('%H:%M:%S')}] {文本}", flush=True)
+
+
+def 确保仓库(会话对象) -> dict:
+    应答 = 会话对象.get(f"{API}/repos/{拥有人}/{quote(仓库名)}")
+    if 应答.status_code == 200:
+        说(f"仓库已存在：{应答.json()['html_url']}")
+        return 应答.json()
+    if 应答.status_code != 404:
+        应答.raise_for_status()
+    说("仓库不存在，创建中…")
+    应答 = 会话对象.post(f"{API}/user/repos", json={
+        "name": 仓库名,
+        "description": 仓库简介,
+        "homepage": f"https://github.com/{拥有人}/{仓库名}",
+        "private": False,
+        "has_issues": True,
+        "has_wiki": False,
+        "has_projects": False,
+        "auto_init": False,
+    })
+    if 应答.status_code not in (200, 201):
+        raise SystemExit(f"创建仓库失败：{应答.status_code} {应答.text[:400]}")
+    数据 = 应答.json()
+    说(f"仓库已创建：{数据['html_url']}")
+    return 数据
+
+
+def 推源码(会话对象):
+    """把本地提交推上去（令牌只经临时凭据文件，不落进 .git）。"""
+    仓库 = 确保仓库(会话对象)
+    网址 = 仓库["html_url"] + ".git"
+    凭据 = Path("/tmp/.git-credentials-wangpan")
+    凭据.write_text(f"https://{拥有人}:{令牌()}@github.com\n", encoding="utf-8")
+    凭据.chmod(0o600)
+    try:
+        子 = subprocess.run(["git", "remote", "get-url", "origin"],
+                          cwd=项目根, capture_output=True, text=True)
+        if 子.returncode != 0:
+            subprocess.run(["git", "remote", "add", "origin", 网址],
+                           cwd=项目根, check=True)
+        else:
+            subprocess.run(["git", "remote", "set-url", "origin", 网址],
+                           cwd=项目根, check=True)
+        subprocess.run(["git", "branch", "-M", "main"], cwd=项目根, check=False)
+        说("推送源码（main 分支）…")
+        子 = subprocess.run(
+            ["git", "-c", f"credential.helper=store --file={凭据}",
+             "push", "-u", "origin", "main", "--force"],
+            cwd=项目根, capture_output=True, text=True)
+        if 子.returncode != 0:
+            raise SystemExit(f"推送失败：{子.stderr[-800:]}")
+        说("源码推送完成")
+    finally:
+        凭据.unlink(missing_ok=True)
+
+
+def 确保发布(会话对象) -> dict:
+    路径 = f"{API}/repos/{拥有人}/{quote(仓库名)}/releases/tags/{标签}"
+    应答 = 会话对象.get(路径)
+    if 应答.status_code == 200:
+        说(f"Release {标签} 已存在，复用")
+        return 应答.json()
+    说(f"创建 Release {标签} …")
+    应答 = 会话对象.post(f"{API}/repos/{拥有人}/{quote(仓库名)}/releases", json={
+        "tag_name": 标签,
+        "target_commitish": "main",
+        "name": f"网盘管理 {标签} · 绿色免安装（Windows / Linux）",
+        "body": 发布说明,
+        "draft": False,
+        "prerelease": False,
+    })
+    if 应答.status_code not in (200, 201):
+        raise SystemExit(f"创建 Release 失败：{应答.status_code} {应答.text[:400]}")
+    数据 = 应答.json()
+    说(f"Release 已创建：{数据['html_url']}")
+    return 数据
+
+
+def 传资源(会话对象, 发布: dict, 文件: Path) -> bool:
+    名字 = 文件.name
+    已有 = {x["name"]: x for x in 发布.get("assets", [])}
+    if 名字 in 已有:
+        说(f"  已存在，跳过：{名字}")
+        return True
+    大小 = 文件.stat().st_size
+    说(f"  上传 {名字}（{大小 / 1048576:.0f} MB）…")
+    开始 = time.time()
+    地址 = (f"{上传API}/repos/{拥有人}/{quote(仓库名)}/releases/"
+          f"{发布['id']}/assets?name={quote(名字)}")
+    with open(文件, "rb") as 句柄:
+        应答 = 会话对象.post(地址, content=句柄,
+                          headers={"Content-Type": "application/zip",
+                                   "Content-Length": str(大小)})
+    if 应答.status_code not in (200, 201):
+        print(f"  ✗ 上传失败：{应答.status_code} {应答.text[:300]}")
+        return False
+    用时 = time.time() - 开始
+    说(f"  ✓ 完成 {名字}｜用时 {用时 / 60:.1f} 分钟"
+       f"｜均速 {大小 / 1048576 / max(用时, 1):.1f} MB/s")
+    return True
+
+
+def 看要发什么() -> list[Path]:
+    包们 = sorted(发布目录.glob("*.zip"))
+    if not 包们:
+        print("（构建/发布 下还没有 zip，先跑 构建/打包.py）")
+    for 包 in 包们:
+        print(f"  {包.name}  {包.stat().st_size / 1048576:.0f} MB")
+    合计 = sum(p.stat().st_size for p in 包们) / 1073741824
+    print(f"  合计 {合计:.2f} GB")
+    return 包们
+
+
+def main() -> int:
+    解析 = argparse.ArgumentParser(description="发布到 GitHub")
+    解析.add_argument("--检查", action="store_true", help="只列出要发的东西")
+    解析.add_argument("--源码", action="store_true", help="建仓库并推源码")
+    解析.add_argument("--发布包", action="store_true", help="建 Release 并传压缩包")
+    解析.add_argument("--全部", action="store_true", help="源码 + 发布包")
+    参数 = 解析.parse_args()
+
+    if 参数.检查 or not (参数.源码 or 参数.发布包 or 参数.全部):
+        说("将要发布：")
+        看要发什么()
+        return 0
+
+    with 会话() as 会话对象:
+        用户 = 会话对象.get(f"{API}/user").json()
+        说(f"已认证：{用户.get('login')}")
+        if 参数.源码 or 参数.全部:
+            推源码(会话对象)
+        if 参数.发布包 or 参数.全部:
+            发布 = 确保发布(会话对象)
+            包们 = 看要发什么()
+            if not 包们:
+                return 1
+            全部成功 = True
+            for 包 in 包们:
+                全部成功 = 传资源(会话对象, 发布, 包) and 全部成功
+            if not 全部成功:
+                return 1
+            说(f"全部完成：{发布['html_url']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
