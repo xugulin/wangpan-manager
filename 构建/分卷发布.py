@@ -147,9 +147,12 @@ def main() -> int:
     解析 = argparse.ArgumentParser(description="切分卷并上传")
     解析.add_argument("--分卷", type=int, default=80, help="每个分卷多少 MB（默认 80）")
     解析.add_argument("--检查", action="store_true", help="只列计划")
+    解析.add_argument("--只", default="", help="只传名字含这个关键词的包（可并发跑多个）")
     参数 = 解析.parse_args()
 
     包们 = sorted(发布目录.glob("*.zip"))
+    if 参数.只:
+        包们 = [x for x in 包们 if 参数.只 in x.name]
     if not 包们:
         raise SystemExit("构建/发布 下没有 zip")
     计划: list[tuple[Path, list[Path]]] = []
