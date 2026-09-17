@@ -119,7 +119,10 @@ def 选择资源(资源列表: list[dict], 标记: str = "",
     （``full`` / ``lite`` 也认）。挑不到就返回 ``None``。
     """
     标记 = (标记 or 平台标记()).lower()
-    同平台 = [x for x in 资源列表 or []
+    # 分卷（xxx.zip.part01）与说明文件不参与"整包"挑选；整包找不到时另走分卷逻辑
+    候选 = [x for x in (资源列表 or [])
+          if not _是分卷(x) and not _是辅助文件(x)]
+    同平台 = [x for x in 候选
             if 标记 in _名字(x).lower() or f"({标记})" in _名字(x).lower()]
     if not 同平台:
         return None
@@ -129,6 +132,76 @@ def 选择资源(资源列表: list[dict], 标记: str = "",
     if 要完整版 is None:
         return (完整 or 同平台)[0]
     return (完整 or 同平台)[0] if 要完整版 else (精简的 or 同平台)[0]
+
+
+def _是分卷(资源: dict) -> bool:
+    名 = _名字(资源)
+    return ".part" in 名 and 名[-2:].isdigit()
+
+
+def _是辅助文件(资源: dict) -> bool:
+    名 = _名字(资源).lower()
+    return 名.endswith((".txt", ".md", ".sha256", ".bat", ".sh", ".cmd"))
+
+
+def 分卷组(资源列表: list[dict], 标记: str = "",
+         要完整版: Optional[bool] = None) -> list[dict]:
+    """发布包被切成小分卷时，挑出属于同一个包的全部分卷（按卷号排序）。
+
+    大文件直传常被 GitHub 限量，所以包可能以 ``xxx.zip.part01`` … 的形式发布；
+    这里按"名字里同时含平台与完整/精简标记"把同一组的卷凑齐。
+    """
+    标记 = (标记 or 平台标记()).lower()
+    卷 = [x for x in (资源列表 or []) if _是分卷(x)
+        and 标记 in _名字(x).lower()]
+    if not 卷:
+        return []
+    精简 = [x for x in 卷 if "lite" in _名字(x).lower() or "精简" in _名字(x)]
+    完整 = [x for x in 卷 if x not in 精简]
+    选中 = (完整 or 卷) if 要完整版 is None else ((完整 or 卷) if 要完整版
+                                          else (精简 or 卷))
+    # 取同一"包名前缀"的那一组
+    前缀 = _名字(选中[0]).split(".part")[0]
+    组 = [x for x in 卷 if _名字(x).startswith(前缀 + ".part")]
+    return sorted(组, key=_名字)
+
+
+def 下载发布包(资源列表: list[dict], 目录: str | Path,
+            标记: str = "", 要完整版: Optional[bool] = None,
+            进度: Optional[Callable[[int, int], None]] = None) -> Path:
+    """下载当前平台的发布包，返回可解压的 zip 路径。
+
+    * 有整包就直接下整包；
+    * 只有分卷（``.partNN``）就把所有卷按顺序下下来拼成一个 zip。
+    """
+    目录 = Path(目录)
+    目录.mkdir(parents=True, exist_ok=True)
+    单个 = 选择资源(资源列表, 标记, 要完整版)
+    if 单个 is not None:
+        return 下载资源(单个, 目录, 进度)
+    组 = 分卷组(资源列表, 标记, 要完整版)
+    if not 组:
+        raise RuntimeError("这个平台还没有可下载的发布包")
+    总数 = sum(int(x.get("size") or 0) for x in 组)
+    已下 = 0
+    zip路径 = 目录 / _名字(组[0]).split(".part")[0]
+
+    def 折算(本次: int, _本次总数: int) -> None:
+        if 进度 is not None:
+            进度(已下 + 本次, 总数)
+
+    with open(zip路径, "wb") as 汇总:
+        for 卷 in 组:
+            临时 = 下载资源(卷, 目录 / "分卷", 折算)
+            with open(临时, "rb") as f:
+                while True:
+                    块 = f.read(4 * 1024 * 1024)
+                    if not 块:
+                        break
+                    汇总.write(块)
+            已下 += int(卷.get("size") or 临时.stat().st_size)
+            临时.unlink(missing_ok=True)
+    return zip路径
 
 
 def _httpx():

@@ -48,19 +48,28 @@ class 更新检查线程(QThread):
 
 
 class 更新下载线程(QThread):
+    """下载当前平台的发布包。
+
+    整包与分卷都走 :func:`更新.下载发布包`：包被切成 ``.partNN`` 分卷时会自动
+    全部下下来拼成一个 zip（GitHub 对大文件直传经常 500，分卷稳得多）。
+    """
+
     进度 = Signal(int, int)
     成功 = Signal(str)
     失败 = Signal(str)
 
-    def __init__(self, 资源: dict, 目录: Path, 父=None):
+    def __init__(self, 资源列表: list, 目录: Path, 标记: str = "",
+                 要完整版: bool = True, 父=None):
         super().__init__(父)
-        self.资源 = dict(资源)
+        self.资源列表 = list(资源列表)
         self.目录 = Path(目录)
+        self.标记 = 标记
+        self.要完整版 = 要完整版
 
     def run(self):
         try:
-            路径 = 更新.下载资源(
-                self.资源, self.目录,
+            路径 = 更新.下载发布包(
+                self.资源列表, self.目录, self.标记, self.要完整版,
                 进度=lambda 已下, 总数: self.进度.emit(int(已下), int(总数)))
             self.成功.emit(str(路径))
         except Exception as e:  # noqa: BLE001
@@ -83,6 +92,7 @@ class 设置页面(QWidget):
         self._登记线程 = 线程池管理器(主窗口)
         self._最新发布: dict | None = None
         self._选中的资源: dict | None = None
+        self._要完整版 = True
         self._下载好的包: Path | None = None
         self._构建()
         self.刷新()
@@ -344,9 +354,13 @@ class 设置页面(QWidget):
             self.下载按钮.setEnabled(False)
             return
         完整 = self._本地是否完整版()
+        self._要完整版 = 完整
         资源 = 更新.选择资源(list(发布.get("资源") or []), 要完整版=完整)
+        if 资源 is None:
+            分卷 = 更新.分卷组(list(发布.get("资源") or []), 要完整版=完整)
+            资源 = {"name": f"{len(分卷)} 个分卷（自动合并）",
+                  "size": sum(int(x.get("size") or 0) for x in 分卷)} if 分卷 else None
         self._选中的资源 = dict(资源) if 资源 else None
-        名字 = (资源 or {}).get("name") or "（这个平台还没有对应的包）"
         说明 = str(发布.get("说明") or "").strip()
         说明 = (说明[:400] + "…") if len(说明) > 400 else 说明
         self.更新状态标签.setText(
@@ -356,6 +370,8 @@ class 设置页面(QWidget):
             f"｜{'完整版（含 AI 语音模型）' if 完整 else '精简版（不含模型）'}"
             + (f"\n更新说明：{说明}" if 说明 else ""))
         self.下载按钮.setEnabled(self._选中的资源 is not None)
+        if self._选中的资源 and "分卷" in str(self._选中的资源.get("name", "")):
+            self._选中的资源["name"] = str(self._选中的资源["name"])
         self._记日志(f"发现新版本 {更新.版本显示(远端)}（当前 {更新.版本显示(本地)}）")
 
     def _检查失败(self, 错误: str):
@@ -380,7 +396,9 @@ class 设置页面(QWidget):
         self.进度条.setValue(0)
         self.更新状态标签.setText(f"⬇ 正在下载 {self._选中的资源.get('name')} …")
 
-        线程 = 更新下载线程(self._选中的资源, 目录, self)
+        线程 = 更新下载线程(
+            list((self._最新发布 or {}).get("资源") or []), 目录,
+            更新.平台标记(), self._要完整版, self)
         线程.进度.connect(self._下载进度)
         线程.成功.connect(self._下载成功)
         线程.失败.connect(self._下载失败)
