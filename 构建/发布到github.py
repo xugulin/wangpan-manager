@@ -193,12 +193,21 @@ def 传资源(会话对象, 发布: dict, 文件: Path) -> bool:
     开始 = time.time()
     地址 = (f"{上传API}/repos/{拥有人}/{quote(仓库名)}/releases/"
           f"{发布['id']}/assets?name={quote(名字)}")
-    with open(文件, "rb") as 句柄:
-        应答 = 会话对象.post(地址, content=句柄,
-                          headers={"Content-Type": "application/zip",
-                                   "Content-Length": str(大小)})
-    if 应答.status_code not in (200, 201):
-        print(f"  ✗ 上传失败：{应答.status_code} {应答.text[:300]}")
+    应答 = None
+    for 第次 in range(1, 5):          # GitHub 偶尔回 500 / 连接被掐，重试几次
+        try:
+            with open(文件, "rb") as 句柄:
+                应答 = 会话对象.post(地址, content=句柄,
+                                  headers={"Content-Type": "application/zip",
+                                           "Content-Length": str(大小)})
+            if 应答.status_code in (200, 201):
+                break
+            print(f"  第 {第次} 次失败：{应答.status_code} {应答.text[:160]}", flush=True)
+        except Exception as 错:  # noqa: BLE001
+            print(f"  第 {第次} 次异常：{错}", flush=True)
+        time.sleep(5)
+    if 应答 is None or 应答.status_code not in (200, 201):
+        print(f"  ✗ 上传失败：{名字}", flush=True)
         return False
     用时 = time.time() - 开始
     说(f"  ✓ 完成 {名字}｜用时 {用时 / 60:.1f} 分钟"
@@ -223,6 +232,7 @@ def main() -> int:
     解析.add_argument("--源码", action="store_true", help="建仓库并推源码")
     解析.add_argument("--发布包", action="store_true", help="建 Release 并传压缩包")
     解析.add_argument("--全部", action="store_true", help="源码 + 发布包")
+    解析.add_argument("--只", default="", help="只传文件名含这个关键词的包（可并发跑多个）")
     参数 = 解析.parse_args()
 
     if 参数.检查 or not (参数.源码 or 参数.发布包 or 参数.全部):
@@ -237,7 +247,7 @@ def main() -> int:
             推源码(会话对象)
         if 参数.发布包 or 参数.全部:
             发布 = 确保发布(会话对象)
-            包们 = 看要发什么()
+            包们 = [x for x in 看要发什么() if 参数.只 in x.name] if 参数.只 else 看要发什么()
             if not 包们:
                 return 1
             全部成功 = True
