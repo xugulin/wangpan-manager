@@ -29,3 +29,7 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# CI 工作流暂时不入库：推 workflow 文件需要令牌带 workflow 作用域，
+# 当前令牌只有 repo，推了会让整条推送被拒。等加上作用域后删掉这一行即可。
+.github/workflows/release.yml
