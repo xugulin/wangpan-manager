@@ -1,0 +1,21 @@
+[project]
+name = "quark-adapter"
+version = "0.1.0"
+description = "夸克网盘独立适配器（PySide6 GUI）"
+requires-python = ">=3.10,<3.14"   # 建议 3.12，避开 3.14 GC 段错误
+dependencies = [
+    "httpx>=0.27.0",
+    "qrcode>=7.4.2",
+    "PySide6>=6.10.1",
+]
+# 阶段一清理：已移除 oss2 —— 夸克上传走 httpx 手动 PUT（见 PLAN.md §4.7）
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0"]
+
+# 阶段一清理：已移除 [project.scripts] —— 原条目指向的 `命令行` 模块
+# 在本仓库中并不存在（悬空配置），且入口名带有原适配器品牌。
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

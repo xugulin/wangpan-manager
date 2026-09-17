@@ -1,0 +1,6 @@
+# 让 GitHub 正确识别语言与换行
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.zip binary
+*.exe binary

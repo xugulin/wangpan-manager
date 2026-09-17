@@ -1,0 +1,123 @@
+# 夸克网盘适配器/界面/公共线程.py
+"""公共 QThread 子类
+
+⚠️ 关键：所有线程的 run() 里绝对不能调用 gc.collect()
+   Python 3.14 下会触发跨线程 GC，导致 PySide6 段错误
+"""
+
+import logging
+from pathlib import Path
+
+from PySide6.QtCore import QThread, Signal
+
+from 核心.认证.登录服务 import 登录服务
+from 核心.上传.上传总调度 import 上传总调度
+from 核心.网络.网络客户端 import 网络客户端
+
+logger = logging.getLogger("夸克网盘.界面.线程")
+
+
+class 扫码登录线程(QThread):
+    """扫码登录：二维码 → 轮询 → 凭证写库
+
+    信号：
+      `二维码(链接, 用户码)`  —— 夸克无用户码，第二参恒为 ""
+      `状态(文本)`            —— 轮询进度（如「等待扫码…已等待 12s」）
+      `成功(凭证字典)` / `失败(错误)`
+    """
+
+    二维码 = Signal(str, str)
+    状态 = Signal(str)
+    成功 = Signal(dict)
+    失败 = Signal(str)
+
+    def __init__(self, 扫码超时秒: float = 300.0):
+        super().__init__()
+        self.扫码超时秒 = 扫码超时秒
+
+    def run(self):
+        登录 = None
+        try:
+            登录 = 登录服务(扫码超时秒=self.扫码超时秒)
+            结果 = 登录.扫码登录(
+                二维码回调=lambda 地址, 码: self.二维码.emit(地址, 码),
+                状态回调=lambda 文本: self.状态.emit(文本),
+            )
+            self.成功.emit(结果)
+        except Exception as e:
+            logger.exception("扫码登录异常")
+            self.失败.emit(str(e))
+        finally:
+            if 登录 is not None:
+                try:
+                    登录.关闭()
+                except Exception:
+                    pass
+
+
+class 网络查询线程(QThread):
+    成功 = Signal(str, object)
+    失败 = Signal(str, str)
+
+    def __init__(self, 任务名: str, 函数):
+        super().__init__()
+        self.任务名 = 任务名
+        self.函数 = 函数
+
+    def run(self):
+        try:
+            结果 = self.函数()
+            self.成功.emit(self.任务名, 结果)
+        except Exception as e:
+            logger.exception(f"任务 {self.任务名} 异常")
+            self.失败.emit(self.任务名, str(e))
+
+
+class 批量上传线程(QThread):
+    总进度 = Signal(str, float)
+    单文件成功 = Signal(str, dict)
+    全部成功 = Signal(int, int)
+    失败 = Signal(str)
+
+    def __init__(self, 网络: 网络客户端,
+                 路径列表: list,
+                 父目录ID: str,
+                 是文件夹: bool):
+        super().__init__()
+        self.网络 = 网络
+        self.路径列表 = 路径列表
+        self.父目录ID = 父目录ID
+        self.是文件夹 = 是文件夹
+
+    def run(self):
+        try:
+            接口 = 上传总调度(self.网络)
+            总数 = len(self.路径列表)
+            成功数 = 0
+
+            for i, 路径 in enumerate(self.路径列表):
+                基 = i / 总数
+                范围 = 1 / 总数
+
+                def 子进度(阶段: str, p: float,
+                           _b=基, _r=范围):
+                    self.总进度.emit(阶段, _b + p * _r)
+
+                if self.是文件夹:
+                    结果 = 接口.上传文件夹(
+                        路径, self.父目录ID,
+                        进度回调=子进度,
+                        单文件回调=lambda n, info:
+                            self.单文件成功.emit(n, info),
+                    )
+                    成功数 += len(结果)
+                else:
+                    info = 接口.上传文件(
+                        路径, self.父目录ID, 进度回调=子进度)
+                    self.单文件成功.emit(Path(路径).name, info)
+                    成功数 += 1
+
+            self.全部成功.emit(成功数, 总数)
+        except Exception as e:
+            logger.exception("批量上传异常")
+            self.失败.emit(str(e))

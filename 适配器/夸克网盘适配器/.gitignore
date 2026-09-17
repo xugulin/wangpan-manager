@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+*.log
+config.ini
+config.json
+cookies.txt
+*.session
+# 凭证 / 令牌文件（禁止入库）
+数据/令牌.json
+*令牌*.json
+# 阶段二 2.2 起凭证改为 Cookie 形式，预先屏蔽
+数据/凭证.json
+*凭证*.json
+# 仅忽略测试配置，保留项目构建所需的 json
+测试/*.json

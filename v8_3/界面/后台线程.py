@@ -1,0 +1,162 @@
+"""界面后台线程：所有会阻塞的网络操作都放在 QThread 里跑。
+
+约定
+====
+* 子进程适配器的调用是阻塞的（走行式 JSON 协议），必须在工作线程里执行，
+  否则界面会卡住；
+* QThread 实例必须被主窗口持有引用（``_活动线程``），否则 Python 3.14
+  （GC 已按适配器惯例关闭自动回收）下容易出问题；
+* 事件回调里只 emit 信号，绝不直接碰控件。
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Callable, Optional
+
+from PySide6.QtCore import QThread, Signal
+
+from ..核心.传输引擎 import 传输引擎, 传输请求
+
+
+class 账号状态线程(QThread):
+    """查询某个网盘实例的登录状态。"""
+
+    成功 = Signal(str, dict)
+    失败 = Signal(str, str)
+
+    def __init__(self, 标识: str, 取适配器: Callable[[str], object],
+                 父=None):
+        super().__init__(父)
+        self.标识 = 标识
+        self._取适配器 = 取适配器
+
+    def run(self):
+        try:
+            信息 = self._取适配器(self.标识).账号状态()
+            self.成功.emit(self.标识, 信息.to_dict())
+        except Exception as e:  # noqa: BLE001 - 界面需要展示任何失败
+            self.失败.emit(self.标识, str(e))
+
+
+class 列目录线程(QThread):
+    """列某个网盘实例的一个目录。"""
+
+    成功 = Signal(str, str, list)   # 标识, 路径, 条目
+    失败 = Signal(str, str, str)    # 标识, 路径, 错误
+
+    def __init__(self, 标识: str, 适配器, 路径: str, 父=None):
+        super().__init__(父)
+        self.标识 = 标识
+        self.适配器 = 适配器
+        self.路径 = 路径
+
+    def run(self):
+        try:
+            条目 = self.适配器.列目录(self.路径)
+            self.成功.emit(self.标识, self.路径, list(条目))
+        except Exception as e:  # noqa: BLE001
+            self.失败.emit(self.标识, self.路径, str(e))
+
+
+class 文件操作线程(QThread):
+    """上传 / 下载 / 新建目录 / 删除等单次操作，带进度。"""
+
+    进度 = Signal(str, str, int, int)   # 阶段, 当前, 总量  (第一个参数为描述)
+    完成 = Signal(str, dict)
+    失败 = Signal(str, str)
+
+    def __init__(self, 描述: str, 动作: Callable[[Callable], dict],
+                 父=None):
+        super().__init__(父)
+        self.描述 = 描述
+        self._动作 = 动作
+
+    def _进度回调(self, 阶段: str, 当前: int, 总量: int) -> None:
+        self.进度.emit(self.描述, str(阶段), int(当前 or 0), int(总量 or 0))
+
+    def run(self):
+        try:
+            结果 = self._动作(self._进度回调)
+            self.完成.emit(self.描述, dict(结果 or {}))
+        except Exception as e:  # noqa: BLE001
+            self.失败.emit(self.描述, str(e))
+
+
+class 传输线程(QThread):
+    """跨网盘批次传输。"""
+
+    事件 = Signal(dict)
+    完成 = Signal(dict)
+
+    def __init__(self, 引擎: 传输引擎, 请求: 传输请求,
+                 取消: threading.Event, 父=None):
+        super().__init__(父)
+        self.引擎 = 引擎
+        self.请求 = 请求
+        self.取消 = 取消
+
+    统计就绪 = Signal(object)      # 把引擎统计对象回传界面，供单任务重跑复用
+
+    def run(self):
+        try:
+            统计 = self.引擎.传输(
+                self.请求,
+                事件回调=lambda e: self.事件.emit(e.to_dict()),
+                取消事件=self.取消,
+            )
+            self.统计就绪.emit(统计)
+            self.完成.emit(统计.to_dict())
+        except Exception as e:  # noqa: BLE001
+            self.完成.emit({"error": str(e)})
+
+
+class 恢复线程(QThread):
+    """恢复一个未完成批次。"""
+
+    事件 = Signal(dict)
+    完成 = Signal(dict)
+
+    def __init__(self, 引擎: 传输引擎, 批次ID: str,
+                 取消: threading.Event, 父=None):
+        super().__init__(父)
+        self.引擎 = 引擎
+        self.批次ID = 批次ID
+        self.取消 = 取消
+
+    def run(self):
+        try:
+            统计 = self.引擎.恢复批次(
+                self.批次ID,
+                事件回调=lambda e: self.事件.emit(e.to_dict()),
+                取消事件=self.取消,
+            )
+            self.完成.emit(统计.to_dict())
+        except Exception as e:  # noqa: BLE001
+            self.完成.emit({"error": str(e)})
+
+
+def 线程池管理器(窗口):
+    """把线程挂到窗口上并在结束后清理，避免 QThread 被提前回收。"""
+
+    def 登记(线程: QThread, 结束回调: Optional[Callable] = None) -> QThread:
+        if not hasattr(窗口, "_活动线程"):
+            窗口._活动线程 = []
+        窗口._活动线程.append(线程)
+
+        def _清理():
+            try:
+                窗口._活动线程.remove(线程)
+            except ValueError:
+                pass
+            if 结束回调 is not None:
+                try:
+                    结束回调()
+                except Exception:
+                    pass
+            线程.deleteLater()
+
+        线程.finished.connect(_清理)
+        return 线程
+
+    return 登记

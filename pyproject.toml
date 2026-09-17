@@ -1,0 +1,18 @@
+[project]
+name = "wopan-v8-1"
+version = "0.1.0"
+description = "彻底去 Alist 的跨网盘直连/直传管理器"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27.0",
+    "PySide6>=6.10.1",
+]
+
+[project.optional-dependencies]
+dev = []
+
+[tool.setuptools.packages.find]
+include = ["v8_3*"]
+
+[tool.setuptools.package-data]
+v8_3 = ["桥/*.py"]

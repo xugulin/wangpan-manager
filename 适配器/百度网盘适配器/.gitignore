@@ -1,0 +1,46 @@
+# ---------- Python 字节码 / 缓存 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- 构建 / 打包产物 ----------
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---------- 测试 / 类型检查 / 格式化缓存 ----------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- 项目运行时数据（含令牌等敏感信息） ----------
+数据/
+
+# ---------- 抓包 / 流量分析文件 ----------
+_har/
+*.har
+
+# ---------- 凭据 / 会话文件 ----------
+cookies.txt
+*.cookie
+*.token
+
+# ---------- 编辑器 / 系统文件 ----------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---------- 日志 ----------
+*.log
+logs/
