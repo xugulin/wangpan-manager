@@ -384,17 +384,79 @@ class 后端(后端基类):
         except Exception:
             return False
 
-    def _试从浏览器补全会话(self) -> bool:
-        """写权限缺失时**自动**从本机浏览器补一份完整会话（节流 2 分钟）。
+    def _试从内置浏览器补全(self) -> bool:
+        """从**内置浏览器 profile** 的 cookie 库直接补一份完整会话。
 
-        用户已经登录着浏览器，这一步对他是透明的；失败就静默返回 False，
-        界面照常给出"点『🌐 从浏览器导入完整会话』"的手动指引。
+        ✅ 这是最省事的一条自愈路（实测 2026-09-19）：
+        用户只要用过程序里的「🌐 用内置浏览器登录」，项目内
+        ``数据/内置浏览器/storage/Cookies`` 就有一份**完整网页版会话**
+        （含 pan 域 STOKEN）。它不依赖调试端口、不依赖外部浏览器，
+        所以"扫码登录后又变只读"这种情况能被它自动治好。
+        """
+        try:
+            import sys as _sys
+            根 = str(self.项目根)
+            if 根 not in _sys.path:
+                _sys.path.insert(0, 根)
+            from 核心.认证.浏览器会话导入 import 会话字段
+            from 界面 import 内置浏览器登录 as _内置   # 同项目下的界面模块
+        except Exception:
+            try:
+                # 桥进程的 sys.path 只有适配器根，界面模块要按项目根找
+                import sys as _sys
+                from pathlib import Path as _P
+                项目根 = str(_P(__file__).resolve().parents[2])
+                if 项目根 not in _sys.path:
+                    _sys.path.insert(0, 项目根)
+                from v8_3.界面 import 内置浏览器登录 as _内置
+                from 核心.认证.浏览器会话导入 import 会话字段
+            except Exception as e:  # noqa: BLE001
+                self.记录(f"[百度] 内置浏览器模块不可用（{type(e).__name__}）：{e}",
+                         "warning")
+                return False
+        库 = _内置.内置浏览器目录() / "storage" / "Cookies"
+        if not 库.is_file():
+            return False
+        饼 = _内置.读取当前离线cookie(("BDUSS", "BDUSS_BFESS", "STOKEN", "BAIDUID",
+                                   "BAIDUID_BFESS"))
+        if not 饼:
+            return False
+        字段 = 会话字段(饼)
+        if not 字段.get("bduss") or not 字段.get("stoken"):
+            self.记录("[百度] 内置浏览器的登录态不完整（缺 BDUSS 或 pan 域 STOKEN）",
+                     "warning")
+            return False
+        m = _导入()
+        仓库 = m["全局会话仓库"]
+        try:
+            for 键, 值 in 字段.items():
+                if 值:
+                    仓库.保存会话(**{键: 值})
+            self.记录("[百度] 已从内置浏览器 profile 补全会话："
+                     + "、".join(f"{k}({len(v)})" for k, v in 字段.items()))
+            return True
+        except Exception as e:  # noqa: BLE001
+            self.记录(f"[百度] 从内置浏览器补全会话失败：{type(e).__name__}: {e}",
+                     "warning")
+            return False
+
+    def _试从浏览器补全会话(self) -> bool:
+        """写权限缺失时自动补一份完整会话（节流 2 分钟）。
+
+        顺序（实测后定的）：
+          ① **内置浏览器 profile**：零依赖、本机读库，最省事；
+          ② 外部浏览器调试端口：需要用户开调试端口（拿不到就如实说）。
+        失败就静默返回 False，界面照常给出可执行的手动指引。
         """
         现在 = time.time()
         上次 = float(_最近补会话.get("时间") or 0.0)
         if 现在 - 上次 < 120.0:
             return False
         _最近补会话["时间"] = 现在
+        # ① 先用内置浏览器的登录态（用户用过程序内登录就有）
+        if self._试从内置浏览器补全():
+            _最近补会话["失败原因"] = ""
+            return True
         if not _最近补会话.get("可用"):
             # 先探一次浏览器在不在，不在就不再反复试
             try:
@@ -408,7 +470,8 @@ class 后端(后端基类):
                 端口 = 0
             if not 端口:
                 _最近补会话["可用"] = False
-                _最近补会话["失败原因"] = "本机没有可用的浏览器调试端口"
+                _最近补会话["失败原因"] = (
+                    "内置浏览器里还没有登录态，也没有找到开着调试端口的浏览器")
                 self.记录("[百度] 本机没有可用的浏览器调试端口，"
                          "写权限需要手动导入会话", "warning")
                 return False
@@ -478,9 +541,11 @@ class 后端(后端基类):
                        ("浏览器里有完整会话，可在登录对话框点"
                         "「🌐 从浏览器导入完整会话」一键修好。"
                         if _最近补会话.get("可用") else
-                        "请在浏览器登录 pan.baidu.com 后点"
-                        "「🌐 从浏览器导入完整会话」。"))
-                    + "（也可以设 V8_3_浏览器调试端口=<端口> 指定端口）")
+                        "① 在程序里点「🌐 用内置浏览器登录（推荐）」，"
+                        "登录一次即可（之后扫码也能自动用它补全）；"
+                        "② 或用带调试端口的浏览器登录 pan.baidu.com 后点"
+                        "「🌐 从浏览器导入完整会话」（可设 "
+                        "V8_3_浏览器调试端口=<端口> 指定端口）。")))
         except Exception as e:
             详情["error"] = str(e)[:200]
         return {
