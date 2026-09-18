@@ -50,6 +50,33 @@ def _http_json(地址: str, 超时: float = 6.0) -> Any:
         return json.loads(应答.read().decode("utf-8", "replace"))
 
 
+#: 上次成功用过的端口（浏览器面板每次启动会随机换端口，记住它省一次扫描）
+_上次端口: dict = {"端口": 0}
+
+
+def 候选端口(候选: tuple[int, ...] | None = None) -> tuple[int, ...]:
+    """端口候选表：显式指定 > 环境变量 V8_3_浏览器调试端口 > 上次用过的 >
+    常见端口。"""
+    if 候选:
+        return tuple(候选)
+    表: list[int] = []
+    try:
+        import os
+        环境 = str(os.environ.get("V8_3_浏览器调试端口") or "").strip()
+        if 环境.isdigit():
+            表.append(int(环境))
+    except Exception:
+        pass
+    if _上次端口.get("端口"):
+        表.append(int(_上次端口["端口"]))
+    表.extend(默认候选端口)
+    去重: list[int] = []
+    for 项 in 表:
+        if 项 not in 去重:
+            去重.append(项)
+    return tuple(去重)
+
+
 def 找调试端口(候选: tuple[int, ...] | None = None,
             扫进程: bool = True) -> tuple[int, str]:
     """找一个**正开着调试端口**的 Chromium 系浏览器。
@@ -57,16 +84,15 @@ def 找调试端口(候选: tuple[int, ...] | None = None,
     :return: ``(端口, 浏览器说明)``；找不到返回 ``(0, "")``。
     先试常见端口，再退一步从进程命令行里抓 ``--remote-debugging-port``。
     """
-    # ① 显式候选端口先试（测试里指哪个就是哪个，不受本机浏览器干扰）
-    if 候选:
-        for 端口 in 候选:
-            try:
-                信息 = _http_json(f"http://127.0.0.1:{端口}/json/version",
-                                超时=4.0)
-                return 端口, f"{信息.get('Browser', 'Chromium')}（端口 {端口}）"
-            except Exception:
-                continue
-    端口们 = list(候选 or 默认候选端口)
+    # ① 候选端口先试（显式候选 / 环境变量 / 上次用过 / 常见端口）
+    for 端口 in 候选端口(候选):
+        try:
+            信息 = _http_json(f"http://127.0.0.1:{端口}/json/version", 超时=4.0)
+            _上次端口["端口"] = 端口
+            return 端口, f"{信息.get('Browser', 'Chromium')}（端口 {端口}）"
+        except Exception:
+            continue
+    端口们 = list(候选端口(候选)) if not 扫进程 else []
 
     if not 扫进程:
         return 0, ""
@@ -94,8 +120,8 @@ def 找调试端口(候选: tuple[int, ...] | None = None,
     for 端口 in 端口们:
         try:
             信息 = _http_json(f"http://127.0.0.1:{端口}/json/version", 超时=4.0)
-            名称 = f"{信息.get('Browser', 'Chromium')}（端口 {端口}）"
-            return 端口, 名称
+            _上次端口["端口"] = 端口
+            return 端口, f"{信息.get('Browser', 'Chromium')}（端口 {端口}）"
         except Exception:
             continue
     return 0, ""

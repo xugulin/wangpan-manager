@@ -28,6 +28,20 @@ from 后端_基类 import (后端基类, 规范, 多段下载, 读取下载分�
 #: 「自动从浏览器补全会话」的状态（时间节流 + 浏览器是否可用）
 _最近补会话: dict = {"时间": 0.0, "可用": True}
 
+#: 写权限结论缓存：带"会话指纹"，令牌一变就作废。
+#: ⚠️ 关键教训（现场踩到）：**有 bdstoken 不等于能写**。扫码登录那份会话
+#:    bdstoken 拿得到（loginStatus 会下发），但它的 STOKEN 是 passport 域那份，
+#:    写接口照样 errno:-6。所以判定必须绑定"当时那份凭证"的指纹。
+_写状态缓存: dict = {"指纹": "", "状态": "", "时间": 0.0}
+
+
+def _会话指纹(仓库) -> str:
+    try:
+        会话 = 仓库.取会话() or {}
+        return f"{str(会话.get('bduss') or '')[:16]}|{str(会话.get('stoken') or '')[:16]}"
+    except Exception:
+        return ""
+
 #: 写权限探针的结论缓存：网盘页每次刷新状态都会调 account()，
 #: 不该每次都多发一条写请求、多刷一条同样的提示。
 _写探针缓存: dict = {"时间": 0.0, "提示": "", "窗口": 0.0}
@@ -116,8 +130,7 @@ class 后端(后端基类):
             self._本地.ctx = 上下文
         return 上下文
 
-    @staticmethod
-    def _确保可写(ctx: _上下文) -> None:
+    def _确保可写(self, ctx: _上下文) -> None:
         """写接口前确认 bdstoken 可用；拿不到时给出**可执行**的中文指引。
 
         ✅ 真机实测（2026-09-19，用户那份"读全通、写全废"的会话）：
@@ -131,19 +144,15 @@ class 后端(后端基类):
           2. 但写操作照样 -6，那就不是 bdstoken 的问题，而是**STOKEN 失效**：
              百度读接口只认 BDUSS，写接口认 BDUSS + STOKEN。
         """
-        try:
-            if ctx.会话仓库.获取bdstoken():
-                return
-        except Exception:
-            pass
-        # 自愈：**用户点上传的那一刻**就该修好，而不是等他去点登录按钮。
-        # 浏览器里有完整会话就自动补一份（内部有节流与可用性探测）。
-        if self._试从浏览器补全会话():
-            try:
-                if ctx.会话仓库.获取bdstoken():
+        # ① 先看**实测**结论：有 bdstoken 不等于能写（扫码会话正是如此）
+        状态 = self._写权限状态_带缓存()
+        if 状态 == "可写":
+            return
+        # ② 只读/未知 → 自愈：用户点上传的那一刻就该修好，而不是等他去点登录按钮
+        if 状态.startswith("只读") or 状态.startswith("未知") or not self._有bdstoken(ctx):
+            if self._试从浏览器补全会话():
+                if self._写权限状态_带缓存() == "可写":
                     return
-            except Exception:
-                pass
         令牌 = ""
         try:
             令牌 = str(ctx.认证.从登录态补bdstoken() or "")
@@ -219,21 +228,23 @@ class 后端(后端基类):
         except Exception:
             return "未知"
         try:
+            认证 = m["认证服务"](网络=网络, 仓库=仓库)
             try:
-                模板 = m["认证服务"](网络=网络, 仓库=仓库).取模板变量()
+                模板 = 认证.取模板变量()
                 if 模板.get("bdstoken"):
                     仓库.更新bdstoken(模板["bdstoken"], 模板.get("uk"))
-                    return "可写"
             except Exception as e:  # noqa: BLE001
                 if getattr(e, "errno", None) != -6:
                     return f"未知（{type(e).__name__}）"
-            # bdstoken 拿不到 → 试 loginStatus 回退，再打一次写接口
-            try:
-                认证 = m["认证服务"](网络=网络, 仓库=仓库)
-                if 认证.从登录态补bdstoken():
-                    return "可写"
-            except Exception:
-                pass
+            # bdstoken 拿不到 → 试 loginStatus 回退
+            # ⚠️ 但**拿到 bdstoken 也不能就此判定可写**：实测扫码登录那份会话
+            #    bdstoken 拿得到（loginStatus 会下发），写接口照样 errno:-6
+            #    —— 因为它的 STOKEN 是 passport 域那份。所以下面一律再真打一次写。
+            if not 仓库.获取bdstoken():
+                try:
+                    认证.从登录态补bdstoken()
+                except Exception:
+                    pass
             try:
                 网络.请求("POST", "/api/create",
                         params={"path": "/V8_3_写权限探针_请忽略", "isdir": "1",
@@ -252,6 +263,29 @@ class 后端(后端基类):
                 网络.关闭()
             except Exception:
                 pass
+
+    def _写权限状态_带缓存(self) -> str:
+        """带指纹的写权限判定：同一份凭证 + 60 秒内复用结论，别每次都真打。"""
+        try:
+            m = _导入()
+            仓库 = m["全局会话仓库"]
+        except Exception:
+            return "未知"
+        指纹 = _会话指纹(仓库)
+        现在 = time.time()
+        if (_写状态缓存["指纹"] == 指纹 and _写状态缓存["状态"]
+                and 现在 - float(_写状态缓存["时间"] or 0.0) < 60.0):
+            return str(_写状态缓存["状态"])
+        状态 = self._写权限状态()
+        _写状态缓存.update({"指纹": 指纹, "状态": 状态, "时间": 现在})
+        return 状态
+
+    @staticmethod
+    def _有bdstoken(ctx) -> bool:
+        try:
+            return bool(ctx.会话仓库.获取bdstoken())
+        except Exception:
+            return False
 
     def _试从浏览器补全会话(self) -> bool:
         """写权限缺失时**自动**从本机浏览器补一份完整会话（节流 2 分钟）。
@@ -277,12 +311,20 @@ class 后端(后端基类):
                 端口 = 0
             if not 端口:
                 _最近补会话["可用"] = False
+                _最近补会话["失败原因"] = "本机没有可用的浏览器调试端口"
                 self.记录("[百度] 本机没有可用的浏览器调试端口，"
                          "写权限需要手动导入会话", "warning")
                 return False
             _最近补会话["可用"] = True
         结果 = self._从浏览器导入会话()
-        return str(结果.get("状态")) == "成功"
+        if str(结果.get("状态")) == "成功":
+            _最近补会话["失败原因"] = ""
+            return True
+        # 失败就把原因记下来，界面直接显示，用户按提示做就行
+        _最近补会话["失败原因"] = str(结果.get("消息") or "从浏览器补全会话失败")[:200]
+        self.记录(f"[百度] 自动从浏览器补全会话失败：{_最近补会话['失败原因']}",
+                 "warning")
+        return False
 
     # ---------------- 账号 ----------------
 
@@ -331,13 +373,17 @@ class 后端(后端基类):
                     详情["写权限"] = 状态 + "（已自动从浏览器补全会话）"
                     详情.pop("write_error", None)
             if 状态.startswith("只读"):
+                原因 = str(_最近补会话.get("失败原因") or "")
                 详情["write_error"] = (
                     "这份会话只能读：上传/改名/删除需要 pan 域 STOKEN。"
-                    + ("浏览器里有完整会话，可在登录对话框点"
-                       "「🌐 从浏览器导入完整会话」一键修好。"
-                       if _最近补会话.get("可用") else
-                       "请在浏览器登录 pan.baidu.com 后点"
-                       "「🌐 从浏览器导入完整会话」。"))
+                    + (f"已尝试自动从浏览器补全但失败：{原因}。"
+                       if 原因 else
+                       ("浏览器里有完整会话，可在登录对话框点"
+                        "「🌐 从浏览器导入完整会话」一键修好。"
+                        if _最近补会话.get("可用") else
+                        "请在浏览器登录 pan.baidu.com 后点"
+                        "「🌐 从浏览器导入完整会话」。"))
+                    + "（也可以设 V8_3_浏览器调试端口=<端口> 指定端口）")
         except Exception as e:
             详情["error"] = str(e)[:200]
         return {
