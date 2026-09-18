@@ -107,7 +107,26 @@ class 适配器规格:
 
     @property
     def 路径(self) -> Path:
-        return Path(self.项目根).expanduser()
+        """适配器目录。
+
+        ⚠️ **相对路径要按项目根解析**，不能按进程 cwd：桥工作进程是用
+        ``cwd=v8_3/桥`` 起的，如果直接把 ``适配器/百度网盘适配器`` 传给它，
+        它会去解析成 ``v8_3/桥/适配器/百度网盘适配器`` —— 结果是适配器的
+        ``核心`` 包根本 import 不进来（现场表现：所有适配器调用都报
+        ``ModuleNotFoundError: No module named '核心'``）。
+        这里统一解析成绝对路径，启动脚本/配置怎么写都不会踩这个坑。
+        """
+        try:
+            路径 = Path(self.项目根).expanduser()
+            if 路径.is_absolute():
+                return 路径
+            根 = Path(__file__).resolve().parents[2]      # 项目根（v8_3 的上一级）
+            候选 = 根 / 路径
+            if 候选.is_dir():
+                return 候选
+            return 路径
+        except Exception:
+            return Path(self.项目根).expanduser()
 
     def 启动脚本(self) -> Path:
         """返回适配器原始 GUI 启动脚本（登录管理用）。"""

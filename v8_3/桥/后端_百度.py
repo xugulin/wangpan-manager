@@ -178,12 +178,17 @@ class 后端(后端基类):
             )
             提示 = ""
         except Exception as e:  # noqa: BLE001
-            if getattr(e, "errno", None) == -6:
+            errno = getattr(e, "errno", None)
+            if errno == -6:
                 提示 = ("写操作被服务端拒绝（errno:-6）：会话里的 STOKEN 已失效"
                         "（读接口只认 BDUSS，写接口认 BDUSS + STOKEN）。"
                         "请在浏览器打开 pan.baidu.com 确认仍登录，"
-                        "复制整段 Cookie（含 BDUSS 与 STOKEN）后"
-                        "用「🍪 导入Cookie」重新登录。")
+                        "然后在登录对话框点「🌐 从浏览器导入完整会话」"
+                        "（或复制整段 Cookie 用「🍪 导入Cookie」）。")
+            elif errno == 2:
+                # errno 2 = 文件已存在（服务端真的去建了才可能回这个）
+                # → 说明写权限是通的，只是探针路径已经存在
+                提示 = ""
             else:
                 提示 = f"写权限探针异常：{type(e).__name__}: {str(e)[:120]}"
         _写探针缓存写入(提示, 现在)
@@ -874,6 +879,74 @@ class 后端(后端基类):
 
     # ---------------- 导入 Cookie ----------------
 
+    def _从浏览器导入会话(self) -> dict:
+        """从本机浏览器（调试端口）取回完整会话，落盘并**验证写权限**。
+
+        与手工粘贴 Cookie 的区别：这里由浏览器自己解密 cookie，
+        因此能拿到 HttpOnly 的 ``BDUSS`` 与 **pan 域 STOKEN** ——
+        后者正是写操作（上传/改名/删除/建目录）唯一认的那份凭证。
+        """
+        try:
+            # ⚠️ 必须先把适配器项目根放进 sys.path：桥进程的 cwd 是 v8_3/桥，
+            #    `核心` 包只在适配器目录下，直接 import 会 ModuleNotFoundError。
+            import sys as _sys
+            根 = str(self.项目根)
+            if 根 not in _sys.path:
+                _sys.path.insert(0, 根)
+            from 核心.认证.浏览器会话导入 import 取浏览器会话
+        except Exception as e:  # noqa: BLE001
+            return self.登录失败(f"浏览器会话导入模块不可用：{e}")
+        self.记录("[百度] 正在从本机浏览器读取登录会话（调试端口）…")
+        结果 = 取浏览器会话()
+        if not 结果.get("成功"):
+            return self.登录失败(str(结果.get("消息") or "取浏览器会话失败"),
+                             "浏览器需要：① 用带 --remote-debugging-port 的方式启动"
+                             "（本项目浏览器面板默认已开）；② 里面已登录 pan.baidu.com")
+        会话 = dict(结果.get("会话") or {})
+        m = _导入()
+        仓库 = m["全局会话仓库"]
+        旧会话 = dict(仓库.取会话() or {})
+        成功 = False
+        try:
+            仓库.清空()
+            for 键, 值 in 会话.items():
+                if 值:
+                    仓库.保存会话(**{键: 值})
+            if not 仓库.是否有效():
+                return self.登录失败("从浏览器取到的会话字段不完整",
+                                 f"只拿到 {'、'.join(会话) or '空'}")
+            self.记录(f"[百度] 已取到浏览器会话：{'、'.join(会话)}"
+                     f"（{结果.get('浏览器')}）")
+            # 服务端验证：读接口 + bdstoken
+            模板 = self._刷新模板变量(仓库)
+            if not (模板.get("bdstoken") or 仓库.获取bdstoken()):
+                return self.登录失败("浏览器会话未被服务端接受（没下发 bdstoken）",
+                                 "请在浏览器里打开 pan.baidu.com 再试一次")
+            # 写权限探针（无副作用）：非法路径 CREATE，合法会话回参数错误
+            写提示 = ""
+            try:
+                网盘网络 = m["网络客户端"](会话提供者=仓库.取会话, 连接超时秒=20.0)
+                try:
+                    认证 = m["认证服务"](网络=网盘网络, 仓库=仓库)
+                    写提示 = self._写权限提示(认证) if hasattr(
+                        self, "_写权限提示") else ""
+                finally:
+                    网盘网络.关闭()
+            except Exception:
+                写提示 = ""
+            成功 = True
+            self.记录("[百度] ✅ 浏览器会话导入成功"
+                     + ("（写权限探针通过）" if not 写提示 else f"（写探针：{写提示[:60]}）"))
+            return self.登录成功(
+                "已从浏览器导入完整会话（含 pan 域 STOKEN）",
+                ("写操作（上传/改名/删除）现在应该可以用了；"
+                 "若仍报 errno:-6，说明浏览器里那份会话也过期了，"
+                 "请在浏览器里重新登录一次再点本按钮"
+                 + (f"。写探针提示：{写提示}" if 写提示 else "")))
+        finally:
+            if not 成功:
+                self._还原会话(仓库, 旧会话)
+
     def login_cookie(self, 文本: str) -> dict:
         """导入浏览器 Cookie（适配器 登录服务.手工导入cookie）。
 
@@ -890,6 +963,12 @@ class 后端(后端基类):
            免得把原本能用的会话弄坏。
         """
         文本 = str(文本 or "").strip()
+        # 特殊指令：从本机浏览器的调试端口取**完整**会话（含 HttpOnly 的
+        # pan 域 STOKEN）。这是"扫码登录后写操作仍报 errno:-6"的正解 ——
+        # 详见 适配器/核心/认证/浏览器会话导入.py 的模块注释。
+        if 文本 in ("__取浏览器会话__", "{\"__取浏览器会话__\": true}",
+                  '{"__取浏览器会话__": true}'):
+            return self._从浏览器导入会话()
         if not 文本:
             return self.登录失败(
                 "Cookie 文本为空",

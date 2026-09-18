@@ -275,7 +275,33 @@ class 登录对话框(QDialog):
         self.Cookie登录按钮.clicked.connect(self._Cookie登录)
         行.addWidget(self.Cookie登录按钮)
         布局.addLayout(行)
+
+        # 百度专用：从本机浏览器直接取**完整**会话（含 HttpOnly 的 pan 域 STOKEN）
+        if 类型 == "baidu":
+            浏览器行 = QHBoxLayout()
+            self.浏览器导入按钮 = QPushButton("🌐 从浏览器导入完整会话")
+            self.浏览器导入按钮.setObjectName("PrimaryButton")
+            self.浏览器导入按钮.setToolTip(
+                "从带调试端口启动的本机浏览器（本项目的浏览器面板默认已开）读取\n"
+                "BDUSS 与 **pan 域 STOKEN** —— 写操作（上传/改名/删除）只认这份。\n"
+                "扫码登录拿到的会话常常缺这份 STOKEN，表现就是\n"
+                "「已登录、能列目录，但上传/改名/删除一律 errno:-6」。")
+            self.浏览器导入按钮.clicked.connect(self._从浏览器导入)
+            浏览器行.addWidget(self.浏览器导入按钮)
+            说明2 = QLabel(
+                "扫码登录后如果提示「写操作不可用（errno:-6）」，用左边这个按钮："
+                "先在浏览器里登录 pan.baidu.com，再点它。")
+            说明2.setWordWrap(True)
+            说明2.setStyleSheet("color: #95a5a6; font-size: 11px;")
+            浏览器行.addWidget(说明2, 1)
+            布局.addLayout(浏览器行)
         return 面板
+
+    def _从浏览器导入(self):
+        """从本机浏览器取完整会话（含 pan 域 STOKEN），解决写权限不完整。"""
+        self._设置状态("正在从浏览器读取登录会话（调试端口）…")
+        self._跑("从浏览器导入会话",
+               lambda 进度: self.适配器.Cookie登录("__取浏览器会话__"))
 
     # ---------- 短信 ----------
 
