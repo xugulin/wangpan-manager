@@ -199,6 +199,35 @@ class DeepSeek价格抓取器:
             return True
         return (time.time() - self._上次刷新) > self.刷新间隔
 
+    #: 官方口径：谷价 = 峰价的一半（2026-08-17 起的峰谷分时定价）
+    峰谷倍数 = 2.0
+
+    @classmethod
+    def 价格是否可信(cls, 数据: dict) -> tuple[bool, str]:
+        """按官方口径给价格数据做体检，返回 (是否可信, 原因)。
+
+        用户反馈过"模型价格标错"：网页改版后解析出来的数字张冠李戴
+        （deepseek-flash 的空闲价拿到了 V4 Pro 的数字），而缓存文件会一直沿用下去。
+        官方规则很硬：**谷价 = 峰价的一半**，据此一眼就能看出数据是不是错的 ——
+        对不上就判为不可信，直接用内置价（内置价与官方定价页一致）。
+        """
+        模型表 = (数据 or {}).get("模型") or {}
+        if not 模型表:
+            return False, "没有模型数据"
+        for 名, 档 in 模型表.items():
+            空闲 = (档 or {}).get("空闲") or {}
+            高峰 = (档 or {}).get("高峰") or {}
+            for 键 in ("缓存命中", "缓存未命中", "输出"):
+                谷, 峰 = 空闲.get(键), 高峰.get(键)
+                if not isinstance(谷, (int, float)) or not isinstance(峰, (int, float)):
+                    return False, f"{名} 缺 {键}"
+                if not (0 < float(谷) < 10000) or not (0 < float(峰) < 10000):
+                    return False, f"{名} {键} 数值离谱（{谷}/{峰}）"
+                if abs(float(峰) - float(谷) * cls.峰谷倍数) > max(0.02, float(谷) * 0.06):
+                    return False, (f"{名} {键} 不符合官方「谷价 = 峰价一半」："
+                                f"谷 {谷} / 峰 {峰}")
+        return True, ""
+
     def _读磁盘缓存(self) -> Optional[dict]:
         try:
             if not os.path.exists(self.缓存路径):
@@ -207,6 +236,11 @@ class DeepSeek价格抓取器:
                       encoding="utf-8") as f:
                 数据 = json.load(f)
             if not isinstance(数据, dict) or "模型" not in 数据:
+                return None
+            可信, 原因 = self.价格是否可信(数据)
+            if not 可信:
+                logger.warning("[DeepSeek价格] ⚠️ 缓存里的价格不可信（%s），"
+                            "改用内置价（与官方定价页一致）", 原因)
                 return None
             if "时间戳" not in 数据:
                 数据["时间戳"] = os.path.getmtime(self.缓存路径)
@@ -242,6 +276,12 @@ class DeepSeek价格抓取器:
             解析结果 = self._解析HTML(响应.text)
             if not 解析结果 or not 解析结果.get("模型"):
                 logger.warning("[DeepSeek价格] ⚠️ 解析为空，保留缓存/兜底")
+                return
+
+            可信, 原因 = self.价格是否可信(解析结果)
+            if not 可信:
+                logger.warning("[DeepSeek价格] ⚠️ 抓到的价格不可信（%s），"
+                            "保留内置价不动（避免把错价写进缓存）", 原因)
                 return
 
             if self._手动时段覆盖:
