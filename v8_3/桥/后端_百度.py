@@ -28,6 +28,9 @@ from 后端_基类 import (后端基类, 规范, 多段下载, 读取下载分�
 #: 「自动从浏览器补全会话」的状态（时间节流 + 浏览器是否可用）
 _最近补会话: dict = {"时间": 0.0, "可用": True}
 
+#: 「补种 pan 域会话」的节流状态（这一步能把只读会话变成可写会话）
+_最近补种: dict = {"时间": 0.0}
+
 #: 写权限结论缓存：带"会话指纹"，令牌一变就作废。
 #: ⚠️ 关键教训（现场踩到）：**有 bdstoken 不等于能写**。扫码登录那份会话
 #:    bdstoken 拿得到（loginStatus 会下发），但它的 STOKEN 是 passport 域那份，
@@ -214,12 +217,78 @@ class 后端(后端基类):
         _写探针缓存写入(提示, 现在)
         return 提示
 
+    def _补种pan域会话(self) -> bool:
+        """跑一遍"建立网盘会话 + 种植子域"：**把扫码得到的 STOKEN 换成 pan 域那份**。
+
+        ✅ 真机实测（2026-09-19，诊断脚本 逆向/诊断STOKEN来源.py）：
+            扫码登录后的会话： stoken=9dfe29b5…（passport 域那份）
+                              取 bdstoken → errno:-6、写接口 → errno:-6（只读）
+            跑完这两步之后：   stoken=a1c9d58d…（**与浏览器里那份完全一致**）
+                              取 bdstoken → errno:0、写接口 → errno:2（可写！）
+        ⇒ pan 域的 STOKEN 不是登录响应里下发的，而是**访问 pan 域时换发**的。
+          我们只在"手工导入 Cookie"路径里跑过这两步，扫码路径漏了，
+          于是扫码登录永远是"只读会话"——用户看到的就是
+          "已登录、能列目录，上传/改名/删除全报 errno:-6"。
+        节流 60 秒：一次没成功就别反复打。
+        """
+        现在 = time.time()
+        if 现在 - float(_最近补种.get("时间") or 0.0) < 60.0:
+            return False
+        _最近补种["时间"] = 现在
+        try:
+            import sys as _sys
+            根 = str(self.项目根)
+            if 根 not in _sys.path:
+                _sys.path.insert(0, 根)
+            服务 = self._新登录服务()
+        except Exception as e:  # noqa: BLE001
+            self.记录(f"[百度] 补种 pan 域会话：登录服务不可用（{e}）", "warning")
+            return False
+        try:
+            服务.建立网盘会话()
+            子域 = 服务.种植子域会话()
+            self.记录("[百度] 已补种 pan 域会话"
+                     f"（子域：{'、'.join(子域) if 子域 else '无'}）")
+            return True
+        except Exception as e:  # noqa: BLE001
+            self.记录(f"[百度] 补种 pan 域会话失败：{type(e).__name__}: {e}", "warning")
+            return False
+        finally:
+            try:
+                服务.关闭()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _打一次写探针(网络, ctx) -> str:
+        """用给定网络客户端打一次写探针：返回 可写 / 只读 / 未知。"""
+        try:
+            网络.请求("POST", "/api/create",
+                    params={"path": "/V8_3_写权限探针_请忽略", "isdir": "1",
+                            "block_list": "[]"},
+                    需要bdstoken=True)
+            return "可写"
+        except Exception as e:  # noqa: BLE001
+            errno = getattr(e, "errno", None)
+            if errno == 2:          # 路径已存在 = 服务端真的去建了
+                return "可写"
+            if errno == -6:
+                try:
+                    有stoken = bool(ctx.会话仓库.获取stoken())
+                except Exception:
+                    有stoken = False
+                return "只读" if 有stoken else "只读（没有 STOKEN）"
+            return f"未知（errno={errno}）"
+
     def _写权限状态(self) -> str:
         """真打一次写接口，判断这份会话到底是"可写 / 只读 / 未登录"。
 
         为什么要真打：会话里**有** STOKEN 不等于那个 STOKEN 有用 ——
         扫码登录写进来的常常是 passport 域那份，读接口照样通、写接口恒 -6。
         以前只看"字段在不在"，于是界面显示"已登录"，用户一上传就失败。
+
+        判定为"只读"时会**先自己救一次**（补种 pan 域会话，实测能把
+        passport 域那份换成 pan 域那份），救不回来才如实报只读。
         """
         try:
             m = _导入()
@@ -227,37 +296,50 @@ class 后端(后端基类):
             网络 = m["网络客户端"](会话提供者=仓库.取会话, 连接超时秒=15.0)
         except Exception:
             return "未知"
+
+        class _盒子:              # _打一次写探针 只用得到 .会话仓库
+            会话仓库 = 仓库
+
         try:
-            认证 = m["认证服务"](网络=网络, 仓库=仓库)
             try:
-                模板 = 认证.取模板变量()
+                模板 = m["认证服务"](网络=网络, 仓库=仓库).取模板变量()
                 if 模板.get("bdstoken"):
                     仓库.更新bdstoken(模板["bdstoken"], 模板.get("uk"))
             except Exception as e:  # noqa: BLE001
                 if getattr(e, "errno", None) != -6:
                     return f"未知（{type(e).__name__}）"
-            # bdstoken 拿不到 → 试 loginStatus 回退
-            # ⚠️ 但**拿到 bdstoken 也不能就此判定可写**：实测扫码登录那份会话
-            #    bdstoken 拿得到（loginStatus 会下发），写接口照样 errno:-6
-            #    —— 因为它的 STOKEN 是 passport 域那份。所以下面一律再真打一次写。
             if not 仓库.获取bdstoken():
                 try:
-                    认证.从登录态补bdstoken()
+                    m["认证服务"](网络=网络, 仓库=仓库).从登录态补bdstoken()
                 except Exception:
                     pass
-            try:
-                网络.请求("POST", "/api/create",
-                        params={"path": "/V8_3_写权限探针_请忽略", "isdir": "1",
-                                "block_list": "[]"},
-                        需要bdstoken=True)
-                return "可写"
-            except Exception as e:  # noqa: BLE001
-                errno = getattr(e, "errno", None)
-                if errno == -6:
-                    return "只读" if 仓库.获取stoken() else "只读（没有 STOKEN）"
-                if errno == 2:
-                    return "可写"
-                return f"未知（errno={errno}）"
+            结果 = self._打一次写探针(网络, _盒子)
+            if 结果 == "可写":
+                return 结果
+            # 只读 → 自己救一次：补种 pan 域会话（换发 pan 域 STOKEN）后再打一次
+            if 仓库.获取bduss() and self._补种pan域会话():
+                try:
+                    网络2 = m["网络客户端"](会话提供者=仓库.取会话,
+                                        连接超时秒=15.0)
+                except Exception:
+                    网络2 = None
+                if 网络2 is not None:
+                    try:
+                        try:
+                            m["认证服务"](网络=网络2, 仓库=仓库).取模板变量()
+                        except Exception:
+                            pass
+                        二次 = self._打一次写探针(网络2, _盒子)
+                        self.记录(f"[百度] 补种 pan 域会话后复测写权限：{二次}")
+                        if 二次 == "可写":
+                            return "可写"
+                        结果 = 二次 or 结果
+                    finally:
+                        try:
+                            网络2.关闭()
+                        except Exception:
+                            pass
+            return 结果
         finally:
             try:
                 网络.关闭()

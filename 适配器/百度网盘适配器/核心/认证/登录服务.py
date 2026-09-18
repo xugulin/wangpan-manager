@@ -65,6 +65,8 @@ logger = logging.getLogger("百度网盘.登录")
 
 PASSPORT = "https://passport.baidu.com"
 网盘首页 = "https://pan.baidu.com/disk/main"
+#: pan 域基础地址（`/api/*` 与 `/disk/main` 都在这个域下）
+pan基础地址 = "https://pan.baidu.com"
 
 轮询间隔秒 = 1.5
 轮询最长等待秒 = 300.0
@@ -434,6 +436,35 @@ class 登录服务:
         logger.info(f"[登录] 已取得会话：{命中}")
         return True
 
+    def 建立pan域会话_换发stoken(self) -> bool:
+        """再访问一次 pan 域，把 passport 域那份 STOKEN 换成 pan 域那份。
+
+        真机实测（2026-09-19）：**pan 域的 STOKEN 不在登录响应里**，
+        而是访问 pan 域（`/v3/login/api/auth/?return_type=5&u=https://pan.baidu.com/disk/main`）
+        时由服务端换发的。少了这一步，会话就是"只能读"：
+        `/api/list` 正常、`/api/gettemplatevariable` 与所有写接口 errno:-6。
+
+        :return: 是否真的换到了不同的 STOKEN（True 通常意味着写权限已就绪）
+        """
+        之前 = self.仓库.获取stoken()
+        self.建立网盘会话()
+        # 顺带把 pan 域首页走一遍：实测这一下也会触发换发
+        try:
+            self.网络.请求("GET", "/disk/main", 基础地址=pan基础地址,
+                        带业务头=False, 需要认证=False, raw=True)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[登录] 访问 pan 首页异常（可忽略）：{e}")
+        self.种植子域会话()
+        之后 = self.仓库.获取stoken()
+        if 之后 and 之后 != 之前:
+            logger.info("[登录] ✅ 已换发 pan 域 STOKEN（写权限就绪）")
+            return True
+        if 之后:
+            logger.info("[登录] pan 域 STOKEN 与换取会话时相同（可能已是 pan 域那份）")
+            return False
+        logger.warning("[登录] 仍未拿到 STOKEN（写操作会失败，可稍后重试或导入浏览器会话）")
+        return False
+
     def 种植子域会话(self) -> list[str]:
         """步骤 ⑥：向 pcs / pcsdata 子域种植会话。
 
@@ -516,7 +547,20 @@ class 登录服务:
         登录令牌 = self.等待扫码(轮询标识,
                                 状态回调=状态回调, 超时秒=超时秒)
         self.换取会话(登录令牌)
+        # ✅ **关键一步**（真机实测，2026-09-19）：换取会话拿到的是
+        #    **passport 域**的 STOKEN，读接口能用、写接口一律 errno:-6。
+        #    pan 域的 STOKEN 是**访问 pan 域时换发**的 —— 必须在这里多走一步
+        #    `建立网盘会话()`（return_type=5，落到 pan 域）再 `种植子域会话()`，
+        #    换完 stoken 就变了（实测 9dfe29b5… → a1c9d58d…，与浏览器那份一致），
+        #    写接口随之从 errno:-6 变成可写。
+        #
+        #    ⚠️ 以前只在"手工导入 Cookie"路径里跑这两步，扫码路径漏了，
+        #       于是扫码登录永远是"只读会话"：能列目录、上传/改名/删除全废。
         self.建立网盘会话()
+        try:
+            self.建立pan域会话_换发stoken()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[登录] 换发 pan 域 STOKEN 异常（不影响登录）：{e}")
 
         # ✅ 先补齐 bdstoken / uk，再谈子域种植。
         #    真机实测：走到这一步会话**已经可用**（检查登录态直接成功），
