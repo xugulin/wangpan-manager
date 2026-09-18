@@ -1,4 +1,4 @@
-"""V8_3 主窗口：V8 风格的左侧导航 + 切换式页面。
+"""V8_3 主窗口：**顶部横向导航** + 切换式页面。
 
 布局
 ====
@@ -18,7 +18,7 @@
 └──────┴──────────────────────────────────────────────┘
 ```
 
-* 左侧导航栏宽度固定（70px），高度随窗口；网盘按钮从上往下排列，
+* 顶部导航栏一行三段：网盘（横向滚动）｜功能｜网盘管理，高度固定 64px；
   数量超出可视高度时在面板内部滚动加载（QScrollArea + 滚轮）；
 * 原来的「网盘管理」标签页已废弃：每个网盘在导航栏里各有一个按钮，
   点击即切换到该网盘的页面（登盘管理区 + V8 主页式文件浏览）；
@@ -55,13 +55,20 @@ from .设置页面 import 设置页面
 from .滚动区 import 包一层滚动
 
 导航宽度 = 74
+#: 顶部横向导航栏高度（按钮在里面垂直居中）
+高度_顶栏 = 64
+#: 顶部栏的最小宽度：小于它就让外层横向滚动，而不是把按钮压扁
+最小顶栏宽 = 1180
+#: 顶部栏里的网盘按钮宽度（横排要按内容给宽，不能像竖排那样固定 74px）
+宽度_网盘按钮 = 108
+宽度_网盘按钮上限 = 190
 
-#: 左侧栏各类按钮的固定高度。
+#: 顶部栏各类按钮的固定高度。
 #: 为什么要单独拎出来 + 每次套完主题重新钉一遍：主题 QSS 给按钮写了
 #: ``padding: 12px 6px``，Qt 的样式引擎会据此把控件的**最小高度**改成
 #: 「文字高 + 上下内边距」（60px 会被压成 42px）；窗口一矮，布局就一路把按钮
 #: 挤到那个最小高度——按钮变矮、两行文字被裁掉。所以高度必须由代码说了算，
-#: 见 :meth:`主窗口._钉死左侧栏尺寸`。
+#: 见 :meth:`主窗口._钉死左侧栏尺寸`（名字沿用，实际钉的是顶部栏）。
 
 
 class 日志桥(QObject):
@@ -82,9 +89,9 @@ class 空状态页(QWidget):
         标题.setStyleSheet("font-size: 18px; font-weight: bold;")
         布局.addWidget(标题)
         说明 = QLabel(
-            "点击左下角的「➕ 新增网盘」添加百度 / 光鸭 / 夸克网盘，\n"
+            "点击顶部右侧的「➕ 新增」添加百度 / 光鸭 / 夸克网盘，\n"
             "同一家网盘可以添加多个实例（各自一份适配器目录，凭证互不干扰）。\n"
-            "加好后每个网盘会在左侧导航栏各占一个按钮，点击即切换页面。")
+            "加好后每个网盘会在顶部导航栏各占一个按钮，点击即切换页面。")
         说明.setAlignment(Qt.AlignCenter)
         说明.setWordWrap(True)
         布局.addWidget(说明)
@@ -213,11 +220,11 @@ class 主窗口(QMainWindow):
     def _构建界面(self):
         中央 = QWidget()
         self.setCentralWidget(中央)
-        主布局 = QHBoxLayout(中央)
-        主布局.setSpacing(10)
+        主布局 = QVBoxLayout(中央)          # 导航从左侧竖排改成**顶部横排**
+        主布局.setSpacing(8)
         主布局.setContentsMargins(10, 10, 10, 10)
 
-        主布局.addWidget(self._构建左侧栏())
+        主布局.addWidget(self._构建顶部导航())
 
         安装中文翻译(self)
         self._页面外框: dict[int, QWidget] = {}   # id(页面) → 它的滚动外框
@@ -299,152 +306,144 @@ class 主窗口(QMainWindow):
     def AI运行时(self):
         return self._确保AI()
 
-    def _构建左侧栏(self) -> QWidget:
-        """左侧竖向导航栏。
+    def _构建顶部导航(self) -> QWidget:
+        """顶部横向导航栏（用户要求：左侧竖排太挤，改成顶部横排）。
 
-        高度**不随内容变**：整根栏目固定占满窗口高度，按钮保持各自的高度；
-        内容装不下时出现纵向滚动条（上下滑动看溢出的按钮），而不是把按钮压扁。
-        所以这里是「外层滚动区（整栏）+ 内层滚动区（只有网盘按钮）」两层：
-        网盘多到放不下时内层先滚，功能按钮（传输/播放/敏感词/AI/日志）始终露着。
+        布局（一行，全宽）：
+            网盘 ▸ [🅱 百度网盘] [🦆 光鸭云盘] [🅠 夸克网盘] …   ← 横向滚动
+            ｜ 📤 传输  🎬 播放  🔒 敏感词  🤖 AI  📋 日志  ⚙ 设置
+            …（右侧）➕ 新增  ✏️ 编辑  🗑 删除  ⏻ 退出
+
+        * 网盘按钮放在**横向滚动区**里：网盘再多也不会把功能按钮挤出去；
+        * 整条栏再套一层横向滚动区：窗口很窄时不会把按钮压扁（只出滚动条）；
+        * 按钮高度统一钉死（主题 QSS 的 padding 会改最小高度，所以要在套完主题后再钉一次）。
         """
-        列 = QWidget()
-        列.setFixedWidth(导航宽度)
-        列布局 = QVBoxLayout(列)
-        列布局.setContentsMargins(0, 0, 0, 0)
-        列布局.setSpacing(0)
+        外层 = QScrollArea()
+        外层.setObjectName("TopBarScroll")
+        外层.setFrameShape(QScrollArea.NoFrame)
+        外层.setWidgetResizable(True)
+        外层.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        外层.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        外层.setFixedHeight(高度_顶栏)
+        外层.viewport().setAutoFillBackground(False)
 
-        # 整栏都在滚动区里：窗口再矮也只是出滚动条，绝不压扁按钮
-        self.导航滚动区 = QScrollArea()
-        self.导航滚动区.setObjectName("NavScroll")
-        self.导航滚动区.setWidgetResizable(True)
-        self.导航滚动区.setFrameShape(QScrollArea.NoFrame)
-        self.导航滚动区.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.导航滚动区.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.导航滚动区.viewport().setAutoFillBackground(False)
+        栏 = QWidget()
+        栏.setObjectName("TopBar")
+        栏.setMinimumWidth(最小顶栏宽)
+        行 = QHBoxLayout(栏)
+        行.setContentsMargins(10, 6, 10, 6)
+        行.setSpacing(6)
 
-        self.导航内容 = QWidget()
-        self.导航内容.setObjectName("NavScroll")
-        内容布局 = QVBoxLayout(self.导航内容)
-        内容布局.setContentsMargins(0, 0, 0, 0)
-        内容布局.setSpacing(8)
-
-        # ---- 上：导航面板（网盘按钮 + 传输/日志）----
-        导航 = QWidget()
-        导航.setObjectName("NavPanel")
-        导航布局 = QVBoxLayout(导航)
-        导航布局.setContentsMargins(6, 10, 6, 10)
-        导航布局.setSpacing(6)
-
+        # ---------------- 左：网盘（横向滚动） ----------------
         标题 = QLabel("网盘")
         标题.setObjectName("NavTitle")
-        标题.setAlignment(Qt.AlignCenter)
-        导航布局.addWidget(标题)
+        行.addWidget(标题)
 
-        # 网盘按钮放在滚动区里：数量超出高度就在面板内部滚动
         self.网盘滚动区 = QScrollArea()
         self.网盘滚动区.setObjectName("NavScroll")
-        self.网盘滚动区.setWidgetResizable(True)
         self.网盘滚动区.setFrameShape(QScrollArea.NoFrame)
-        self.网盘滚动区.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.网盘滚动区.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.网盘滚动区.setWidgetResizable(True)
+        self.网盘滚动区.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.网盘滚动区.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.网盘滚动区.setFixedHeight(高度_网盘按钮 + 12)
+        self.网盘滚动区.setMinimumWidth(240)      # 至少露出一个半按钮
         self.网盘滚动区.viewport().setAutoFillBackground(False)
         self.网盘按钮容器 = QWidget()
         self.网盘按钮容器.setObjectName("NavScroll")
-        self.网盘按钮布局 = QVBoxLayout(self.网盘按钮容器)
+        self.网盘按钮布局 = QHBoxLayout(self.网盘按钮容器)
         self.网盘按钮布局.setContentsMargins(0, 0, 0, 0)
         self.网盘按钮布局.setSpacing(6)
         self.网盘按钮布局.addStretch(1)
         self.网盘滚动区.setWidget(self.网盘按钮容器)
-        self.网盘滚动区.setMinimumHeight(120)   # 再矮也至少露出两个网盘按钮
-        导航布局.addWidget(self.网盘滚动区, 1)
+        行.addWidget(self.网盘滚动区, 1)
 
+        行.addWidget(self._建分隔线())
+
+        # ---------------- 中：功能 ----------------
         功能标题 = QLabel("功能")
         功能标题.setObjectName("NavTitle")
-        功能标题.setAlignment(Qt.AlignCenter)
-        导航布局.addWidget(功能标题)
+        行.addWidget(功能标题)
 
-        self.传输按钮 = QPushButton("📤\n传输")
+        self.传输按钮 = QPushButton("📤 传输")
         self.传输按钮.setFixedHeight(高度_功能按钮)
         self.传输按钮.clicked.connect(self.切换到传输页)
-        导航布局.addWidget(self.传输按钮)
+        行.addWidget(self.传输按钮)
 
-        self.播放按钮 = QPushButton("🎬\n播放")
+        self.播放按钮 = QPushButton("🎬 播放")
         self.播放按钮.setFixedHeight(高度_功能按钮)
         self.播放按钮.setToolTip(
             "播放网盘里的视频（VLC 内核内嵌播放，AI 辅助加载/字幕/总结）")
         self.播放按钮.clicked.connect(self.切换到播放页)
-        导航布局.addWidget(self.播放按钮)
+        行.addWidget(self.播放按钮)
 
-        self.敏感词按钮 = QPushButton("🔒\n敏感词")
+        self.敏感词按钮 = QPushButton("🔒 敏感词")
         self.敏感词按钮.setFixedHeight(高度_功能按钮)
         self.敏感词按钮.setToolTip("敏感词库 + 上传预检改名 + 改名记录")
         self.敏感词按钮.clicked.connect(self.切换到敏感词页)
-        导航布局.addWidget(self.敏感词按钮)
+        行.addWidget(self.敏感词按钮)
 
-        self.AI按钮 = QPushButton("🤖\nAI")
+        self.AI按钮 = QPushButton("🤖 AI")
         self.AI按钮.setFixedHeight(高度_功能按钮)
         self.AI按钮.setToolTip("DeepSeek 余额/价格/模型与 AI 调度统计")
         self.AI按钮.clicked.connect(self.切换到AI页)
-        导航布局.addWidget(self.AI按钮)
+        行.addWidget(self.AI按钮)
 
-        self.日志按钮 = QPushButton("📋\n日志")
+        self.日志按钮 = QPushButton("📋 日志")
         self.日志按钮.setFixedHeight(高度_功能按钮)
         self.日志按钮.clicked.connect(self.切换到日志页)
-        导航布局.addWidget(self.日志按钮)
+        行.addWidget(self.日志按钮)
 
-        self.设置按钮 = QPushButton("⚙\n设置")
+        self.设置按钮 = QPushButton("⚙ 设置")
         self.设置按钮.setFixedHeight(高度_功能按钮)
         self.设置按钮.setToolTip("软件更新（一键从 GitHub 更新）、联系作者、关于")
         self.设置按钮.clicked.connect(self.切换到设置页)
-        导航布局.addWidget(self.设置按钮)
+        行.addWidget(self.设置按钮)
 
-        内容布局.addWidget(导航)
+        行.addWidget(self._建分隔线())
 
-        # ---- 下：网盘管理面板（新增/编辑/删除）----
-        管理 = QWidget()
-        管理.setObjectName("ManagePanel")
-        管理布局 = QVBoxLayout(管理)
-        管理布局.setContentsMargins(6, 10, 6, 10)
-        管理布局.setSpacing(6)
-
+        # ---------------- 右：网盘管理 ----------------
         管理标题 = QLabel("网盘管理")
         管理标题.setObjectName("NavTitle")
-        管理标题.setAlignment(Qt.AlignCenter)
-        管理布局.addWidget(管理标题)
+        行.addWidget(管理标题)
 
-        self.新增按钮 = QPushButton("➕\n新增网盘")
+        self.新增按钮 = QPushButton("➕ 新增")
         self.新增按钮.setFixedHeight(高度_管理按钮)
         self.新增按钮.setToolTip("添加网盘实例（同一家网盘可加多个账号）")
         self.新增按钮.clicked.connect(self.新增网盘)
-        管理布局.addWidget(self.新增按钮)
+        行.addWidget(self.新增按钮)
 
-        self.编辑按钮 = QPushButton("✏️\n编辑网盘")
+        self.编辑按钮 = QPushButton("✏️ 编辑")
         self.编辑按钮.setFixedHeight(高度_管理按钮)
         self.编辑按钮.setToolTip("修改当前网盘的名称/目录/线程数/启用状态")
         self.编辑按钮.clicked.connect(self.编辑当前网盘)
-        管理布局.addWidget(self.编辑按钮)
+        行.addWidget(self.编辑按钮)
 
-        self.删除按钮 = QPushButton("🗑\n删除网盘")
+        self.删除按钮 = QPushButton("🗑 删除")
         self.删除按钮.setFixedHeight(高度_管理按钮)
         self.删除按钮.setObjectName("DeleteButton")
         self.删除按钮.setToolTip("从配置里移除当前网盘（不动适配器目录和登录数据）")
         self.删除按钮.clicked.connect(self.删除当前网盘)
-        管理布局.addWidget(self.删除按钮)
+        行.addWidget(self.删除按钮)
 
-        self.退出按钮 = QPushButton("⏻\n退出程序")
+        self.退出按钮 = QPushButton("⏻ 退出")
         self.退出按钮.setFixedHeight(高度_管理按钮)
         self.退出按钮.setToolTip("关闭网盘管理（会先停掉正在跑的传输并清理后台进程）")
         self.退出按钮.clicked.connect(self.close)
-        管理布局.addWidget(self.退出按钮)
+        行.addWidget(self.退出按钮)
 
-        # 多出来的高度全给导航面板（它会喂给内部的网盘列表，多露几个网盘按钮），
-        # 「网盘管理」自然被顶到底部；不够高时整体上下滚动，绝不压缩按钮。
-        内容布局.addWidget(导航, 1)
-        内容布局.addWidget(管理)
+        行.addStretch(0)
+        外层.setWidget(栏)
+        return 外层
 
-        self.导航滚动区.setWidget(self.导航内容)
-        列布局.addWidget(self.导航滚动区)
-        return 列
+    @staticmethod
+    def _建分隔线() -> QWidget:
+        """顶部栏里的竖分隔线（把 网盘 / 功能 / 管理 三段分开，别再挤在一起）。"""
+        线 = QWidget()
+        线.setObjectName("TopBarSep")
+        线.setFixedWidth(1)
+        线.setFixedHeight(高度_功能按钮 - 12)
+        return 线
+
 
     # ==================== 网盘导航（动态） ====================
 
@@ -465,11 +464,15 @@ class 主窗口(QMainWindow):
             规格 = 规格表.get(标识)
             图标 = 规格.图标 if 规格 else "☁"
             显示名 = str(实例["名称"])
-            按钮 = QPushButton(f"{图标}\n{显示名 if len(显示名) <= 6 else 显示名[:5] + '…'}")
+            # 横排：图标 + 名字一行显示（竖排时代用 \n 分两行）
+            简称 = 显示名 if len(显示名) <= 8 else 显示名[:7] + "…"
+            按钮 = QPushButton(f"{图标} {简称}")
             按钮.setProperty("navCloud", True)
             按钮.setFixedHeight(高度_网盘按钮)
             按钮.setToolTip(f"{实例['名称']}（{标识}）\n{实例['路径']}")
             按钮.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            按钮.setMinimumWidth(宽度_网盘按钮)
+            按钮.setMaximumWidth(宽度_网盘按钮上限)
             按钮.clicked.connect(lambda _=False, i=标识: self.切换网盘页(i))
             按钮.setContextMenuPolicy(Qt.CustomContextMenu)
             按钮.customContextMenuRequested.connect(
@@ -873,7 +876,7 @@ class 主窗口(QMainWindow):
         self.追加日志(f"已切换主题：{主题管理器.获取主题显示名(主题名)}")
 
     def _钉死左侧栏尺寸(self):
-        """把左侧栏按钮的高度重新钉死。
+        """把顶部导航按钮的高度重新钉死（名字沿用，见下）。
 
         必须在**每次套完主题之后**调用：主题 QSS 的 ``padding`` 会让 Qt 把握件的
         最小高度改成「文字高 + 上下内边距」，``setFixedHeight`` 设的 60px 会被压成
@@ -887,11 +890,24 @@ class 主窗口(QMainWindow):
             if 按钮 is not None:
                 按钮.setFixedHeight(高度_功能按钮)
         for 按钮 in (getattr(self, "新增按钮", None), getattr(self, "编辑按钮", None),
-                   getattr(self, "删除按钮", None)):
+                   getattr(self, "删除按钮", None),
+                   getattr(self, "退出按钮", None)):
             if 按钮 is not None:
                 按钮.setFixedHeight(高度_管理按钮)
         for 按钮 in getattr(self, "_网盘按钮", {}).values():
             按钮.setFixedHeight(高度_网盘按钮)
+            # 横排：宽按内容自适应（给个上下限），别像竖排那样固定宽度
+            按钮.setMinimumWidth(宽度_网盘按钮)
+            按钮.setMaximumWidth(宽度_网盘按钮上限)
+        容器 = getattr(self, "网盘按钮容器", None)
+        滚动 = getattr(self, "网盘滚动区", None)
+        if 容器 is not None and getattr(self, "_网盘按钮", None):
+            需要 = len(self._网盘按钮) * (宽度_网盘按钮 + 6) + 8
+            容器.setMinimumWidth(需要)
+            # 按内容收窄：网盘少的时候别把「功能」那一段推到最右边
+            if 滚动 is not None:
+                滚动.setMaximumWidth(min(需要 + 18, 宽度_网盘按钮上限 * 6))
+                滚动.setMinimumWidth(min(需要 + 18, 240))
 
     def _应用主题(self, 主题名: str):
         主题名 = 主题名 or 主题管理器.获取默认主题()

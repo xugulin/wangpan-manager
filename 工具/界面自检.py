@@ -127,21 +127,38 @@ def main() -> int:
     配置 = 建测试环境(根)
     应用 = QApplication.instance() or QApplication(sys.argv[:1])
 
-    print("\n[1] 主窗口与左侧导航")
+    print("\n[1] 主窗口与顶部导航（用户要求：导航从左侧竖排改成顶部横排）")
     窗口 = 主窗口(dict(配置), 配置路径=根 / "配置.json")
     窗口.show()
     QApplication.processEvents()
-    检查(len(窗口._网盘按钮) == 2, "左侧导航为每个启用的网盘生成按钮（2 个）")
+    检查(len(窗口._网盘按钮) == 2, "顶部导航为每个启用的网盘生成按钮（2 个）")
     检查(hasattr(窗口, "新增按钮") and hasattr(窗口, "编辑按钮")
-         and hasattr(窗口, "删除按钮"), "左下角存在 新增/编辑/删除 管理面板")
+         and hasattr(窗口, "删除按钮"), "顶部右侧存在 新增/编辑/删除 管理按钮")
     检查(窗口.网盘滚动区.widget() is 窗口.网盘按钮容器,
-         "网盘按钮放在可滚动区域里（高度不够时内部滚动）")
-    检查(窗口.网盘滚动区.horizontalScrollBarPolicy().name
-         == "ScrollBarAlwaysOff", "导航滚动区不出现横向滚动条")
+         "网盘按钮放在横向滚动区里（网盘再多也不会挤掉功能按钮）")
+    检查(窗口.网盘滚动区.horizontalScrollBarPolicy().name in
+         ("ScrollBarAsNeeded", "ScrollBarAlwaysOn"),
+         "网盘横向滚动区允许左右滚动")
+    检查(窗口.网盘滚动区.verticalScrollBarPolicy().name == "ScrollBarAlwaysOff",
+         "网盘按钮区不出现纵向滚动条（横排不需要）")
+    # 顶部横排的关键：导航在页面**上方**，且占满整宽
+    布局 = 窗口.centralWidget().layout()
+    检查(type(布局).__name__ == "QVBoxLayout",
+         f"主布局是竖排（顶部栏 + 页面堆叠）：{type(布局).__name__}")
+    顶栏 = 布局.itemAt(0).widget()
+    检查(顶栏 is not None and 顶栏.height() <= 80,
+         f"顶部栏高度克制（{顶栏.height() if 顶栏 else '-'}px），不占页面高度")
+    检查(顶栏.width() > 窗口.width() * 0.8,
+         f"顶部栏横向铺满（{顶栏.width()} / 窗口 {窗口.width()}）")
+    # 三段顺序：网盘 → 功能 → 网盘管理（从左到右）
+    横坐标 = {名: getattr(窗口, 名).mapTo(顶栏, QPoint(0, 0)).x()
+            for 名 in ("传输按钮", "新增按钮")}
+    云按钮x = next(iter(窗口._网盘按钮.values())).mapTo(顶栏, QPoint(0, 0)).x()
+    检查(云按钮x < 横坐标["传输按钮"] < 横坐标["新增按钮"],
+         f"三段从左到右排开：网盘({云按钮x}) < 功能({横坐标['传输按钮']}) "
+         f"< 管理({横坐标['新增按钮']})")
 
-    print("\n[1b] 左侧导航：窗口变矮不压扁按钮，改为上下滚动")
-    列 = 窗口.centralWidget().layout().itemAt(0).widget()
-    检查(列.width() == 74, f"左侧栏宽度固定 74px（实际 {列.width()}）")
+    print("\n[1b] 顶部导航：窗口变矮/变窄都不压扁按钮")
     原尺寸 = 窗口.size()
 
     def 三个按钮高度() -> tuple[int, int, int]:
@@ -151,29 +168,25 @@ def main() -> int:
     窗口.resize(QSize(窗口.width(), 1000))
     泵(0.25)
     高时 = 三个按钮高度()
-    检查(窗口.导航滚动区.verticalScrollBar().maximum() == 0,
-         "窗口够高时左侧栏不出滚动条（不白占地方）")
-
     窗口.resize(QSize(窗口.width(), 620))
     泵(0.3)
     矮时 = 三个按钮高度()
     检查(高时 == 矮时 == (60, 52, 58),
          f"窗口变矮按钮高度不变：高 {高时} / 矮 {矮时}"
          "（主题 QSS 的 padding 不会再把它们压扁）")
-    检查(窗口.导航滚动区.horizontalScrollBarPolicy().name == "ScrollBarAlwaysOff",
-         "左侧栏不出现横向滚动条")
-    滚动条 = 窗口.导航滚动区.verticalScrollBar()
-    检查(滚动条.maximum() > 0 and 滚动条.isVisible(),
-         f"装不下时出现纵向滚动条（可滚 {滚动条.maximum()}px）")
-    滚动条.setValue(滚动条.maximum())
-    泵(0.2)
-    视口 = 窗口.导航滚动区.viewport()
-    位置 = 窗口.删除按钮.mapTo(视口, QPoint(0, 0))
-    检查(位置.y() >= 0 and 位置.y() + 窗口.删除按钮.height() <= 视口.height() + 2,
-         f"滚到底部能看到「删除网盘」（y={位置.y()}，视口高 {视口.height()}）")
-    检查(窗口.删除按钮.height() == 52,
-         "滚动不会把底部的「删除网盘」压扁")
-    滚动条.setValue(0)
+    检查(窗口.网盘滚动区.height() >= 58,
+         f"网盘按钮区高度不被压扁（{窗口.网盘滚动区.height()}px）")
+    # 窗口很窄：外层横向滚动，而不是把按钮压扁
+    窗口.resize(QSize(760, 700))
+    泵(0.3)
+    窄时 = 三个按钮高度()
+    检查(窄时 == (60, 52, 58),
+         f"窗口变窄按钮也不变形：{窄时}")
+    外层 = 窗口.centralWidget().layout().itemAt(0).widget()
+    横滚 = 外层.horizontalScrollBar()
+    检查(横滚.maximum() > 0,
+         f"窗口太窄时出现横向滚动条（可滑 {横滚.maximum()}px），"
+         "靠滑动看全，而不是把按钮挤扁")
     窗口.resize(原尺寸)
     泵(0.2)
 
@@ -526,7 +539,7 @@ def main() -> int:
     检查("完成 3" in 传输页.统计标签.text() or "完成" in 传输页.统计标签.text(),
          f"统计标签显示结果：{传输页.统计标签.text()}")
 
-    print("\n[11] 导航栏溢出时内部滚动（12 个网盘）")
+    print("\n[11] 顶部导航：网盘很多时横向滚动（12 个网盘）")
     多配置 = 加载配置(根 / "配置.json")
     多配置["适配器"] = [
         {"标识": f"fake_{i}", "类型": "fake", "名称": f"测试网盘{i}",
@@ -538,16 +551,18 @@ def main() -> int:
     多窗口.show()
     泵(0.3)
     检查(len(多窗口._网盘按钮) == 12, "12 个网盘各生成一个按钮")
-    内容高 = 多窗口.网盘按钮容器.sizeHint().height()
-    视口高 = 多窗口.网盘滚动区.viewport().height()
-    检查(内容高 > 视口高,
-         f"按钮总高 {内容高}px 超出可视高度 {视口高}px（可滚动）")
-    滚动条 = 多窗口.网盘滚动区.verticalScrollBar()
+    内容宽 = 多窗口.网盘按钮容器.sizeHint().width()
+    视口宽 = 多窗口.网盘滚动区.viewport().width()
+    检查(内容宽 > 视口宽,
+         f"按钮总宽 {内容宽}px 超出可视宽度 {视口宽}px（可横向滚动）")
+    滚动条 = 多窗口.网盘滚动区.horizontalScrollBar()
     检查(滚动条.maximum() > 0,
-         f"纵向滚动条出现且范围 {滚动条.minimum()}–{滚动条.maximum()}")
+         f"横向滚动条出现且范围 {滚动条.minimum()}–{滚动条.maximum()}")
     滚动条.setValue(滚动条.maximum())
     泵(0.1)
-    检查(滚动条.value() == 滚动条.maximum(), "可以滚动到底部按钮")
+    检查(滚动条.value() == 滚动条.maximum(), "可以横向滚动到最后一个网盘")
+    检查(多窗口.传输按钮.isVisible(),
+         "网盘再多也不会把「功能」那段挤出可视区（顶部横排的好处）")
     检查(多窗口.当前页面() is not None, "溢出时仍正常显示当前页")
     多窗口.close()
     泵(0.3)
@@ -563,7 +578,7 @@ def main() -> int:
     检查(空窗口._空状态页 is not None
          and 空窗口.当前页面() is 空窗口._空状态页,
          "没有配置网盘时显示「还没有配置任何网盘」空状态页")
-    检查(not 空窗口._网盘按钮, "空状态下左侧没有网盘按钮")
+    检查(not 空窗口._网盘按钮, "空状态下顶部没有网盘按钮")
     检查(not 空窗口.编辑按钮.isEnabled() and not 空窗口.删除按钮.isEnabled(),
          "空状态下「编辑/删除」按钮不可点")
     空窗口.close()

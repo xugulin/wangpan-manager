@@ -865,7 +865,83 @@ QSplitter::handle {{
     background-color: {c['边框']};
 }}
 
-/* ---------------- 导航面板 ---------------- */
+/* ---------------- 顶部导航栏（V8_3：从左侧竖排改成顶部横排） ---------------- */
+QWidget#TopBar {{
+    background-color: {c['导航背景']};
+    border-radius: 8px;
+}}
+QScrollArea#TopBarScroll, QScrollArea#TopBarScroll > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+QWidget#TopBar QLabel#NavTitle {{
+    color: {c['导航文字']};
+    font-size: 12px;
+    font-weight: bold;
+    padding: 0 4px;
+}}
+QWidget#TopBar QWidget#TopBarSep {{
+    background-color: {c['边框']};
+    border: none;
+}}
+QWidget#TopBar QPushButton {{
+    background: transparent;
+    color: {c['导航文字']};
+    border: none;
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-weight: bold;
+    text-align: center;
+}}
+QWidget#TopBar QPushButton:hover {{
+    background-color: {c['导航悬停']};
+}}
+QWidget#TopBar QPushButton:pressed {{
+    background-color: {c['选中背景']};
+    color: {c['选中文字']};
+}}
+QWidget#TopBar QPushButton#active {{
+    background-color: {c['导航激活']};
+    color: {c['背景']};
+}}
+QWidget#TopBar QPushButton[navCloud="true"] {{
+    font-size: 12px;
+    padding: 6px 10px;
+    min-height: {高度_网盘按钮 - 12}px;
+}}
+/* 顶部栏的横向滚动条也收窄成细条 */
+QScrollArea#TopBarScroll QScrollBar:horizontal,
+QScrollArea#NavScroll QScrollBar:horizontal {{
+    background: transparent;
+    height: 6px;
+    margin: 0;
+    border: none;
+}}
+QScrollArea#TopBarScroll QScrollBar::handle:horizontal,
+QScrollArea#NavScroll QScrollBar::handle:horizontal {{
+    background: {c['边框']};
+    min-width: 24px;
+    border-radius: 3px;
+    margin: 0;
+}}
+QScrollArea#TopBarScroll QScrollBar::handle:horizontal:hover,
+QScrollArea#NavScroll QScrollBar::handle:horizontal:hover {{
+    background: {c['导航悬停']};
+}}
+QScrollArea#TopBarScroll QScrollBar::add-line:horizontal,
+QScrollArea#TopBarScroll QScrollBar::sub-line:horizontal,
+QScrollArea#TopBarScroll QScrollBar::add-page:horizontal,
+QScrollArea#TopBarScroll QScrollBar::sub-page:horizontal,
+QScrollArea#NavScroll QScrollBar::add-line:horizontal,
+QScrollArea#NavScroll QScrollBar::sub-line:horizontal,
+QScrollArea#NavScroll QScrollBar::add-page:horizontal,
+QScrollArea#NavScroll QScrollBar::sub-page:horizontal {{
+    background: transparent;
+    width: 0;
+}}
+
+/* ---------------- 导航面板（旧版左侧竖排；保留以免旧控件没样式） ---------------- */
 QWidget#NavPanel {{
     background-color: {c['导航背景']};
     border-radius: 8px;
@@ -944,7 +1020,10 @@ QToolTip {{
     padding: 4px 8px;
 }}
 
-/* ---------------- V8_3：左侧网盘按钮（名称比 V8 长，字号收小） ---------------- */
+/* ---------------- V8_3：网盘按钮（顶部横排；名称比 V8 长，字号收小） ---------------- */
+QWidget#TopBar QPushButton[navCloud="true"]:hover {{
+    background-color: {c['导航悬停']};
+}}
 QWidget#NavPanel QPushButton[navCloud="true"] {{
     font-size: 11px;
     padding: 6px 2px;
