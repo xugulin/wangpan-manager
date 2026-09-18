@@ -29,6 +29,25 @@ mv 语音识别/python 语音识别/临时 2>/dev/null || true
 uv pip install --python-platform windows --python-version 3.14 \
   --target ./语音识别/python/Lib/site-packages -r /tmp/asr包.txt 2>&1 | tail -3
 
-echo "=== ⑤ 体积 ==="
+echo "=== ⑤ 便携 ollama 运行时（Windows 版，不含模型权重）==="
+# 用户要求：打包预装基础 ollama，但不预装任何模型权重。
+# 有就跳过；下不动也不让整个构建失败（用户可在 AI 页点「装运行时」补装）。
+if [ ! -f 本地模型/ollama.exe ]; then
+  mkdir -p 本地模型
+  echo "  下载 ollama-windows-amd64.zip…"
+  if curl -fL --retry 3 -o ollama-win.zip https://ollama.com/download/ollama-windows-amd64.zip; then
+    if command -v unzip >/dev/null 2>&1; then
+      unzip -q -o ollama-win.zip -d 本地模型 || true
+    else
+      7z x -y -o本地模型 ollama-win.zip >/dev/null || true
+    fi
+    rm -f ollama-win.zip
+  else
+    echo "  ⚠️ ollama 下载失败：这个 Windows 包将不含 ollama（AI 页可补装）"
+  fi
+fi
+ls -la 本地模型 2>/dev/null | head -5 || true
+
+echo "=== ⑥ 体积 ==="
 du -sh python主 语音识别
 echo "WINDOWS_RUNTIME_DONE"

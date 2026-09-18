@@ -236,6 +236,26 @@ def 服务日志路径() -> Path:
     return Path(__file__).resolve().parents[2] / "数据" / "本地模型" / "serve.log"
 
 
+def 模型环境() -> dict:
+    """CLI 与服务端**必须**用同一套环境。
+
+    ⚠️ 关键：``ollama`` 的 CLI 默认把模型放在 ``~/.ollama/models``，
+    而我们的服务端是用 ``OLLAMA_MODELS=数据/本地模型/模型`` 拉起来的。
+    以前 CLI 侧的 list/rm/pull 不带这个变量，就会出现：
+      * "本机已装模型"永远读成空（其实装在项目目录里）；
+      * `ollama rm` 去删服务端根本不认识的地方，报连不上服务。
+    统一走这个函数，两边看到的是同一个仓库。
+    """
+    环境 = os.environ.copy()
+    环境.setdefault("OLLAMA_HOST", "127.0.0.1:11434")
+    try:
+        模型仓库目录().mkdir(parents=True, exist_ok=True)
+        环境["OLLAMA_MODELS"] = str(模型仓库目录())
+    except Exception:
+        pass
+    return 环境
+
+
 def _找可执行文件() -> str:
     """找 ollama 可执行文件：项目内便携版 → PATH → 用户目录 → 常见位置。"""
     项目内 = 项目内可执行文件()
@@ -635,14 +655,9 @@ class 本地模型客户端:
         try:
             日志文件.parent.mkdir(parents=True, exist_ok=True)
             句柄 = 日志文件.open("a", encoding="utf-8")
-            环境 = os.environ.copy()
-            环境.setdefault("OLLAMA_HOST", "127.0.0.1:11434")
-            # 模型权重也放项目里：这样整个文件夹可搬走、删掉不留残留
-            try:
-                模型仓库目录().mkdir(parents=True, exist_ok=True)
-                环境.setdefault("OLLAMA_MODELS", str(模型仓库目录()))
-            except Exception:
-                pass
+            # 模型权重放项目里：整个文件夹可搬走、删掉不留残留。
+            # 用 模型环境() 保证 CLI 与服务端看到同一个仓库。
+            环境 = 模型环境()
             self._进程 = subprocess.Popen(
                 [可执行, "serve"], stdout=句柄, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, env=环境,
@@ -656,6 +671,19 @@ class 本地模型客户端:
             if 新状态.可用:
                 return True, f"已启动 ollama serve（{新状态.地址}）"
         return False, f"启动了但 {等待秒:.0f} 秒内没就绪，日志：{日志文件}"
+
+    def 确保服务在跑(self, 等待秒: float = 40.0) -> tuple[bool, str]:
+        """装了运行时但服务没起来时，**自动拉起**再干活（用户不用先点「启动服务」）。
+
+        `ollama pull/rm/list` 都需要一个在跑的服务端；只装了 CLI 时，
+        用户会看到 "could not connect to ollama server" 一头雾水。
+        """
+        地址 = self._服务端地址()
+        if 地址:
+            return True, f"服务已在运行：{地址}"
+        if not _找可执行文件():
+            return False, "没找到 ollama 可执行文件（先点「⬇️ 装运行时」）"
+        return self.启动服务(等待秒=等待秒)
 
     def 拉取模型(self, 模型: str = "", *, 超时秒: float = 3600.0) -> tuple[bool, str]:
         """``ollama pull <模型>``（阻塞；界面里请放到后台线程跑）。"""
@@ -675,7 +703,250 @@ class 本地模型客户端:
         self._状态 = None                 # 下次检测重新读模型列表
         return True, f"已拉取 {模型}"
 
+    # ---------------- 模型市场（本机已装 / 装·卸·升级） ----------------
+
+    def 已装模型(self) -> dict[str, dict]:
+        """本机已下载的模型：``{模型名: {"大小": 字节, "修改时间": str}}``。
+
+        ollama 没装/没跑时返回空字典（不抛异常，界面按"未安装"处理）。
+        """
+        可执行 = _找可执行文件()
+        if 可执行:
+            try:
+                进程 = subprocess.run([可执行, "list"], capture_output=True,
+                                    text=True, timeout=30, encoding="utf-8",
+                                    errors="replace", env=模型环境())
+                if 进程.returncode == 0:
+                    结果 = _解析ollama列表(进程.stdout or "")
+                    if 结果:
+                        return 结果
+            except Exception:
+                pass
+        # 退路：本机服务在跑就问它的 /api/tags
+        try:
+            客户端 = self._客户端(超时秒=5.0)
+            try:
+                for _提供方, 地址 in self._候选地址():
+                    try:
+                        响应 = 客户端.get(f"{地址}/api/tags")
+                        响应.raise_for_status()
+                        结果 = {}
+                        for m in (响应.json() or {}).get("models", []):
+                            名字 = str(m.get("name") or "")
+                            if 名字:
+                                结果[名字] = {
+                                    "大小": int(m.get("size") or 0),
+                                    "修改时间": str(m.get("modified_at") or "")}
+                        if 结果:
+                            return 结果
+                    except Exception:
+                        continue
+            finally:
+                客户端.close()
+        except Exception:
+            pass
+        return {}
+
+    def _服务端地址(self, 超时秒: float = 2.5) -> str:
+        """正在运行的 ollama 服务地址；没在跑就返回 ""（每个候选端口只戳一下）。"""
+        if httpx is None:
+            return ""
+        try:
+            客户端 = self._客户端(超时秒=超时秒)
+        except Exception:
+            return ""
+        try:
+            for 提供方, 地址 in self._候选地址():
+                if 提供方 != "ollama":
+                    continue
+                try:
+                    响应 = 客户端.get(f"{地址}/api/version")
+                    if 响应.status_code == 200:
+                        return 地址
+                except Exception:
+                    continue
+        finally:
+            try:
+                客户端.close()
+            except Exception:
+                pass
+        return ""
+
+    def 删除模型(self, 模型: str) -> tuple[bool, str]:
+        """卸载模型（``ollama rm``）。"""
+        模型 = str(模型 or "").strip()
+        if not 模型:
+            return False, "模型名为空"
+        # ① 服务在跑 → 直接让服务端删（它才知道自己把模型存在哪）
+        服务端 = self._服务端地址()
+        if 服务端:
+            try:
+                客户端 = self._客户端(超时秒=20.0)
+                try:
+                    响应 = 客户端.request(
+                        "DELETE", f"{服务端}/api/delete", json={"model": 模型})
+                    if 200 <= 响应.status_code < 300:
+                        self._状态 = None
+                        return True, f"已卸载 {模型}"
+                finally:
+                    客户端.close()
+            except Exception:
+                pass
+        可执行 = _找可执行文件()
+        if not 可执行:
+            return False, "没找到 ollama 可执行文件（也没检测到正在运行的 ollama 服务）"
+        try:
+            进程 = subprocess.run([可执行, "rm", 模型], capture_output=True,
+                                text=True, timeout=120, encoding="utf-8",
+                                errors="replace", env=模型环境())
+        except Exception as e:  # noqa: BLE001
+            return False, f"卸载失败：{type(e).__name__}: {e}"
+        if 进程.returncode != 0:
+            return False, (进程.stderr or 进程.stdout or "").strip()[-300:]
+        self._状态 = None
+        return True, f"已卸载 {模型}"
+
+    @staticmethod
+    def _净进度(片段: str) -> str:
+        """洗掉 ollama 进度里的终端控制码/转圈动画。
+
+        `ollama pull` 在非 tty 下也会吐 ``\x1b[?25l``、``\r``、竖排 spinner
+        （``⠋⠙⠹…``），原样打进界面状态栏就是一串乱码方框。
+        这里去掉 ANSI 转义、去掉 spinner 字符，并压缩连续空格。
+        """
+        import re as _re
+        文本 = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", str(片段 or ""))
+        文本 = _re.sub(r"[⠁-⣿]", "", 文本)
+        文本 = _re.sub(r"\s{2,}", " ", 文本).strip()
+        return 文本
+
+    def 拉取模型_带进度(self, 模型: str, 进度回调=None,
+                     取消事件=None) -> tuple[bool, str]:
+        """带进度的 ``ollama pull``（界面的「一键安装 / 更新」用）。
+
+        ollama 的进度输出用 ``\\r`` 刷新同一行，这里拆开逐条回传；
+        `取消事件` 一置位就杀掉子进程。
+        """
+        模型 = str(模型 or "").strip()
+        可执行 = _找可执行文件()
+        if not 可执行:
+            return False, "没找到 ollama 可执行文件（先点「⬇️ 装运行时」）"
+        if not 模型:
+            return False, "模型名为空"
+        # 装了运行时但服务没起来 → 自动拉起（否则 CLI 只会报"连不上服务"）
+        好, 说明 = self.确保服务在跑()
+        if not 好:
+            return False, f"本地服务起不来：{说明}"
+        环境 = 模型环境()
+        try:
+            进程 = subprocess.Popen(
+                [可执行, "pull", 模型], stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                text=True, encoding="utf-8", errors="replace",
+                bufsize=1, env=环境)
+        except Exception as e:  # noqa: BLE001
+            return False, f"启动 ollama pull 失败：{type(e).__name__}: {e}"
+        最后 = ""
+        # ⚠️ 实测（本机 IPv6）：registry.ollama.ai 走 IPv6 时经常被
+        # "connection reset by peer" 掐掉，重试一两次就通（会落到 IPv4）。
+        # 用户看到的将不再是"一键安装失败"，而是自动重试后成功。
+        尝试 = 0
+        while True:
+            尝试 += 1
+            最后, 好 = self._拉一次(进程, 进度回调, 取消事件)
+            if 好:
+                self._状态 = None
+                return True, f"已安装 {模型}"
+            可重试 = any(词 in 最后.lower() for 词 in (
+                "connection reset", "connection refused", "timeout",
+                "tls", "eof", "no such host", "i/o timeout"))
+            if 取消事件 is not None and 取消事件.is_set():
+                return False, "已取消"
+            if not 可重试 or 尝试 >= 3:
+                break
+            if 进度回调 is not None:
+                try:
+                    进度回调(f"网络抖动（{最后[:60]}），第 {尝试 + 1}/3 次重试…")
+                except Exception:
+                    pass
+            time.sleep(1.5 * 尝试)
+            try:
+                进程 = subprocess.Popen(
+                    [可执行, "pull", 模型], stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                    text=True, encoding="utf-8", errors="replace",
+                    bufsize=1, env=环境)
+            except Exception as e:  # noqa: BLE001
+                return False, f"重试启动 ollama pull 失败：{e}"
+        if 进程.returncode not in (0, None) or 进程.returncode != 0:
+            return False, (最后 or "ollama pull 返回非零")[-300:]
+        self._状态 = None
+        return True, f"已安装 {模型}"
+
+    def _拉一次(self, 进程, 进度回调, 取消事件) -> tuple[str, bool]:
+        """跑完一个 ollama pull 子进程；返回 ``(最后一行输出, 是否成功)``。"""
+        最后 = ""
+        try:
+            for 原始行 in 进程.stdout or []:
+                if 取消事件 is not None and 取消事件.is_set():
+                    进程.kill()
+                    return "已取消", False
+                for 片段 in str(原始行).replace("\r", "\n").split("\n"):
+                    片段 = self._净进度(片段)
+                    if not 片段:
+                        continue
+                    最后 = 片段
+                    if 进度回调 is not None:
+                        try:
+                            进度回调(片段)
+                        except Exception:
+                            pass
+            进程.wait(timeout=120)
+        except Exception as e:  # noqa: BLE001
+            try:
+                进程.kill()
+            except Exception:
+                pass
+            return f"拉取中断：{type(e).__name__}: {e}", False
+        return 最后, 进程.returncode == 0
+
+    def 升级模型(self, 模型: str, 进度回调=None) -> tuple[bool, str]:
+        """升级 = 重新 pull 一次（ollama 只补差量层，很快）。"""
+        return self.拉取模型_带进度(模型, 进度回调)
+
     @staticmethod
     def 安装指引() -> str:
         return "本地模型还没就绪，按下面几步装（都在用户目录，不需要 sudo）：\n" \
             + "\n".join(安装命令)
+
+
+def _解析ollama列表(文本: str) -> dict[str, dict]:
+    """解析 ``ollama list`` 的表格输出。
+
+    形如::
+
+        NAME                    ID              SIZE      MODIFIED
+        deepseek-r1:1.5b        e0979632db5a    1.1 GB    2 days ago
+    """
+    结果: dict[str, dict] = {}
+    for 行 in (文本 or "").splitlines():
+        行 = 行.strip()
+        if not 行 or 行.upper().startswith("NAME"):
+            continue
+        段 = 行.split()
+        if len(段) < 3:
+            continue
+        名字 = 段[0]
+        大小 = 0
+        for i, 单位 in enumerate(段):
+            if 单位.upper() in ("GB", "MB", "KB", "B") and i > 0:
+                try:
+                    倍数 = {"GB": 1_000_000_000, "MB": 1_000_000,
+                          "KB": 1_000, "B": 1}[单位.upper()]
+                    大小 = int(float(段[i - 1]) * 倍数)
+                except Exception:
+                    大小 = 0
+                break
+        # MODIFIED 是最后两段（如 "2 days ago" / "3 hours ago"）
+        结果[名字] = {"大小": 大小, "修改时间": " ".join(段[-3:])}
+    return 结果

@@ -107,7 +107,10 @@ def 拷运行环境(顶层: Path, 平台: str, 含模型: bool) -> None:
     目标.mkdir(parents=True, exist_ok=True)
     if 平台 == "linux":
         来源 = 项目根 / "运行环境"
-        for 名 in ("python", "venv", "语音识别"):
+        # ⚠️ "本地模型" = **便携版 ollama 运行时**。用户要求：打包**预装基础
+        #    ollama**，但**不预装任何模型权重** —— 权重由 AI 页的
+        #    「🛒 本地小模型市场」按需一键安装（也会存进项目目录）。
+        for 名 in ("python", "venv", "语音识别", "本地模型"):
             if not (来源 / 名).exists():
                 continue
             shutil.copytree(来源 / 名, 目标 / 名, ignore=_忽略,
@@ -121,6 +124,12 @@ def 拷运行环境(顶层: Path, 平台: str, 含模型: bool) -> None:
             shutil.copytree(Windows运行时 / "语音识别" / "python",
                             目标 / "语音识别" / "python",
                             ignore=_忽略, dirs_exist_ok=True)
+        # Windows 的便携 ollama：构建/构建_windows.sh 里下好就放在这儿
+        for 源 in (Windows运行时 / "本地模型", Windows运行时 / "ollama"):
+            if 源.is_dir():
+                shutil.copytree(源, 目标 / "本地模型", ignore=_忽略,
+                                dirs_exist_ok=True)
+                break
     # 模型（平台无关）：精简版不带，用户第一次用字幕时会自动下载
     if not 含模型:
         模型目录 = 目标 / "语音识别" / "模型"
@@ -155,10 +164,49 @@ def 打包(顶层: Path, 输出: Path) -> Path:
     return 输出
 
 
+def 备好本地模型运行时() -> None:
+    """把便携版 ollama 下到 ``运行环境/本地模型``（打包会把它一起带进发布包）。
+
+    用户要求：打包**预装基础 ollama**，但**不预装任何模型权重**。
+    * 已经下过就直接跳过（幂等）；
+    * 参数 ``--不要ollama`` 可跳过下载（离线构建/不想让包变大时用）。
+    """
+    目标 = 项目根 / "运行环境" / "本地模型"
+    名字 = "ollama.exe" if os.name == "nt" else "ollama"
+    现成 = [目标 / 名字, 目标 / "bin" / 名字]
+    if any(x.is_file() for x in 现成):
+        说("  · 便携 ollama 已在 运行环境/本地模型（跳过下载）")
+        return
+    说("  · 下载便携 ollama 运行时（约 2 GB，只放运行时，不含模型权重）…")
+    sys.path.insert(0, str(项目根))
+    try:
+        from v8_3.AI.本地模型 import 下载便携运行时
+        上次 = [0.0]
+
+        def 进度(已下: int, 总: int) -> None:
+            现在 = time.time()
+            if 现在 - 上次[0] < 3:
+                return
+            上次[0] = 现在
+            尾巴 = f"{已下 / 1048576:.0f}"
+            if 总:
+                尾巴 += f"/{总 / 1048576:.0f}"
+            说(f"    下载中 {尾巴} MB")
+
+        好, 消息 = 下载便携运行时(进度回调=进度)
+    except Exception as e:  # noqa: BLE001
+        说(f"  ⚠️ 下载便携 ollama 失败：{type(e).__name__}: {e}")
+        说("     发布包里将不含 ollama；用户可在 AI 页点「⬇️ 装运行时」补装。")
+        return
+    说(("  ✓ " if 好 else "  ⚠️ ") + str(消息))
+
+
 def main() -> int:
     解析 = argparse.ArgumentParser(description="打绿色版压缩包")
     解析.add_argument("--平台", choices=("linux", "windows", "全部"), default="全部")
     解析.add_argument("--口味", choices=("完整", "精简", "全部"), default="全部")
+    解析.add_argument("--不要ollama", action="store_true",
+                    help="不下载/不预装便携 ollama（默认会预装运行时，但不含模型权重）")
     参数 = 解析.parse_args()
 
     平台们 = ("linux", "windows") if 参数.平台 == "全部" else (参数.平台,)
@@ -169,6 +217,11 @@ def main() -> int:
 
     发布目录.mkdir(parents=True, exist_ok=True)
     结果: list[tuple[str, int]] = []
+    if not 参数.不要ollama:
+        说("准备本地模型运行时（预装 ollama，不含模型权重）")
+        备好本地模型运行时()
+    else:
+        说("按参数要求：发布包不预装 ollama（AI 页里可点「⬇️ 装运行时」补装）")
     for 平台 in 平台们:
         平台名 = {"linux": "Linux", "windows": "Windows"}[平台]
         for 含模型, 口味名 in 口味们:

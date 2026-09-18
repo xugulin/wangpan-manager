@@ -26,7 +26,7 @@ import json
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 
 from .后台线程 import 任务线程, 线程池管理器
 
@@ -72,6 +72,11 @@ class AI状态页面(QWidget):
         self._本地模型忙 = False          # 检测/测速/启动/拉取进行中：按钮先禁用
         self._构建()
         self.刷新()
+        # 🛒 模型市场：先读缓存（秒开），没有缓存才联网重建 —— 绝不阻塞切页
+        try:
+            self._刷新市场目录(强制=False)
+        except Exception:
+            pass
         # 本地模型检测是阻塞操作（要戳本机端口），**不能在构建/刷新里同步做**，
         # 否则切到 AI 页就会卡住（用户反馈过）。这里改成后台跑，结果回来再填界面。
         self.延迟检测本地模型()
@@ -152,6 +157,9 @@ class AI状态页面(QWidget):
 
         # ---- 本地 DeepSeek 模型（V8_3 新增：免费、离线）----
         布局.addWidget(self._建本地模型区())
+
+        # ---- 🛒 本地小模型市场：推荐指数排行 + 一键装/卸/升级 ----
+        布局.addWidget(self._建模型市场区())
 
         三列 = QHBoxLayout()
         三列.setSpacing(12)
@@ -239,6 +247,580 @@ class AI状态页面(QWidget):
         布局.addWidget(self.用AI框)
         布局.addStretch(1)
         return 组
+
+    # ==================== 🛒 本地小模型市场 ====================
+    #
+    # 用户要求（2026-09-19）：
+    #   * 列出"可查询到的、可下载的、适用于本项目的免费本地小模型"；
+    #   * 显示模型图片、详细信息（可多行）、每个模型一句最核心的总结；
+    #   * 每个模型后面有「一键安装 / 卸载 / 更新、下载链接、官网」；
+    #   * 模型可**动态拉取**；
+    #   * 针对本项目给每个模型打**推荐指数**，最推荐的排最前，
+    #     第一/第二/第三名用不同 emoji 醒目标记。
+    #
+    # 数据来自 v8_3.AI.模型市场（策展目录 + ollama 官方接口动态核对），
+    # 安装/卸载/更新走 v8_3.AI.本地模型.本地模型客户端。
+
+    #: 一次最多渲染多少张卡片（渲染 40+ 张卡片会明显拖慢切页；其余用「显示全部」）
+    市场首屏条数 = 12
+
+    def _建模型市场区(self) -> QWidget:
+        组 = QGroupBox("🛒 本地小模型市场（推荐指数按本项目任务打分 · 免费可下载）")
+        外层 = QVBoxLayout(组)
+
+        self.市场状态标签 = QLabel("🛒 正在准备模型目录…")
+        self.市场状态标签.setWordWrap(True)
+        self.市场状态标签.setStyleSheet(
+            "font-size: 12px; padding: 6px 10px; border-radius: 4px;"
+            "background: #1b3a4b; color: #eaf6ff;")
+        外层.addWidget(self.市场状态标签)
+
+        工具行 = QHBoxLayout()
+        self.市场搜索框 = QLineEdit()
+        self.市场搜索框.setPlaceholderText("🔎 过滤模型（名字 / 厂商 / 场景 / 总结里的词）")
+        self.市场搜索框.textChanged.connect(lambda _t: self._重绘市场卡片())
+        工具行.addWidget(self.市场搜索框, 1)
+
+        self.市场刷新按钮 = QPushButton("🔄 刷新目录")
+        self.市场刷新按钮.setToolTip(
+            "从 Ollama 官方接口动态拉取：核对每个模型是否真的可下载、算精确体积。\n"
+            "约 10~20 秒；结果会缓存 24 小时。")
+        self.市场刷新按钮.clicked.connect(lambda: self._刷新市场目录(强制=True))
+        工具行.addWidget(self.市场刷新按钮)
+
+        self.运行时按钮 = QPushButton("⬇️ 装运行时")
+        self.运行时按钮.setToolTip(
+            "下载官方便携版 ollama 到 **项目内** 运行环境/本地模型（不装系统、不要 sudo）。\n"
+            "约 2 GB；装好后就能在下面一键装模型。")
+        self.运行时按钮.clicked.connect(self._装运行时)
+        工具行.addWidget(self.运行时按钮)
+
+        self.市场全部按钮 = QPushButton("📜 显示全部")
+        self.市场全部按钮.clicked.connect(self._切换显示全部)
+        工具行.addWidget(self.市场全部按钮)
+
+        权重按钮 = QPushButton("⚖️ 推荐权重")
+        权重按钮.setToolTip("调整推荐指数的五个分项权重（任务适配/中文/推理/轻量/新鲜度）")
+        权重按钮.clicked.connect(self._调推荐权重)
+        工具行.addWidget(权重按钮)
+        self.市场按钮们 = [self.市场刷新按钮, self.运行时按钮,
+                       self.市场全部按钮, 权重按钮]
+        工具行.addStretch(1)
+        外层.addLayout(工具行)
+
+        self.市场滚动 = QScrollArea()
+        self.市场滚动.setWidgetResizable(True)
+        # 市场自己有滚动条，而 AI 页本身也是滚动页 —— 嵌套滚动最怕"无限长"：
+        # 卡片一多就会把 AI 页下半部分顶得没边。这里给市场区一个固定高度区间
+        # （视口内滚动），AI 页上下都能正常翻。
+        self.市场滚动.setMinimumHeight(420)
+        self.市场滚动.setMaximumHeight(560)
+        self.市场滚动.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.市场容器 = QWidget()
+        self.市场布局 = QVBoxLayout(self.市场容器)
+        self.市场布局.setSpacing(8)
+        self.市场布局.addStretch(1)
+        self.市场滚动.setWidget(self.市场容器)
+        外层.addWidget(self.市场滚动, 1)
+
+        self.市场明细标签 = QLabel(
+            "推荐指数 = 任务适配 × 权重 + 中文能力 + 推理能力 + 轻量 + 新鲜度"
+            "（分项都取自目录里明写的元数据，缺项按中性算）。\n"
+            "🥇🥈🥉 是前三名；「已核对」表示刚刚向官方库确认过可以下载、体积是实测值。")
+        self.市场明细标签.setWordWrap(True)
+        self.市场明细标签.setStyleSheet("font-size: 11px; color: #95a5a6;")
+        外层.addWidget(self.市场明细标签)
+
+        self._市场条目: list = []
+        self._市场显示全部 = False
+        self._市场卡片们: list = []
+        self._市场装表: dict = {}
+        self._市场忙 = False
+        return 组
+
+    # ---------------- 目录加载 ----------------
+
+    def _市场模块(self):
+        try:
+            from ..AI import 模型市场
+            return 模型市场
+        except Exception:
+            return None
+
+    def 本地客户端(self):
+        """拿一个本地模型客户端（装/卸/升级、列已装模型都靠它）。
+
+        优先复用 AI 助手里那个实例（配置一致）；助手没起来时自己造一个。
+        """
+        try:
+            助手 = getattr(self.运行时, "助手", None)
+            客户端 = getattr(助手, "本地模型", None)
+            if 客户端 is not None:
+                return 客户端
+        except Exception:
+            pass
+        try:
+            from ..AI.本地模型 import 本地模型客户端, 取本地模型配置
+            AI配置 = (self.主窗口.配置.get("AI") or {})
+            return 本地模型客户端(取本地模型配置(AI配置))
+        except Exception:
+            return None
+
+    def _刷新市场目录(self, 强制: bool = False) -> None:
+        """读缓存；缓存过期或强制刷新时联网重建（后台线程）。"""
+        市场 = self._市场模块()
+        if 市场 is None:
+            self.市场状态标签.setText("❌ 模型市场模块不可用")
+            return
+        if not 强制 and 市场.联网被禁用():
+            # 自检/离线模式：只用策展目录，绝不联网
+            self._填市场(市场.构建目录(联网=False), 注明="（离线策展目录）")
+            return
+        if not 强制:
+            缓存 = 市场.读取缓存()
+            if 缓存:
+                时间 = 市场.缓存时间()
+                self._填市场(缓存)
+                self.市场状态标签.setText(
+                    f"📦 已加载缓存的目录：{len(缓存)} 个模型"
+                    f"（缓存于 {time.strftime('%m-%d %H:%M', time.localtime(时间))}；"
+                    "点「🔄 刷新目录」联网核对最新体积）")
+                return
+        if self._市场忙:
+            return
+        self._市场忙 = True
+        for 钮 in self.市场按钮们:
+            钮.setEnabled(False)
+        self.市场状态标签.setText("🔄 正在从 Ollama 官方接口拉取并核对模型…")
+
+        def 干(进度回调=None):
+            权重 = self._读推荐权重(市场)
+            return 市场.构建目录(联网=True, 权重=权重,
+                            进度回调=lambda t: self._市场进度(t))
+
+        线程 = 任务线程(干, 父=self)
+        线程.成功.connect(self._市场刷新完成)
+        线程.失败.connect(self._市场刷新失败)
+        线程.finished.connect(self._市场收工)
+        self._登记线程(线程)
+        线程.start()
+
+    def _市场进度(self, 文本: str) -> None:
+        # 进度回调来自后台线程：只写文本，Qt 侧由 _市场收工 统一刷新
+        try:
+            self._市场进度文本 = str(文本)
+            self.市场状态标签.setText(f"🔄 {文本}")
+        except Exception:
+            pass
+
+    def _市场收工(self) -> None:
+        self._市场忙 = False
+        for 钮 in self.市场按钮们:
+            钮.setEnabled(True)
+
+    def _市场刷新失败(self, 错误: str) -> None:
+        self.市场状态标签.setText(f"❌ 刷新目录失败：{错误}（仍可用缓存/策展目录）")
+        市场 = self._市场模块()
+        if 市场 is not None:
+            self._填市场(市场.构建目录(联网=False), 注明="（离线策展目录）")
+
+    def _市场刷新完成(self, 条目们) -> None:
+        市场 = self._市场模块()
+        条目们 = list(条目们 or [])
+        if 市场 is not None and 条目们:
+            市场.写入缓存(条目们)
+        离线数 = sum(1 for x in 条目们 if getattr(x, "核对状态", "") == "已核对")
+        self.市场状态标签.setText(
+            f"✅ 目录已更新：共 {len(条目们)} 个模型，其中 {离线数} 个已向官方库"
+            f"核到体积（{time.strftime('%H:%M:%S')}）")
+        self._填市场(条目们)
+
+    # ---------------- 渲染 ----------------
+
+    def _读推荐权重(self, 市场):
+        try:
+            段 = ((self.主窗口.配置.get("AI") or {}).get("本地模型") or {})
+            权重段 = 段.get("推荐权重") or {}
+            if 权重段:
+                return 市场.推荐权重.from_dict(权重段)
+        except Exception:
+            pass
+        return 市场.默认权重
+
+    def _填市场(self, 条目们, 注明: str = "") -> None:
+        市场 = self._市场模块()
+        if 市场 is None:
+            return
+        self._市场条目 = list(条目们 or [])
+        # 本机已装状态（ollama list）——决定「安装/卸载/更新」三个按钮谁可用
+        try:
+            客户端 = self.本地客户端()
+            已装 = 客户端.已装模型() if 客户端 is not None else {}
+        except Exception:
+            已装 = {}
+        self._市场已装 = dict(已装 or {})
+        市场.合并已装状态(self._市场条目, self._市场已装)
+        self._重绘市场卡片()
+        if 注明:
+            self.市场状态标签.setText(
+                f"📦 {len(self._市场条目)} 个模型 {注明}")
+
+    def _重绘市场卡片(self) -> None:
+        市场 = self._市场模块()
+        if 市场 is None:
+            return
+        关键词 = ""
+        try:
+            关键词 = self.市场搜索框.text().strip().lower()
+        except Exception:
+            pass
+        条目们 = list(self._市场条目)
+        if 关键词:
+            条目们 = [x for x in 条目们
+                    if 关键词 in " ".join([
+                        x.名字, x.中文名, x.厂商, x.总结, x.简介,
+                        " ".join(x.适用场景)]).lower()]
+        显示上限 = len(条目们) if self._市场显示全部 else self.市场首屏条数
+        显示 = 条目们[:显示上限]
+
+        # 清空旧卡片
+        while self.市场布局.count():
+            项 = self.市场布局.takeAt(0)
+            控件 = 项.widget()
+            if 控件 is not None:
+                控件.setParent(None)
+                try:
+                    控件.deleteLater()
+                except Exception:
+                    pass
+        self._市场卡片们 = []
+        for 序, 条目 in enumerate(显示, 1):
+            卡片 = self._建模型卡片(序, 条目)
+            self.市场布局.addWidget(卡片)
+            self._市场卡片们.append(卡片)
+        剩余 = len(条目们) - len(显示)
+        if 剩余 > 0:
+            更多 = QLabel(f"…… 还有 {剩余} 个模型没显示"
+                       f"（点上方「📜 显示全部」看完整 {len(条目们)} 个）")
+            更多.setStyleSheet("color: #95a5a6; font-size: 11px;")
+            self.市场布局.addWidget(更多)
+        self.市场布局.addStretch(1)
+        try:
+            self.市场全部按钮.setText(
+                "📜 只显示前 %d" % self.市场首屏条数 if self._市场显示全部
+                else "📜 显示全部")
+        except Exception:
+            pass
+
+    def _建模型卡片(self, 序: int, 条目) -> QWidget:
+        市场 = self._市场模块()
+        卡 = QWidget()
+        卡.setStyleSheet(
+            "QWidget#模型卡 { border: 1px solid #3a4a5a; border-radius: 8px;"
+            "background: #22303c; }")
+        卡.setObjectName("模型卡")
+        外 = QVBoxLayout(卡)
+        外.setContentsMargins(10, 8, 10, 8)
+        外.setSpacing(4)
+
+        头 = QHBoxLayout()
+        头.setSpacing(10)
+
+        # 图片（本地生成，不抓网图）——见 v8_3/界面/图标.py
+        图标签 = QLabel()
+        图标签.setFixedSize(56, 56)
+        try:
+            from .图标 import 模型图
+            角标 = f"{条目.参数B:g}B" if 条目.参数B else ""
+            像素 = 模型图(条目.图片键, 条目.名字, 尺寸=96, 角标=角标)
+            if 像素 is not None and not 像素.isNull():
+                图标签.setPixmap(像素.scaled(56, 56, Qt.KeepAspectRatio,
+                                        Qt.SmoothTransformation))
+        except Exception:
+            pass
+        头.addWidget(图标签, 0, Qt.AlignTop)
+
+        中 = QVBoxLayout()
+        中.setSpacing(2)
+        名次 = 市场.名次标记(序)
+        标题 = QLabel(
+            f"{名次 + '　' if 名次 else ''}"
+            f"<b style='font-size:14px'>{条目.名字}</b>"
+            f"　<span style='color:#f1c40f'>推荐指数 {条目.分数:.1f}</span>"
+            f"　{市场.推荐等级(条目.分数)}")
+        标题.setTextFormat(Qt.RichText)
+        中.addWidget(标题)
+
+        副 = QLabel(f"{条目.中文名 or ''}　·　{条目.厂商 or ''}　·　{条目.体积文本}")
+        副.setStyleSheet("color: #9fb3c8; font-size: 11px;")
+        中.addWidget(副)
+
+        总结 = QLabel(f"📌 {条目.总结}")
+        总结.setWordWrap(True)
+        总结.setStyleSheet("font-size: 12px; font-weight: bold; color: #ecf0f1;")
+        中.addWidget(总结)
+
+        理由 = QLabel(f"💡 推荐理由：{条目.推荐理由}")
+        理由.setWordWrap(True)
+        理由.setStyleSheet("font-size: 11px; color: #8fd18f;")
+        中.addWidget(理由)
+
+        状态 = []
+        if getattr(条目, "已安装", False):
+            状态.append("✅ 本机已安装")
+        if getattr(条目, "可更新", False):
+            状态.append("⬆️ 官方有新版本")
+        if 条目.核对状态 == "不存在":
+            状态.append("❌ 官方库没有这个标签")
+        状态行 = QLabel("　".join(状态) or "⚪ 本机未安装")
+        状态行.setStyleSheet("font-size: 11px; color: #f39c12;")
+        中.addWidget(状态行)
+        头.addLayout(中, 1)
+        外.addLayout(头)
+
+        # ---- 操作按钮行：一键安装 / 卸载 / 更新 / 下载链接 / 官网 ----
+        行 = QHBoxLayout()
+        行.setSpacing(6)
+        已装 = bool(getattr(条目, "已安装", False))
+
+        装 = QPushButton("⬇️ 一键安装" if not 已装 else "✅ 已安装")
+        装.setEnabled(not 已装)
+        装.clicked.connect(lambda _=False, m=条目: self._装模型(m))
+        行.addWidget(装)
+
+        卸 = QPushButton("🗑 卸载")
+        卸.setEnabled(已装)
+        卸.clicked.connect(lambda _=False, m=条目: self._卸模型(m))
+        行.addWidget(卸)
+
+        更 = QPushButton("🔄 更新")
+        更.setEnabled(已装)
+        更.setToolTip("重新 pull 一次：ollama 只补差量层，很快")
+        更.clicked.connect(lambda _=False, m=条目: self._更新模型(m))
+        行.addWidget(更)
+
+        下载 = QPushButton("📥 下载链接")
+        下载.clicked.connect(
+            lambda _=False, m=条目: self._打开链接(m.下载页, "下载页面"))
+        行.addWidget(下载)
+
+        官网 = QPushButton("🌐 官网")
+        官网.clicked.connect(
+            lambda _=False, m=条目: self._打开链接(m.官方页, "官方页面"))
+        行.addWidget(官网)
+
+        详情钮 = QPushButton("📖 详细信息")
+        详情钮.setCheckable(True)
+        行.addWidget(详情钮)
+        行.addStretch(1)
+        外.addLayout(行)
+
+        # ---- 多行详细信息（默认折叠）----
+        详情 = QLabel()
+        详情.setTextFormat(Qt.RichText)
+        详情.setWordWrap(True)
+        详情.setText(self._详情HTML(条目))
+        详情.setStyleSheet(
+            "font-size: 11px; color: #cfd8dc; background: #1a2630;"
+            "border-radius: 6px; padding: 8px;")
+        详情.setVisible(False)
+        外.addWidget(详情)
+
+        def 切(开: bool):
+            详情.setVisible(bool(开))
+            详情钮.setText("📖 收起详细" if 开 else "📖 详细信息")
+
+        详情钮.toggled.connect(切)
+        return 卡
+
+    @staticmethod
+    def _详情HTML(条目) -> str:
+        """把详细信息排成**多行**表格：每行「标签：值」，更清楚明了。"""
+        行们 = []
+        for 标签, 值 in 条目.详情行():
+            行们.append(
+                f"<tr><td style='color:#90a4ae; padding:2px 8px 2px 0;"
+                f"white-space:nowrap'>{标签}</td>"
+                f"<td style='padding:2px 0'>{值}</td></tr>")
+        表 = "<table cellspacing='0' cellpadding='0'>" + "".join(行们) + "</table>"
+        块 = [表]
+        if 条目.简介:
+            块.append("<div style='margin-top:6px'><b>详细介绍</b><br>"
+                    + str(条目.简介).replace("\n", "<br>") + "</div>")
+        if 条目.优点:
+            块.append("<div style='margin-top:6px'><b>优点</b><br>· "
+                    + "<br>· ".join(条目.优点) + "</div>")
+        if 条目.注意:
+            块.append("<div style='margin-top:6px'><b>注意事项</b><br>· "
+                    + "<br>· ".join(条目.注意) + "</div>")
+        return "".join(块)
+
+    # ---------------- 操作 ----------------
+
+    def _打开链接(self, 地址: str, 名称: str = "页面") -> None:
+        if not 地址:
+            QMessageBox.information(self, "提示", f"这个模型没有填{名称}")
+            return
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(str(地址)))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "打开失败", f"{地址}\n{e}")
+
+    def _切换显示全部(self) -> None:
+        self._市场显示全部 = not self._市场显示全部
+        self._重绘市场卡片()
+
+    def _调推荐权重(self) -> None:
+        市场 = self._市场模块()
+        if 市场 is None:
+            return
+        现在 = self._读推荐权重(市场)
+        当前 = (f"任务适配={现在.任务适配:.2f}　中文能力={现在.中文能力:.2f}　"
+              f"推理能力={现在.推理能力:.2f}　轻量={现在.轻量:.2f}　"
+              f"新鲜度={现在.新鲜度:.2f}")
+        文本, 好 = QInputDialog.getText(
+            self, "推荐权重",
+            "按「任务适配, 中文能力, 推理能力, 轻量, 新鲜度」顺序填五个数"
+            "（会自动归一化）：\n当前：" + 当前,
+            text=f"{现在.任务适配:.2f}, {现在.中文能力:.2f}, "
+                 f"{现在.推理能力:.2f}, {现在.轻量:.2f}, {现在.新鲜度:.2f}")
+        if not 好 or not str(文本).strip():
+            return
+        try:
+            数 = [float(x) for x in str(文本).replace("，", ",").split(",")]
+            if len(数) != 5:
+                raise ValueError("需要 5 个数")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "格式不对", f"请填 5 个数字：{e}")
+            return
+        权重 = 市场.推荐权重(*数).归一()
+        try:
+            配置 = self.主窗口.配置
+            段 = 配置.setdefault("AI", {}).setdefault("本地模型", {})
+            段["推荐权重"] = 权重.to_dict()
+            self.主窗口.保存配置()
+        except Exception:
+            pass
+        # 用新权重重新打分排序（离线即可，不用联网）
+        条目们 = 市场.排序并打分(list(self._市场条目), 权重)
+        self._填市场(条目们, 注明="（已按新权重重排）")
+
+    def _装运行时(self) -> None:
+        """下载官方便携版 ollama 到项目内（不装系统、不需要 sudo）。"""
+        from ..AI.本地模型 import 下载便携运行时, 项目内可执行文件
+        if 项目内可执行文件().is_file():
+            QMessageBox.information(
+                self, "已就绪", f"项目内已有便携运行时：\n{项目内可执行文件()}")
+            return
+        状态 = {"文本": "开始下载…"}
+
+        def 进度(已下, 总):
+            if 总:
+                状态["文本"] = f"下载中 {已下 / 1048576:.0f} / {总 / 1048576:.0f} MB"
+
+        def 干():
+            return 下载便携运行时(进度回调=进度)
+
+        线程 = 任务线程(干, 父=self)
+        线程.成功.connect(self._运行时完成)
+        线程.失败.connect(lambda e: self.市场状态标签.setText(f"❌ 下载运行时失败：{e}"))
+        self._登记线程(线程)
+        self.市场状态标签.setText("⬇️ 正在下载便携版 ollama（约 2 GB，存到项目内）…")
+        计时 = QTimer(self)
+        计时.setInterval(800)
+
+        def 滴答():
+            self.市场状态标签.setText(f"⬇️ {状态['文本']}（存到 运行环境/本地模型）")
+
+        计时.timeout.connect(滴答)
+        计时.start()
+        self._运行时计时 = 计时
+        线程.finished.connect(计时.stop)
+        线程.start()
+
+    def _运行时完成(self, 结果) -> None:
+        好, 消息 = 结果 if isinstance(结果, (tuple, list)) else (False, str(结果))
+        self.市场状态标签.setText(("✅ " if 好 else "❌ ") + str(消息))
+        if 好:
+            self.刷新本地模型(重新检测=True)
+
+    def _装模型(self, 条目) -> None:
+        self._跑模型操作(条目, "安装", lambda 客户端, 回调, 取消:
+                    客户端.拉取模型_带进度(条目.名字, 进度回调=回调,
+                                    取消事件=取消))
+
+    def _更新模型(self, 条目) -> None:
+        self._跑模型操作(条目, "更新", lambda 客户端, 回调, 取消:
+                    客户端.升级模型(条目.名字, 进度回调=回调))
+
+    def _卸模型(self, 条目) -> None:
+        if QMessageBox.question(
+                self, "卸载模型",
+                f"确定卸载 {条目.名字} 吗？\n会删除本机下载的模型文件"
+                f"（{条目.体积文本}），以后想用可以再装。") != QMessageBox.Yes:
+            return
+        self._跑模型操作(条目, "卸载", lambda 客户端, 回调, 取消:
+                    客户端.删除模型(条目.名字))
+
+    def _跑模型操作(self, 条目, 动作名: str, 工作) -> None:
+        """把「装/卸/升级」丢后台跑，并把进度打进状态栏。"""
+        客户端 = self.本地客户端()
+        if 客户端 is None:
+            self.市场状态标签.setText("❌ 本地模型运行时不可用")
+            return
+        if self._市场装表.get(条目.名字):
+            return
+        self._市场装表[条目.名字] = True
+        进度行: list[str] = []
+        取消 = None
+        if 动作名 == "安装":
+            import threading
+            取消 = threading.Event()
+
+        def 回调(文本: str) -> None:
+            进度行.append(str(文本))
+
+        def 干():
+            return 工作(客户端, 回调, 取消)
+
+        计时 = QTimer(self)
+        计时.setInterval(700)
+
+        def 滴答():
+            尾巴 = 进度行[-1] if 进度行 else "准备中…"
+            self.市场状态标签.setText(
+                f"⏳ {动作名} {条目.名字}：{尾巴}")
+
+        计时.timeout.connect(滴答)
+        计时.start()
+        self.市场状态标签.setText(f"⏳ 正在{动作名} {条目.名字}…")
+
+        线程 = 任务线程(干, 父=self)
+
+        def 完成(结果):
+            好, 消息 = 结果 if isinstance(结果, (tuple, list)) else (False, str(结果))
+            计时.stop()
+            self._市场装表.pop(条目.名字, None)
+            self.市场状态标签.setText(
+                ("✅ " if 好 else "❌ ") + f"{动作名} {条目.名字}：{消息}")
+            self.刷新本地模型(重新检测=True)
+            self._刷新市场目录(强制=False)   # 刷新"本机已装"状态
+            if not 好 and "没找到 ollama" in str(消息):
+                self.市场状态标签.setText(
+                    "❌ 还没装 ollama 运行时：点上面的「⬇️ 装运行时」")
+
+        def 失败(错误):
+            计时.stop()
+            self._市场装表.pop(条目.名字, None)
+            self.市场状态标签.setText(f"❌ {动作名} {条目.名字} 失败：{错误}")
+
+        线程.成功.connect(完成)
+        线程.失败.connect(失败)
+        线程.finished.connect(计时.stop)
+        self._登记线程(线程)
+        线程.start()
 
     # ==================== 本地模型（V8_3 新增） ====================
 

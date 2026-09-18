@@ -37,7 +37,8 @@ if not 显示模式:
 
 from PySide6.QtCore import QPoint, QSize, qInstallMessageHandler
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QInputDialog, QMessageBox, QPushButton,
+    QApplication, QDialog, QFileDialog, QInputDialog, QLabel, QMessageBox,
+    QPushButton,
 )
 
 # 收集 Qt 自身的线程类警告：跨线程碰控件一定要在这里被抓出来
@@ -2075,6 +2076,94 @@ def main() -> int:
     段["厂家"].pop("bailian", None)
     段["当前"] = "deepseek"
     写回在线模型(窗口.配置, 段)
+
+    print("\n[29] 🛒 本地小模型市场（推荐指数 / 一键装·卸·更新 / 动态拉取）")
+    from v8_3.AI import 模型市场
+    # 自检一律离线：策展目录必须自带内容，不能开天窗
+    离线目录 = 模型市场.构建目录(联网=False)
+    检查(len(离线目录) >= 10,
+         f"离线（无网络）也有策展目录：{len(离线目录)} 个模型")
+    第一名 = 离线目录[0]
+    检查(离线目录[0].分数 >= 离线目录[-1].分数, "目录按推荐指数从高到低排序")
+    检查(模型市场.名次标记(1).startswith("🥇")
+         and 模型市场.名次标记(2).startswith("🥈")
+         and 模型市场.名次标记(3).startswith("🥉")
+         and 模型市场.名次标记(4) == "",
+         "前三名用不同的 emoji 醒目标记，第 4 名起不再标记")
+    检查(bool(第一名.总结) and len(第一名.总结) >= 10,
+         f"每个模型都有一句核心总结：{第一名.总结[:28]}…")
+    检查(bool(第一名.推荐理由), f"每个模型都有推荐理由：{第一名.推荐理由[:28]}…")
+    检查(len(第一名.详情行()) >= 10,
+         f"详细信息按多行展示（{len(第一名.详情行())} 行）")
+    检查(第一名.官方页.startswith("https://ollama.com/library/")
+         and 第一名.下载页.startswith("https://ollama.com/"),
+         f"每个模型都有官网与下载链接：{第一名.官方页}")
+    检查(第一名.体积文本 not in ("", "未知"),
+         f"体积有值（未联网时用参数估算）：{第一名.体积文本}")
+    # 打分与权重：换权重能改变排序
+    偏轻量 = 模型市场.推荐权重(任务适配=0.1, 中文能力=0.1, 推理能力=0.1,
+                          轻量=0.6, 新鲜度=0.1)
+    重排 = 模型市场.排序并打分(模型市场.策展目录(), 偏轻量)
+    检查(重排[0].参数B <= 离线目录[0].参数B,
+         f"把「轻量」权重调高后，最推荐的是更小的模型：{重排[0].名字}")
+    # 缓存读写
+    模型市场.写入缓存(离线目录)
+    检查(len(模型市场.读取缓存()) == len(离线目录), "目录能写缓存并读回")
+    # 界面：卡片渲染 + 五个操作按钮
+    市场页 = AI页
+    市场页._填市场(离线目录)
+    泵(0.3)
+    卡片 = list(getattr(市场页, "_市场卡片们", []))
+    检查(len(卡片) == min(市场页.市场首屏条数, len(离线目录)),
+         f"市场按推荐指数渲染卡片（首屏 {len(卡片)} 张）")
+    from PySide6.QtWidgets import QPushButton as _按钮
+    第一卡按钮 = [b.text() for b in 卡片[0].findChildren(_按钮)]
+    检查(any("一键安装" in t for t in 第一卡按钮), f"卡片有「一键安装」：{第一卡按钮}")
+    检查(any("卸载" in t for t in 第一卡按钮), "卡片有「卸载」")
+    检查(any("更新" in t for t in 第一卡按钮), "卡片有「更新」")
+    检查(any("下载链接" in t for t in 第一卡按钮), "卡片有「下载链接」")
+    检查(any("官网" in t for t in 第一卡按钮), "卡片有「官网」")
+    检查(any("详细" in t for t in 第一卡按钮), "卡片有「详细信息」（多行详情可展开）")
+    检查(any(模型市场.名次标记(1) in w.text()
+             for w in 卡片[0].findChildren(QLabel)),
+         "第一张卡片上带着 🥇 醒目标记")
+    # 本机已装状态：装了就该能「卸载/更新」，且不再让点「安装」
+    已装样例 = {离线目录[0].名字: {"大小": 1234, "修改时间": "刚刚"}}
+    模型市场.合并已装状态(离线目录, 已装样例)
+    检查(bool(getattr(离线目录[0], "已安装", False)), "已装状态能合并进目录")
+    市场页._市场已装 = dict(已装样例)
+    市场页._重绘市场卡片()
+    泵(0.2)
+    第一卡 = 市场页._市场卡片们[0]
+    钮表 = {b.text(): b for b in 第一卡.findChildren(_按钮)}
+    装钮 = next(b for t, b in 钮表.items() if "一键安装" in t or "已安装" in t)
+    卸钮 = next(b for t, b in 钮表.items() if "卸载" in t)
+    更钮 = next(b for t, b in 钮表.items() if "更新" in t)
+    检查(not 装钮.isEnabled() and 卸钮.isEnabled() and 更钮.isEnabled(),
+         "本机已装的模型：「安装」置灰，「卸载/更新」可用")
+    # 搜索过滤
+    市场页.市场搜索框.setText("不存在的模型名")
+    泵(0.2)
+    检查(len(市场页._市场卡片们) == 0, "搜索框能过滤（无匹配时不显示卡片）")
+    市场页.市场搜索框.setText("")
+    泵(0.2)
+    # 离线总闸：联网被禁用时不许发请求
+    import os as _os2
+    _旧2 = _os2.environ.get("V8_3_不联网")
+    try:
+        _os2.environ["V8_3_不联网"] = "1"
+        检查(模型市场.联网被禁用(), "V8_3_不联网=1 时模型市场认定「不联网」")
+        检查(len(模型市场.构建目录(联网=True)) >= 10,
+             "联网总闸打开时，构建目录自动降级为策展目录（不发请求）")
+    finally:
+        if _旧2 is None:
+            _os2.environ.pop("V8_3_不联网", None)
+        else:
+            _os2.environ["V8_3_不联网"] = _旧2
+    # 核对「不存在的模型」时要如实回报，不能假装能下载（真机实测：注册表回 404）
+    检查(模型市场.注册表清单地址.format(名字="qwen3", 标签="1.7b")
+         .startswith("https://registry.ollama.ai/v2/library/"),
+         "注册表核对地址按「库/名字/manifests/标签」拼")
 
     print("\n[30] 关闭窗口（清理子进程）")
     窗口.close()
