@@ -175,10 +175,21 @@ class 任务表格(QTableWidget):
 
     def _构建表头(self):
         self.setHorizontalHeaderLabels(self.列名 + ["完成/失败时间"])
-        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        表头 = self.horizontalHeader()
+        # 列不许被压到看不清：窗口不够宽时由外层页面滚动（配合 界面/滚动区.py），
+        # 而不是把"文件名"挤成一条缝、其它列错位。
+        表头.setMinimumSectionSize(88)
+        表头.setSectionResizeMode(0, QHeaderView.Stretch)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setWordWrap(False)
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         for 列, 宽 in ((1, 92), (2, 150), (3, 130), (4, 96), (5, 84),
                     (6, 220), (7, 150), (8, 140)):
             self.setColumnWidth(列, 宽)
+        # "文件名"列也要有下限，否则窗口一窄就被挤成一条缝、别的列跟着错位。
+        # 整张表的最小宽度 = 各列下限之和，比这更窄时由外层页面横向滚动。
+        self.setMinimumWidth(160 + 92 + 150 + 130 + 96 + 84 + 220 + 150 + 24)
 
     def _应用列宽(self):
         """时间列只在 已完成/失败 分类里显示。"""

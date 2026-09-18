@@ -119,7 +119,7 @@ class 设置页面(QWidget):
         self.页面滚动区.setObjectName("PageScroll")
         self.页面滚动区.setWidgetResizable(True)
         self.页面滚动区.setFrameShape(QScrollArea.NoFrame)
-        self.页面滚动区.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.页面滚动区.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.页面滚动区.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.页面滚动区.viewport().setAutoFillBackground(False)
         self.页面内容 = 不压缩内容()

@@ -255,7 +255,7 @@ def main() -> int:
     窗口.切换网盘页("fake_2")
     泵(0.2)
     页2 = 窗口._网盘页面.get("fake_2")
-    检查(页2 is not None and 窗口.堆叠.currentWidget() is 页2,
+    检查(页2 is not None and 窗口.当前页面() is 页2,
          "点击第二个网盘按钮切到它的页面")
     检查(窗口._网盘按钮["fake_2"].objectName() == "active",
          "被选中的导航按钮加上 active 样式")
@@ -459,7 +459,7 @@ def main() -> int:
     print("\n[9] 传输页 / 日志页 / 主题")
     窗口.切换到传输页()
     泵(0.1)
-    检查(窗口.堆叠.currentWidget() is 窗口.传输页面(),
+    检查(窗口.当前页面() is 窗口.传输页面(),
          "「传输」按钮切到跨网盘传输页")
     检查(窗口.传输页面().源网盘框.count() == 2, "传输页网盘下拉跟随实例数量")
     检查(窗口.传输页面().任务表.rowCount() >= 2, "传输页保留了上传/下载任务行")
@@ -519,7 +519,7 @@ def main() -> int:
     滚动条.setValue(滚动条.maximum())
     泵(0.1)
     检查(滚动条.value() == 滚动条.maximum(), "可以滚动到底部按钮")
-    检查(多窗口.堆叠.currentWidget() is not None, "溢出时仍正常显示当前页")
+    检查(多窗口.当前页面() is not None, "溢出时仍正常显示当前页")
     多窗口.close()
     泵(0.3)
     多窗口.deleteLater()
@@ -532,7 +532,7 @@ def main() -> int:
     空窗口.show()
     泵(0.2)
     检查(空窗口._空状态页 is not None
-         and 空窗口.堆叠.currentWidget() is 空窗口._空状态页,
+         and 空窗口.当前页面() is 空窗口._空状态页,
          "没有配置网盘时显示「还没有配置任何网盘」空状态页")
     检查(not 空窗口._网盘按钮, "空状态下左侧没有网盘按钮")
     检查(not 空窗口.编辑按钮.isEnabled() and not 空窗口.删除按钮.isEnabled(),
@@ -613,7 +613,7 @@ def main() -> int:
     窗口.切换到敏感词页()
     泵(0.3)
     词页 = 窗口._敏感词页面
-    检查(窗口.堆叠.currentWidget() is 词页, "「敏感词」按钮切到敏感词页")
+    检查(窗口.当前页面() is 词页, "「敏感词」按钮切到敏感词页")
     检查(词页.敏感词表格.rowCount() >= 1,
          f"敏感词表里能看到刚添加的词（{词页.敏感词表格.rowCount()} 行）")
     检查("敏感词" in 词页.统计标签.text(), f"底部统计栏：{词页.统计标签.text()[:60]}…")
@@ -643,7 +643,7 @@ def main() -> int:
     窗口.切换到AI页()
     泵(0.5)
     AI页 = 窗口._AI页面
-    检查(AI页 is not None and 窗口.堆叠.currentWidget() is AI页,
+    检查(AI页 is not None and 窗口.当前页面() is AI页,
          "「AI」按钮切到 AI 页")
     横幅 = AI页.提示横幅.text()
     检查(any(k in 横幅 for k in ("密钥", "AI", "本地模型")),
@@ -753,7 +753,7 @@ def main() -> int:
     窗口.切换到设置页()
     泵(0.3)
     设置页 = 窗口._设置页面
-    检查(设置页 is not None and 窗口.堆叠.currentWidget() is 设置页,
+    检查(设置页 is not None and 窗口.当前页面() is 设置页,
          "左侧「⚙ 设置」能切到设置页")
     检查(窗口.设置按钮.objectName() == "active", "设置按钮高亮为当前页")
     检查(更新模块.版本显示() in 设置页.版本标签.text(),
@@ -1868,6 +1868,86 @@ def main() -> int:
     finally:
         _os显示.environ.clear()
         _os显示.environ.update(_旧2)
+
+    print("\n[31] 下拉框箭头只画一个（用户截图反馈过「两个箭头」）")
+    from PySide6.QtWidgets import QComboBox as _框
+    试框 = _框()
+    试框.addItems(["百度网盘", "夸克网盘"])
+    试框.setMinimumHeight(34)
+    试框.resize(300, 34)
+    试框.show()
+    泵(0.2)
+    框图 = 试框.grab().toImage()
+    底色 = 框图.pixelColor(6, 6)
+
+    def _这一列有墨(图, x: int) -> bool:
+        """这一列里有没有"非底色"的像素（文字、边框、箭头都算）。"""
+        for y in range(2, 图.height() - 2):
+            c = 图.pixelColor(x, y)
+            if (abs(c.red() - 底色.red()) + abs(c.green() - 底色.green())
+                    + abs(c.blue() - 底色.blue())) > 60:
+                return True
+        return False
+
+    # 「两个箭头」那会儿，多出来的那个正好落在输入框偏右的空白处。
+    # 所以：文字右边到按钮左边这一大段应当干干净净；按钮区必须有箭头。
+    文字右侧空档 = [x for x in range(int(框图.width() * 0.42), int(框图.width() * 0.86), 2)
+                if _这一列有墨(框图, x)]
+    按钮区有墨 = any(_这一列有墨(框图, x) for x in range(框图.width() - 22, 框图.width() - 4))
+    检查(not 文字右侧空档,
+        f"输入框右侧没有多余箭头（脏列 {len(文字右侧空档)} 个）")
+    检查(按钮区有墨, "下拉按钮区画出了箭头")
+    试框.hide(); 试框.deleteLater()
+
+    print("\n[32] 页面滚动：窗口够宽不出滚动条，变窄可上下左右滑，控件不被压扁")
+    def _滚动区(页):
+        from PySide6.QtWidgets import QScrollArea as _区
+        return 页 if isinstance(页, _区) else 页.findChild(_区)
+    窗口.resize(1400, 880)
+    窗口.切换到传输页()
+    泵(0.3)
+    区宽 = _滚动区(窗口.堆叠.currentWidget())
+    检查(区宽 is not None, "传输页外层有滚动区")
+    if 区宽 is not None:
+        检查(区宽.horizontalScrollBar().maximum() == 0,
+            "窗口够宽时传输页不出现横向滚动条")
+        内容宽 = 区宽.widget().width()
+    窗口.resize(900, 600)
+    泵(0.4)
+    区窄 = _滚动区(窗口.堆叠.currentWidget())
+    if 区窄 is not None:
+        滑 = 区窄.horizontalScrollBar().maximum()
+        检查(滑 > 0, f"窗口变窄后可以左右滑动（可滑 {滑}px）")
+        最小宽 = 区窄.widget().minimumSizeHint().width()
+        检查(区窄.widget().width() >= 最小宽,
+            f"变窄时内容不低于自身最小宽度（{区窄.widget().width()} ≥ {最小宽}），"
+            "靠滚动查看而不是把控件压扁")
+    窗口.resize(1400, 880)
+    泵(0.3)
+    表 = 窗口.传输页面().任务表格 if hasattr(窗口.传输页面(), "任务表格") else None
+    if 表 is None:
+        表 = 窗口.传输页面().findChild(type(窗口.传输页面().findChild(__import__("PySide6.QtWidgets", fromlist=["QTableWidget"]).QTableWidget)))
+    检查(表 is not None and 表.minimumWidth() >= 1000,
+        f"传输表格有最小宽度（{表.minimumWidth() if 表 else '?'}px），不会被挤变形")
+
+    print("\n[33] 新增网盘弹窗：内容可上下滑动，底部按钮始终可见")
+    from v8_3.界面.网盘对话框 import 网盘编辑对话框 as _对话
+    弹窗 = _对话(dict(配置), None, 窗口)
+    弹窗.resize(弹窗.minimumWidth(), 弹窗.minimumHeight())
+    弹窗.show()
+    泵(0.3)
+    弹区 = 弹窗.findChild(__import__("PySide6.QtWidgets", fromlist=["QScrollArea"]).QScrollArea)
+    检查(弹区 is not None, "弹窗正文包在滚动区里")
+    if 弹区 is not None:
+        检查(弹区.verticalScrollBar().maximum() > 0,
+            f"缩到最小尺寸时正文可上下滑动（可滑 {弹区.verticalScrollBar().maximum()}px）")
+        检查(弹区.horizontalScrollBarPolicy().name.startswith("ScrollBar"),
+            f"正文允许横向滚动（策略 {弹区.horizontalScrollBarPolicy().name}）")
+    确定钮 = [b for b in 弹窗.findChildren(__import__("PySide6.QtWidgets", fromlist=["QPushButton"]).QPushButton)
+            if b.text() == "确定"]
+    检查(bool(确定钮) and 确定钮[0].isVisible(), "「确定」按钮在滚动区外面、始终可见")
+    弹窗.close(); 弹窗.deleteLater()
+    泵(0.2)
 
     print("\n[30] 关闭窗口（清理子进程）")
     窗口.close()

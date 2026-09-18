@@ -440,33 +440,47 @@ class 主题管理器:
 
     @classmethod
     def _生成样式表(cls, c: dict, 类型: str) -> str:
+        # 关于下拉箭头：**必须**用 QSS 的 image 画，而且必须写明定位。
+        #
+        # 实测（离屏渲染 + 统计 drawPrimitive 调用）：
+        #   · 只要 QComboBox 写了样式表，Qt 就完全不调用 PE_IndicatorArrowDown
+        #     —— 自绘箭头那条路在组合框上是走不通的（调用次数恒为 0）；
+        #   · 只写 image: url(...) 而不写 subcontrol-* 定位，箭头会被摆在输入框
+        #     中间、右边按钮区还多出一个，也就是"两个箭头"（用户截图反馈的就是这个）；
+        #   · 加上 subcontrol-origin/position + right，才是一个、且在按钮区正中。
         箭头 = _箭头图片(c['文字'])
         箭头_激活 = _箭头图片(c['强调'])
         箭头_禁用 = _箭头图片(c['次要文字'])
+        定位 = f"""    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    right: 3px;
+    width: {宽度_箭头}px;
+    height: {高度_箭头}px;"""
+        # 只写**一条**箭头规则。踩过的坑（都靠离屏截图对照确认）：
+        #   · 只给 QComboBox 写样式表，Qt 就再也不调用 PE_IndicatorArrowDown，
+        #     所以自绘箭头在组合框上走不通（调用次数恒为 0）；
+        #   · 写了 image 但不写 subcontrol-* 定位 → 箭头会被摆在输入框中间；
+        #   · 再加 :hover/:on/:focus/:disabled 的箭头规则 → Qt 会把基础规则和状态
+        #     规则**各画一次**，于是出现"两个箭头"（用户截图反馈的就是这个）。
+        # 结论：一条规则 + 明确 subcontrol 定位 = 一个、位置正确的箭头。
+        # 悬停反馈由上面的 QComboBox:hover 边框变色承担，不靠换箭头图片。
         if 箭头:
             箭头规则 = f"""QComboBox::down-arrow {{
+{定位}
     image: url("{箭头}");
-    width: {宽度_箭头}px;
-    height: {高度_箭头}px;
-}}
-QComboBox:hover::down-arrow, QComboBox:on::down-arrow, QComboBox:focus::down-arrow {{
-    image: url("{箭头_激活}");
-}}
-QComboBox:disabled::down-arrow {{
-    image: url("{箭头_禁用}");
 }}"""
         else:
             # 项目目录不可写等情况下退化成边框拼的三角（没有图片也能看见）
-            箭头规则 = """QComboBox::down-arrow {{
+            箭头规则 = f"""QComboBox::down-arrow {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    right: 3px;
     image: none;
     width: 0;
     height: 0;
     border-left: 6px solid transparent;
     border-right: 6px solid transparent;
     border-top: 7px solid {c['文字']};
-}}
-QComboBox:hover::down-arrow, QComboBox:on::down-arrow {{
-    border-top: 7px solid {c['强调']};
 }}"""
         return f"""
 /* ============================================================

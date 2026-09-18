@@ -33,6 +33,7 @@ from ..配置 import (
 )
 from ..核心.适配器 import 适配器规格, 类型图标, 规范化标识
 from ..核心.模型 import 网盘类型
+from .滚动区 import 不压缩内容, 包成滚动区
 
 #: 凭证文件名（只用来在提示里告诉用户登录数据落在哪）
 凭证文件 = {
@@ -59,7 +60,9 @@ class 网盘编辑对话框(QDialog):
         self.是否新增 = 实例 is None
 
         self.setWindowTitle("新增网盘" if self.是否新增 else "编辑网盘")
-        self.resize(640, 300 if self.是否新增 else 420)
+        # 默认尺寸按内容给足；缩到最小时正文靠滚动查看，不会再把底部说明裁掉
+        self.resize(660, 430 if self.是否新增 else 520)
+        self.setMinimumSize(420, 300)
         self._构建()
         if self.是否新增:
             self._类型变化()
@@ -70,7 +73,15 @@ class 网盘编辑对话框(QDialog):
     # ---------------- 构建 ----------------
 
     def _构建(self):
-        布局 = QVBoxLayout(self)
+        # 外层只放"正文滚动区 + 底部按钮"，正文全部进 内容
+        外层 = QVBoxLayout(self)
+        内容 = 不压缩内容()
+        内容.setObjectName("PageScroll")
+        布局 = QVBoxLayout(内容)
+        布局.setContentsMargins(0, 0, 0, 0)
+        布局.setSpacing(10)
+        self.正文滚动区 = 包成滚动区(内容, 名字="PageScroll")
+        外层.addWidget(self.正文滚动区, 1)
 
         表单组 = QGroupBox("网盘信息")
         表单 = QFormLayout(表单组)
@@ -104,7 +115,7 @@ class 网盘编辑对话框(QDialog):
         self.提示标签 = QLabel()
         self.提示标签.setWordWrap(True)
         self.提示标签.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        布局.addWidget(self.提示标签, 1)
+        布局.addWidget(self.提示标签)
 
         按钮行 = QHBoxLayout()
         按钮行.addStretch(1)
@@ -115,7 +126,7 @@ class 网盘编辑对话框(QDialog):
         取消.clicked.connect(self.reject)
         按钮行.addWidget(确定)
         按钮行.addWidget(取消)
-        布局.addLayout(按钮行)
+        外层.addLayout(按钮行)
 
         if not self.是否新增:
             # 编辑模式才允许改类型以外的细节，且默认收起

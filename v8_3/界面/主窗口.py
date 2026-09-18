@@ -50,6 +50,7 @@ from .网盘页面 import 网盘页面
 from .网盘对话框 import 网盘编辑对话框
 from .敏感词管理页面 import 敏感词管理页面
 from .设置页面 import 设置页面
+from .滚动区 import 包一层滚动
 
 导航宽度 = 74
 
@@ -139,6 +140,37 @@ class 主窗口(QMainWindow):
 
     # ==================== 界面搭建 ====================
 
+    def _放进堆叠(self, 页: QWidget) -> QWidget:
+        """页面入栈前统一套一层滚动区。
+
+        窗口被拉小、或页面内容比可视区更宽时，用户可以上下/左右滑动查看，
+        而不是让 Qt 压缩页面里的控件（传输表格被挤变形就是这么来的）。
+        设置页/AI 页自己已经带滚动区，:func:`包一层滚动` 会原样返回。
+
+        注意：入栈的是**外框**，所以切换页面不能直接 ``setCurrentWidget(页面)``，
+        要走 :meth:`_切到` —— 那里会按页面把外框找出来（踩过：直接切会没反应）。
+        """
+        外层 = 包一层滚动(页)
+        self._页面外框[id(页)] = 外层
+        self._页面对象[id(页)] = 页
+        return 外层
+
+    def 当前页面(self) -> QWidget:
+        """当前显示的**页面本身**（栈里放的是滚动外框，这里还原回去）。
+
+        自检、脚本、将来任何"看看现在在哪一页"的地方都该用它，
+        而不是直接看 ``堆叠.currentWidget()``（那拿到的是外框）。
+        """
+        当前 = self.堆叠.currentWidget()
+        for 页, 外框 in self._页面外框.items():
+            if 外框 is 当前 and 页 in self._页面对象:
+                return self._页面对象[页]
+        return 当前
+
+    def _切到(self, 页: QWidget) -> None:
+        """切到某个页面（自动处理"栈里放的是滚动外框"这件事）。"""
+        self.堆叠.setCurrentWidget(self._页面外框.get(id(页), 页))
+
     def _构建界面(self):
         中央 = QWidget()
         self.setCentralWidget(中央)
@@ -148,6 +180,8 @@ class 主窗口(QMainWindow):
 
         主布局.addWidget(self._构建左侧栏())
 
+        self._页面外框: dict[int, QWidget] = {}   # id(页面) → 它的滚动外框
+        self._页面对象: dict[int, QWidget] = {}   # id(页面) → 页面（活着引用，避免 id 被复用）
         self.堆叠 = QStackedWidget()
         主布局.addWidget(self.堆叠, 1)
 
@@ -416,8 +450,8 @@ class 主窗口(QMainWindow):
         if not self._网盘按钮:
             if self._空状态页 is None:
                 self._空状态页 = 空状态页(self)
-                self.堆叠.addWidget(self._空状态页)
-            self.堆叠.setCurrentWidget(self._空状态页)
+                self.堆叠.addWidget(self._放进堆叠(self._空状态页))
+            self._切到(self._空状态页)
             self._当前标识 = ""
             self.当前网盘标签.setText("未选择网盘")
             self._更新管理按钮()
@@ -490,9 +524,9 @@ class 主窗口(QMainWindow):
             return
         if 标识 not in self._网盘页面:
             self._网盘页面[标识] = 网盘页面(self, 实例)
-            self.堆叠.addWidget(self._网盘页面[标识])
+            self.堆叠.addWidget(self._放进堆叠(self._网盘页面[标识]))
         self._当前标识 = 标识
-        self.堆叠.setCurrentWidget(self._网盘页面[标识])
+        self._切到(self._网盘页面[标识])
         self._设置导航激活(self._网盘按钮.get(标识))
         self.当前网盘标签.setText(f"📁 {实例['名称']}")
         设置界面配置(self.配置, 上次网盘=标识)
@@ -506,10 +540,10 @@ class 主窗口(QMainWindow):
             self._播放页面.状态更新.connect(
                 self._播放页面.处理准备结果,
                 Qt.QueuedConnection)
-            self.堆叠.addWidget(self._播放页面)
+            self.堆叠.addWidget(self._放进堆叠(self._播放页面))
         else:
             self._播放页面.刷新网盘列表()
-        self.堆叠.setCurrentWidget(self._播放页面)
+        self._切到(self._播放页面)
         self._设置导航激活(self.播放按钮)
         self.当前网盘标签.setText("🎬 视频播放")
         self._更新管理按钮()
@@ -534,10 +568,10 @@ class 主窗口(QMainWindow):
     def 切换到传输页(self):
         if self._传输页面 is None:
             self._传输页面 = 传输页面(self)
-            self.堆叠.addWidget(self._传输页面)
+            self.堆叠.addWidget(self._放进堆叠(self._传输页面))
         else:
             self._传输页面.刷新网盘列表()
-        self.堆叠.setCurrentWidget(self._传输页面)
+        self._切到(self._传输页面)
         self._设置导航激活(self.传输按钮)
         self.当前网盘标签.setText("📤 跨网盘传输")
         self._更新管理按钮()
@@ -545,7 +579,7 @@ class 主窗口(QMainWindow):
     def 传输页面(self) -> 传输页面:
         if self._传输页面 is None:
             self._传输页面 = 传输页面(self)
-            self.堆叠.addWidget(self._传输页面)
+            self.堆叠.addWidget(self._放进堆叠(self._传输页面))
             运行时 = getattr(self, "_AI运行时", None)
             if 运行时 is not None:
                 self._传输页面.AI调度器 = 运行时.调度器
@@ -554,16 +588,16 @@ class 主窗口(QMainWindow):
     def 日志页(self) -> 日志页面:
         if self._日志页面 is None:
             self._日志页面 = 日志页面(self)
-            self.堆叠.addWidget(self._日志页面)
+            self.堆叠.addWidget(self._放进堆叠(self._日志页面))
         return self._日志页面
 
     def 切换到敏感词页(self):
         if self._敏感词页面 is None:
             self._敏感词页面 = 敏感词管理页面(self)
-            self.堆叠.addWidget(self._敏感词页面)
+            self.堆叠.addWidget(self._放进堆叠(self._敏感词页面))
         else:
             self._敏感词页面.刷新()
-        self.堆叠.setCurrentWidget(self._敏感词页面)
+        self._切到(self._敏感词页面)
         self._设置导航激活(self.敏感词按钮)
         self.当前网盘标签.setText("🔒 敏感词")
         self._更新管理按钮()
@@ -573,10 +607,10 @@ class 主窗口(QMainWindow):
         if self._AI页面 is None:
             from .AI页面 import AI状态页面
             self._AI页面 = AI状态页面(self)
-            self.堆叠.addWidget(self._AI页面)
+            self.堆叠.addWidget(self._放进堆叠(self._AI页面))
         else:
             self._AI页面.刷新()
-        self.堆叠.setCurrentWidget(self._AI页面)
+        self._切到(self._AI页面)
         self._设置导航激活(self.AI按钮)
         self.当前网盘标签.setText("🤖 AI")
         self._更新管理按钮()
@@ -588,8 +622,8 @@ class 主窗口(QMainWindow):
     def 切换到日志页(self):
         if self._日志页面 is None:
             self._日志页面 = 日志页面(self)
-            self.堆叠.addWidget(self._日志页面)
-        self.堆叠.setCurrentWidget(self._日志页面)
+            self.堆叠.addWidget(self._放进堆叠(self._日志页面))
+        self._切到(self._日志页面)
         self._设置导航激活(self.日志按钮)
         self.当前网盘标签.setText("📋 日志")
         self._更新管理按钮()
@@ -597,12 +631,12 @@ class 主窗口(QMainWindow):
     def 设置页(self) -> 设置页面:
         if self._设置页面 is None:
             self._设置页面 = 设置页面(self)
-            self.堆叠.addWidget(self._设置页面)
+            self.堆叠.addWidget(self._放进堆叠(self._设置页面))
         return self._设置页面
 
     def 切换到设置页(self):
         self.设置页().刷新()
-        self.堆叠.setCurrentWidget(self._设置页面)
+        self._切到(self._设置页面)
         self._设置导航激活(self.设置按钮)
         self.当前网盘标签.setText("⚙ 设置")
         self._更新管理按钮()
