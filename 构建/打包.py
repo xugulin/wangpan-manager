@@ -39,11 +39,15 @@ def _读版本() -> str:
 版本 = _读版本()
 
 #: 打进包里的源码/文档（从项目根拷）
-源码项 = ("启动.py", "启动.sh", "pyproject.toml", "README.md",
+#: 两个平台都带的源码/文档
+源码项 = ("启动.py", "pyproject.toml", "README.md",
         "v8_3", "工具", "tests", "docs", "适配器")
 
+#: 只给 Linux 的（Windows 包里有 Windows 启动器，不需要 .sh）
+Linux源码 = ("启动.sh",)
+
 #: 平台附加文件（各平台只带自己那份，别把 Windows 的 .exe 塞进 Linux 包）
-Linux附加 = ("创建桌面图标.sh", "使用说明.txt", "assets")
+Linux附加 = ("创建桌面图标.sh", "使用说明.txt", "assets") + Linux源码
 Windows附加 = ("创建桌面图标.bat", "启动（看报错）.bat", "使用说明.txt", "assets")
 启动器exe = Path(__file__).resolve().parent / "启动器" / "启动.exe"
 
