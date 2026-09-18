@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFileDialog, QGroupBox, QHBoxLayout,
@@ -60,11 +61,110 @@ class 网盘页面(QWidget):
         self._显示量 = self.首屏显示量
         self._加载世代 = 0
         self._上次双击 = 0.0
+        self._登录后重试剩余 = 0
+        self._凭证同步中 = False
         self._操作线程: list = []
 
         self._构建()
         self._刷新管理区(首次=True)
+        self._启动凭证监视()
         self.加载当前目录()
+
+    # ==================== 凭证监视（原 GUI 里退出登录也能同步） ====================
+
+    #: 安全网：文件监视器偶尔收不到事件（删文件/换文件/网络盘），
+    #: 再叠一个低频轮询，保证"凭证没了 → 界面收干净"最迟 10 秒内发生。
+    凭证轮询毫秒 = 10000
+
+    def _启动凭证监视(self) -> None:
+        """盯住该网盘的凭证文件/数据目录：一有变化就重新核对登录态。
+
+        用户现场反馈：在**原生 GUI** 里退出登录后，网盘管理这边列表还在、
+        上传下载还能用。原因是界面从来不检查凭证是否还在。这里用
+        QFileSystemWatcher 盯目录 + 文件，再叠一个 10 秒轮询兜底。
+        """
+        try:
+            self._凭证监视 = QFileSystemWatcher(self)
+        except Exception:
+            self._凭证监视 = None
+        self._凭证路径 = None
+        if self._凭证监视 is not None:
+            try:
+                self._凭证监视.directoryChanged.connect(
+                    lambda _p: self._凭证有变化())
+                self._凭证监视.fileChanged.connect(
+                    lambda _p: self._凭证有变化())
+            except Exception:
+                pass
+        self._重挂凭证监视()
+        try:
+            self._凭证计时 = QTimer(self)
+            self._凭证计时.setInterval(int(self.凭证轮询毫秒))
+            self._凭证计时.timeout.connect(self._轮询凭证)
+            self._凭证计时.start()
+        except Exception:
+            self._凭证计时 = None
+
+    def _重挂凭证监视(self) -> None:
+        监视 = getattr(self, "_凭证监视", None)
+        if 监视 is None:
+            return
+        规格 = self.动作.规格(self.标识)
+        if 规格 is None:
+            return
+        目标 = []
+        try:
+            目标.append(str(规格.数据目录))
+        except Exception:
+            pass
+        try:
+            目标.append(str(规格.凭证文件))
+        except Exception:
+            pass
+        for 路径 in 目标:
+            try:
+                if 路径 not in 监视.directories() and 路径 not in 监视.files():
+                    监视.addPath(路径)
+            except Exception:
+                pass
+        self._凭证路径 = 目标[-1] if 目标 else None
+
+    def _轮询凭证(self) -> None:
+        """低频兜底：凭证文件在不在。只在**状态可能变化**时才动界面。"""
+        try:
+            规格 = self.动作.规格(self.标识)
+        except Exception:
+            规格 = None
+        if 规格 is None:
+            return
+        存在 = False
+        try:
+            存在 = Path(规格.凭证文件).is_file()
+        except Exception:
+            存在 = False
+        上次 = getattr(self, "_凭证存在", None)
+        self._凭证存在 = 存在
+        if 上次 is not None and 上次 and not 存在:
+            # 凭证刚被删（多半是在原生 GUI 里退出登录了）
+            self.主窗口.追加日志(
+                f"[{self.名称}] 检测到登录凭证已被删除，正在同步为未登录…")
+            self._重挂凭证监视()
+            self._置为未登录("登录凭证已被删除")
+            self._凭证有变化()
+        elif 上次 is not None and not 上次 and 存在:
+            self._凭证有变化()
+
+    def _凭证有变化(self) -> None:
+        """凭证文件/数据目录有变化：重挂监视（删了要重新 addPath）并核一次状态。
+
+        加一个"同步中"闸门：监视器 + 10 秒兜底轮询 + 退出登录三路都可能触发，
+        没有闸门时会叠出好几次"检查中…"，界面看着像卡住了。
+        """
+        self._重挂凭证监视()
+        if getattr(self, "_凭证同步中", False):
+            return
+        self._凭证同步中 = True
+        self._刷新管理区()
 
     # ==================== 界面 ====================
 
@@ -127,6 +227,22 @@ class 网盘页面(QWidget):
         self.刷新状态按钮 = QPushButton("🔄 刷新状态")
         self.刷新状态按钮.clicked.connect(lambda: self._刷新管理区())
         按钮行.addWidget(self.刷新状态按钮)
+
+        # 用户要求：GUI 里要能直接「退出登录 / 重新登录」。
+        # 以前只能去适配器原 GUI 里退，退了之后这边状态也不跟着变
+        # （列表还在、上传下载照用），看起来像"没退成功"。
+        self.退出登录按钮 = QPushButton("🚪 退出登录")
+        self.退出登录按钮.setToolTip(
+            "清除该网盘的本地登录凭证（数据/会话/令牌/凭证文件）"
+            "并立即把本页置为未登录：清空列表、禁用上传下载")
+        self.退出登录按钮.clicked.connect(self._退出登录)
+        按钮行.addWidget(self.退出登录按钮)
+
+        self.重新登录按钮 = QPushButton("🔁 重新登录")
+        self.重新登录按钮.setToolTip(
+            "先退出当前账号，再打开统一登录对话框重新登录（换账号用这个）")
+        self.重新登录按钮.clicked.connect(self._重新登录)
+        按钮行.addWidget(self.重新登录按钮)
 
         数据目录按钮 = QPushButton("📂 打开数据目录")
         数据目录按钮.clicked.connect(lambda: self._打开目录(self._目录("数据")))
@@ -258,6 +374,121 @@ class 网盘页面(QWidget):
     def 刷新管理区(self):
         self._刷新管理区()
 
+    # ==================== 退出登录 / 重新登录 ====================
+
+    def _退出登录(self, 静默: bool = False) -> bool:
+        """清掉本地凭证，并**立刻**把本页置为未登录。
+
+        用户现场反馈（原生 GUI 里退出登录后）：网盘管理这边状态不对 ——
+        列表还在、上传下载照样能用，只是左边绿点变了。根因是界面从来没在
+        "凭证被清掉"时同步过自己。现在退出登录由本页主导：清凭证 →
+        清列表 → 禁写 → 刷新左侧绿点，一步不落。
+        """
+        if not 静默:
+            回答 = QMessageBox.question(
+                self, "退出登录",
+                f"确定要退出「{self.名称}」吗？\n\n"
+                "会删除该网盘的本地登录凭证（会话/令牌/Cookie 文件），"
+                "下次需要重新登录。云端文件不受影响。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if 回答 != QMessageBox.Yes:
+                return False
+        try:
+            适配器 = self.动作.适配器(self.标识)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "不可用", f"适配器不可用：{error短(str(e))}")
+            return False
+        线程 = 文件操作线程(
+            "退出登录", lambda 进度: dict(适配器.退出登录() or {}), self)
+
+        def 完成(_描述: str, 结果: dict):
+            if str((结果 or {}).get("状态")) == "成功":
+                self.主窗口.追加日志(
+                    f"[{self.名称}] ✅ {(结果 or {}).get('消息', '已退出登录')}")
+                self._置为未登录((结果 or {}).get("消息") or "已退出登录")
+            else:
+                提示 = (结果 or {}).get("提示") or ""
+                QMessageBox.warning(
+                    self, "退出登录失败",
+                    f"{(结果 or {}).get('消息', '退出登录失败')}\n{提示}")
+
+        def 失败(_描述: str, 错误: str):
+            QMessageBox.warning(self, "退出登录失败", error短(错误, 400))
+
+        线程.完成.connect(完成)
+        线程.失败.connect(失败)
+        self._操作线程.append(线程)
+        线程.finished.connect(lambda t=线程: self._清理线程(t))
+        线程.start()
+        return True
+
+    def 置为未登录(self, 原因: str = "") -> None:
+        """外部（主窗口/监视器）发现凭证没了时调这个，状态与界面一起收干净。"""
+        self._置为未登录(原因)
+
+    def _置为未登录(self, 原因: str = "") -> None:
+        self._上次已登录 = False
+        self._登录后重试剩余 = 0
+        self._文件列表 = []
+        self._显示列表 = []
+        self._渲染表格()
+        self._更新写按钮(False)
+        文字 = "⚪ 未登录"
+        if 原因:
+            文字 += f"（{原因}）"
+        self.状态标签.setText(文字)
+        try:
+            self.主窗口.设置网盘状态(self.标识, False)
+        except Exception:
+            pass
+
+    def _更新写按钮(self, 可写: bool) -> None:
+        """未登录时把"需要权限"的按钮置灰（用户要求：清列表 + 禁写）。"""
+        for 按钮 in (getattr(self, "上传按钮", None),
+                    getattr(self, "上传目录按钮", None),
+                    getattr(self, "下载按钮", None),
+                    getattr(self, "新建目录按钮", None),
+                    getattr(self, "删除按钮", None)):
+            if 按钮 is None:
+                continue
+            try:
+                按钮.setEnabled(bool(可写))
+            except Exception:
+                pass
+        for 按钮, 提示 in ((getattr(self, "上传按钮", None),
+                        "未登录：先点「🔐 登录 / 管理」"),
+                       (getattr(self, "下载按钮", None),
+                        "未登录：先点「🔐 登录 / 管理」")):
+            if 按钮 is not None:
+                try:
+                    if not 可写:
+                        按钮.setToolTip(提示)
+                except Exception:
+                    pass
+
+    def _重新登录(self):
+        """先退出当前账号，再打开统一登录（换账号用）。"""
+        if not self._退出登录():
+            return
+        self.主窗口.追加日志(f"[{self.名称}] 已请求重新登录…")
+        QTimer.singleShot(800, self._统一登录)
+
+    #: 登录后"立即列目录"允许的重试次数：桥进程里那份会话仓库要重读一次盘，
+    #: 偶尔第一枪会撞上未登录（errno:-6）。重试一次即可稳定出列表，
+    #: 比让用户自己点「🔄 刷新」快得多。
+    登录后列目录重试 = 2
+
+    def 登录后立即加载(self, 路径: str | None = None) -> None:
+        """登录成功 → **马上去列目录**，不再等账号状态查询回来。
+
+        用户反馈：「网盘管理的 GUI 登录后要等很久才能列出文件，没有原 GUI 快」。
+        原因是列表要等 `账号状态()`（取模板变量 + 取用户信息，慢时十几秒）回来
+        才在 `_状态成功` 里补一次列目录。现在两者并行：**列表先出，状态栏后到**。
+        """
+        self._上次已登录 = True
+        self._登录后重试剩余 = int(self.登录后列目录重试)
+        self.加载当前目录(路径)
+
     def _刷新管理区(self, 首次: bool = False):
         if self.动作.规格(self.标识) is None:
             self.状态标签.setText("⚪ 该网盘未启用（在左下角「编辑网盘」里启用）")
@@ -273,6 +504,7 @@ class 网盘页面(QWidget):
     def _状态成功(self, 标识: str, 信息: dict):
         if 标识 != self.标识:
             return
+        self._凭证同步中 = False
         登录 = "🟢 已登录" if 信息.get("logged_in") else "⚪ 未登录"
         用户 = 信息.get("user") or "-"
         详情 = 信息.get("detail") or {}
@@ -282,11 +514,17 @@ class 网盘页面(QWidget):
             if 键 in 会员:
                 容量 += f"，{标签}={self._格式化大小(会员[键])}"
         警告 = ""
-        if 详情.get("refresh_error") or 详情.get("user_error"):
+        if 详情.get("write_error"):
+            # 写权限探针（不产生副作用）给了明确原因：直接摆出来，
+            # 用户才知道"能列目录但上传/改名/删除全失败"到底该怎么办。
+            警告 = f"；⚠️ 写操作不可用：{详情['write_error']}"
+        elif 详情.get("refresh_error") or 详情.get("user_error"):
             警告 = "；⚠️ 读正常，写操作可能需要重新登录"
         # 只报登录态/账号/容量/警告：数据目录不在这里堆（要看/要开有下面那排按钮），
         # 也免得把本机绝对路径一直摆在界面上。
         self.状态标签.setText(f"{登录}，用户：{用户}{容量}{警告}")
+        可写 = bool(详情.get("write_error") is None)
+        self._更新写按钮(bool(信息.get("logged_in")) and 可写)
         if 登录.startswith("🟢"):
             self.主窗口.设置网盘状态(self.标识, True)
             # 刚登录成功、或列表还是空的：自动列一次目录 ——
@@ -296,11 +534,25 @@ class 网盘页面(QWidget):
             if 刚登录 or self.文件表格.rowCount() == 0:
                 self.加载当前目录()
         else:
-            self._上次已登录 = False
+            # 凭证没了（在原生 GUI 里退出登录 / 会话被清空）：
+            # 之前这里只把标志位归零，列表和上传下载全都留着，用户看到的是
+            # "明明退了还在、还能传"。现在一并收干净。
+            if self._上次已登录 or self.文件表格.rowCount():
+                原因 = "登录凭证已失效或已被清除，请重新登录"
+                if isinstance(详情, dict) and 详情.get("no_credential"):
+                    原因 = "本地登录凭证已不存在"
+                self._置为未登录(原因)
+            else:
+                self._上次已登录 = False
+                self._文件列表 = []
+                self._显示列表 = []
+                self._渲染表格()
+                self._更新写按钮(False)
 
     def _状态失败(self, 标识: str, 错误: str):
         if 标识 != self.标识:
             return
+        self._凭证同步中 = False
         self.状态标签.setText(f"🔴 状态获取失败：{error短(错误)}")
         self.主窗口.追加日志(f"[{self.名称}] 状态获取失败：{错误}")
 
@@ -339,6 +591,7 @@ class 网盘页面(QWidget):
         if 世代 != self._加载世代 or 路径 != self.当前目录:
             return
         self.文件表格.setEnabled(True)
+        self._登录后重试剩余 = 0
         self._文件列表 = list(条目)
         self._构造显示列表()
         self._渲染表格()
@@ -348,6 +601,15 @@ class 网盘页面(QWidget):
         if 世代 != self._加载世代:
             return
         self.文件表格.setEnabled(True)
+        # 刚登录完的第一次列目录偶尔会撞上"桥进程还没重读会话"（errno:-6）：
+        # 自动再试一次，而不是让用户看着空列表自己点刷新。
+        剩余 = int(getattr(self, "_登录后重试剩余", 0) or 0)
+        if 剩余 > 0 and 路径 == self.当前目录:
+            self._登录后重试剩余 = 剩余 - 1
+            self.主窗口.状态消息(
+                f"[{self.名称}] {路径} 第一次没列出来（{error短(错误, 60)}），正在重试…")
+            QTimer.singleShot(600, self.加载当前目录)
+            return
         self.主窗口.状态消息(f"[{self.名称}] 加载失败：{error短(错误)}")
         self.主窗口.追加日志(f"[{self.名称}] 列目录失败 {路径}：{错误}")
 

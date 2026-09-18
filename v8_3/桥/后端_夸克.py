@@ -734,6 +734,50 @@ class 后端(后端基类):
                        额外: dict | None = None) -> dict:
         return {"状态": "不支持", "消息": self.未支持方式说明["password"]}
 
+    # ---------------- 退出登录 ----------------
+
+    def 退出登录(self) -> dict:
+        """清掉本机保存的夸克凭证（数据/凭证.json）。只动本地文件。"""
+        m = self._导入()
+        清除: list[str] = []
+        try:
+            仓库 = m["全局凭证仓库"]
+            路径 = getattr(仓库, "文件路径", None)
+            仓库.清空()
+            if 路径 is not None:
+                清除.append(str(路径))
+        except Exception as e:  # noqa: BLE001
+            return {"状态": "失败", "消息": f"清空夸克凭证失败：{e}",
+                    "提示": "可在适配器原 GUI 里退出登录"}
+        try:
+            for 名字 in ("凭证.json", "令牌.json", "会话.json"):
+                文件 = self.项目根 / "数据" / 名字
+                if 文件.is_file():
+                    文件.unlink()
+                    清除.append(str(文件))
+        except Exception as e:  # noqa: BLE001
+            self.记录(f"[夸克] 清理残留凭证文件失败：{e}", "warning")
+        try:
+            self._本地.ctx = None      # 作废缓存的网络上下文（旧 Cookie 不再复用）
+        except Exception:
+            pass
+        try:
+            self._失效列缓存()
+        except Exception:
+            pass
+        self.记录("[夸克] 已退出登录（本地凭证已清除）")
+        信息 = {}
+        try:
+            信息 = self.account()
+        except Exception:
+            pass
+        return {
+            "状态": "成功",
+            "消息": "已退出登录，本地凭证已清除",
+            "清除": 清除,
+            "账号": 信息,
+        }
+
     # ---------------- 扫码 ----------------
 
     def login_qr_start(self) -> dict:

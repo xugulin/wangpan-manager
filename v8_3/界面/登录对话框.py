@@ -70,6 +70,8 @@ class 登录对话框(QDialog):
         self._扫码会话 = ""
         self._短信会话 = ""
         self._短信倒计时 = 0
+        self.扫码重试次数 = 0
+        self.扫码重试提示 = ""
 
         self.setWindowTitle(f"登录网盘 · {self.实例.get('名称', self.标识)}")
         self.resize(760, 640)
@@ -480,7 +482,22 @@ class 登录对话框(QDialog):
 
     def _通知成功(self):
         self._停止核对()
-        """登录成功后让网盘页刷新状态。"""
+        """登录成功后让网盘页**立刻列一次目录**，状态栏并行刷新。
+
+        顺序很关键：以前只调 `刷新网盘状态()`，而列目录要等账号状态查询
+        （取模板变量 + 取用户信息）回来才触发 —— 用户感觉就是"登录完半天不出文件"。
+        现在先起列目录，再起状态查询，两条链路并行。
+        """
+        页 = None
+        try:
+            页 = self.主窗口._网盘页面.get(self.标识)
+        except Exception:
+            页 = None
+        if 页 is not None:
+            try:
+                页.登录后立即加载()
+            except Exception as e:  # noqa: BLE001
+                self._日志(f"登录后立即列目录失败（不影响登录）：{e}", "警告")
         try:
             self.主窗口.刷新网盘状态(self.标识)
         except Exception:
@@ -523,9 +540,37 @@ class 登录对话框(QDialog):
 
     def _开始扫码(self):
         self.开始扫码按钮.setEnabled(False)
+        self.扫码重试次数 = 0
         self._设置状态("正在获取二维码…")
-        self._跑("获取二维码", lambda 进度: self.适配器.扫码开始(),
+        self._跑("获取二维码", lambda 进度: self._扫码开始一次(首次=True),
                处理器=lambda r: self._扫码已开始(r))
+
+    #: 「扫码开始」是一次**短**请求（取一张码），超时多为冷启动/网络抖动。
+    #: 实测：桥进程冷启动 + 首次 TLS 建连偶尔会顶到 60s 客户端超时，而重试
+    #: 一次就秒回（用户现场那条 `[guangya/login_qr_start] 适配器调用超时（60.0s）`
+    #: 之后紧接着登录就成功了，就是这个形态）。所以这里自己兜一次重试。
+    扫码开始最多尝试 = 3
+
+    def _扫码开始一次(self, 首次: bool = False) -> dict:
+        适配器 = self.适配器
+        try:
+            return dict(适配器.扫码开始() or {})
+        except Exception as 异常:  # noqa: BLE001 - 网络抖动/超时都要能兜住
+            文本 = f"{type(异常).__name__}: {异常}"
+            if self.扫码重试次数 + 1 >= self.扫码开始最多尝试:
+                raise
+            self.扫码重试次数 += 1
+            self.扫码重试提示 = (
+                f"获取二维码超时（{error短(文本, 80)}），"
+                f"正在自动重试第 {self.扫码重试次数} 次…")
+            try:
+                self._日志(f"获取二维码失败，自动重试第 {self.扫码重试次数} 次：{文本}",
+                        "警告")
+            except Exception:
+                pass
+            import time as _time
+            _time.sleep(0.8)
+            return self._扫码开始一次(首次=False)
 
     def _扫码已开始(self, 信息):
         self.开始扫码按钮.setEnabled(True)
@@ -548,6 +593,11 @@ class 登录对话框(QDialog):
         用户码 = str(信息.get("用户码") or "")
         图片 = str(信息.get("图片base64") or "")
         链接 = str(信息.get("二维码链接") or 信息.get("链接") or "")
+        # ⚠️ 设备授权码型（光鸭）：后端只给「验证地址」这一条 URL，界面以前既不画码
+        #    也不当链接，用户看到的是一段说明文字 —— 这就是"二维码显示不出来"。
+        #    适配器原 GUI 的做法就是把这条地址本身画成二维码，这里保持一致。
+        if not (图片 or 链接) and 地址.startswith("http"):
+            链接 = 地址
         if 图片:
             try:
                 数据 = base64.b64decode(图片)
@@ -566,11 +616,16 @@ class 登录对话框(QDialog):
             self.二维码标签.setText(f"{类型}\n请在浏览器打开右侧地址")
         self.设备码标签.setText(f"用户码：{用户码}" if 用户码 else "")
         self.验证地址标签.setText(地址)
-        self.扫码提示标签.setText(提示 or "请用手机扫码 / 打开验证地址完成授权")
+        默认提示 = ("请用手机扫描二维码完成授权"
+                 if 链接 else "请用手机扫码 / 打开验证地址完成授权")
+        self.扫码提示标签.setText(提示 or 默认提示)
         self._日志(f"二维码已就绪（{类型}）"
                  + (f" 验证地址：{地址}" if 地址 else "")
                  + (f" 用户码：{用户码}" if 用户码 else ""))
         超时 = float(信息.get("有效期秒") or self.扫码默认超时)
+        if self.扫码重试提示:
+            self._日志(self.扫码重试提示)
+            self.扫码重试提示 = ""
         self._设置状态("等待扫码/授权…（扫码完成后会自动登录）", "#f39c12")
         self.取消扫码按钮.setEnabled(True)
         self._跑("等待扫码", lambda 进度: self.适配器.扫码等待(
@@ -585,10 +640,13 @@ class 登录对话框(QDialog):
         用户反馈：扫码后界面一直停在"等待中"，重启才发现其实已经登录成功 ——
         适配器内部的扫码轮询有时就是不上报成功。与其等它，不如直接问账号状态，
         一旦已登录就当成功处理（顺带立刻加载文件列表）。
+
+        间隔 6 秒（原来是 3 秒）：核对期间扫码轮询本身也在打同一个桥进程，
+        频次太高会让"扫码 → 换令牌"这两步互相抢连接，反而更容易失败。
         """
         if getattr(self, "_核对计时", None) is None:
             self._核对计时 = QTimer(self)
-            self._核对计时.setInterval(3000)
+            self._核对计时.setInterval(6000)
             self._核对计时.timeout.connect(self._核对一次)
         self._核对中 = False
         self._核对计时.start()
@@ -626,12 +684,23 @@ class 登录对话框(QDialog):
         self._核对线程们.append(线程)
 
     def _本地渲染二维码(self, 内容: str) -> bool:
-        """有些网盘只给二维码链接（如夸克），界面这边用 qrcode 库自己画。"""
+        """有些网盘只给一条链接/验证地址（夸克、光鸭），界面这边自己画二维码。
+
+        渲染参数与适配器原 GUI 对齐（纠错 M、box_size 10、border 2）——
+        光鸭的验证地址有 139 字符，纠错等级调低一点码点更疏、更好扫。
+        """
         try:
             import io
 
             import qrcode
-            图 = qrcode.make(内容)
+            码 = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=10, border=2,
+            )
+            码.add_data(内容)
+            码.make(fit=True)
+            图 = 码.make_image(fill_color="black", back_color="white")
             缓冲 = io.BytesIO()
             图.save(缓冲, format="PNG")
             像素 = QPixmap()

@@ -25,11 +25,25 @@ class 后端(后端基类):
         return self.存储根 / 路径.lstrip("/")
 
     def account(self) -> dict:
+        """假网盘：凭证文件在 = 已登录。
+
+        ⚠️ 以前这里恒回 ``logged_in=True``，于是"退出登录之后界面还在、
+        凭证文件没了状态还是已登录"这类 bug 在假网盘上根本测不出来。
+        现在如实反映凭证文件的存在与否（与真网盘对齐）。
+        """
+        凭证 = self._凭证文件()
+        存在 = False
+        try:
+            存在 = Path(凭证).is_file()
+        except Exception:
+            pass
         return {
-            "logged_in": True,
-            "user": "fake-user",
+            "logged_in": bool(存在),
+            "user": "fake-user" if 存在 else "",
             "data_dir": str(self.存储根),
-            "detail": {"note": "本地假网盘，仅用于测试"},
+            "detail": {"note": "本地假网盘，仅用于测试",
+                       "no_credential": not 存在,
+                       "credential": str(凭证)},
         }
 
     def list(self, path: str) -> list[dict]:
@@ -167,6 +181,20 @@ class 后端(后端基类):
                 pass
         self._会话 = {}
 
+    def 退出登录(self) -> dict:
+        """假网盘：删掉本地凭证文件（离线、无副作用）。"""
+        清除 = []
+        for 文件 in (self._凭证文件(), self.项目根 / "数据" / "令牌.json"):
+            try:
+                if Path(文件).is_file():
+                    Path(文件).unlink()
+                    清除.append(str(文件))
+            except Exception:
+                pass
+        self._会话 = {}
+        return {"状态": "成功", "消息": "已退出登录", "清除": 清除,
+                "账号": self.account()}
+
     def auth_caps(self) -> dict:
         # 假网盘故意把"邮箱/账号密码"标成不支持，界面据此禁用这两页
         return {
@@ -178,8 +206,40 @@ class 后端(后端基类):
             "password": {"支持": False, "说明": "假网盘未提供账号密码登录"},
         }
 
+    #: 假网盘扫码返回的形态：`图片`（base64 二维码）或 `设备码`
+    #: （复刻光鸭：只给一条验证地址，界面得自己把地址画成二维码）。
+    二维码模式 = "图片"
+
+    def _扫码模式(self) -> str:
+        """取扫码形态。
+
+        假后端跑在**桥子进程**里，测试改不了它的类属性，所以额外支持一个
+        标记文件 ``数据/扫码模式.txt``（自检写、桥进程读）。
+        """
+        try:
+            文件 = self.项目根 / "数据" / "扫码模式.txt"
+            if 文件.is_file():
+                文本 = 文件.read_text(encoding="utf-8").strip()
+                if 文本:
+                    return 文本
+        except Exception:
+            pass
+        return str(self.二维码模式)
+
     def login_qr_start(self) -> dict:
         self._登出所有方式()
+        if self._扫码模式() == "设备码":
+            self._会话 = {"类型": "设备码"}
+            return {
+                "状态": "成功",
+                "类型": "设备码",
+                "验证地址": "https://example.invalid/__/auth/device/"
+                          "?client_id=fake-client&user_code=FAKE-CODE-123",
+                "用户码": "FAKE-CODE-123",
+                "会话": "假扫码会话",
+                "有效期秒": 30,
+                "提示": "用假网盘 App 扫描二维码即可授权",
+            }
         self._会话 = {"类型": "图片"}
         return {"类型": "图片", "图片base64": self.测试二维码PNG,
                 "提示": "用假网盘 App 扫码（自检会自动成功）",

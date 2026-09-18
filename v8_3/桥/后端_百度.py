@@ -23,7 +23,18 @@ import time
 import uuid
 from pathlib import Path
 
-from 后端_基类 import 后端基类, 规范, 多段下载, 读取下载分段, 规范命名, 确认可见
+from 后端_基类 import (后端基类, 规范, 多段下载, 读取下载分段, 规范命名, 确认可见)
+
+#: 写权限探针的结论缓存：网盘页每次刷新状态都会调 account()，
+#: 不该每次都多发一条写请求、多刷一条同样的提示。
+_写探针缓存: dict = {"时间": 0.0, "提示": "", "窗口": 0.0}
+
+
+def _写探针缓存写入(提示: str, 现在: float) -> None:
+    #: 通过时缓存 5 分钟（正常状态不用反复探），不通过时 2 分钟（好得快一点）
+    _写探针缓存["时间"] = 现在
+    _写探针缓存["提示"] = 提示
+    _写探针缓存["窗口"] = 300.0 if not 提示 else 120.0
 
 _项目根 = None  # 由工作进程导入前插入 sys.path；这里保持模块可独立导入
 
@@ -104,23 +115,79 @@ class 后端(后端基类):
 
     @staticmethod
     def _确保可写(ctx: _上下文) -> None:
-        """写接口前确认 bdstoken 可用；失效时给出明确的中文指引。"""
+        """写接口前确认 bdstoken 可用；拿不到时给出**可执行**的中文指引。
+
+        ✅ 真机实测（2026-09-19，用户那份"读全通、写全废"的会话）：
+             /api/list、/rest/2.0/xpan/nas?method=uinfo → errno:0（BDUSS 有效）
+             /api/gettemplatevariable                    → errno:-6
+             /api/loginStatus                            → errno:0 + bdstoken
+             /api/create（带上面那个 bdstoken）           → errno:-6
+        两条结论都必须让用户看见：
+          1. bdstoken 不是取不到，是以前**只走了一条路**（模板变量接口）。
+             现在回退到 /api/loginStatus，同样拿得到；
+          2. 但写操作照样 -6，那就不是 bdstoken 的问题，而是**STOKEN 失效**：
+             百度读接口只认 BDUSS，写接口认 BDUSS + STOKEN。
+        """
         try:
             if ctx.会话仓库.获取bdstoken():
                 return
         except Exception:
             pass
+        令牌 = ""
         try:
-            ctx.认证.取模板变量()
-        except Exception as e:
+            令牌 = str(ctx.认证.从登录态补bdstoken() or "")
+        except Exception:
+            try:
+                令牌 = str((ctx.认证.取模板变量() or {}).get("bdstoken") or "")
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(
+                    "百度写权限不可用：bdstoken 取不到"
+                    "（/api/loginStatus 与 /api/gettemplatevariable 都失败）。"
+                    "会话多半已失效，请重新登录。") from e
+        if not 令牌:
             raise RuntimeError(
-                "百度写权限不可用：bdstoken 刷新失败（errno -6）。"
-                "请在 V8_3「网盘管理」页点百度「登录 / 管理」，"
-                "在原百度适配器 GUI 里重新登录后重试。") from e
-        if not ctx.会话仓库.获取bdstoken():
-            raise RuntimeError(
-                "百度写权限不可用：会话里没有 bdstoken。"
-                "请在原百度适配器 GUI 里重新登录后重试。")
+                "百度写权限不可用：服务端没有下发 bdstoken。请重新登录。")
+
+    @staticmethod
+    def _写权限提示(ctx: _上下文) -> str:
+        """无副作用的写权限探针：说清"读得到、写不了"是哪一环坏了。
+
+        拿一个**非法路径**去 CREATE：合法写会话回参数/路径错误，失效会话回
+        errno:-6 —— 不在网盘上留下任何东西。
+
+        结论缓存 5 分钟（失败结论 2 分钟）：网盘页每次刷新状态都会调 account()，
+        不该每次都多发一条写请求、多刷一条同样的提示。
+        """
+        缓存 = _写探针缓存
+        现在 = time.time()
+        if 缓存.get("时间") and 现在 - float(缓存["时间"]) < float(缓存["窗口"]):
+            return str(缓存.get("提示") or "")
+        try:
+            if not ctx.会话仓库.获取stoken():
+                提示 = "会话里没有 STOKEN：百度的写操作必须带 STOKEN"
+                _写探针缓存写入(提示, 现在)
+                return 提示
+        except Exception:
+            pass
+        try:
+            ctx.网络.请求(
+                "POST", "/api/create",
+                params={"path": "/V8_3_写权限探针_请忽略", "isdir": "1",
+                        "block_list": "[]"},
+                需要bdstoken=True,
+            )
+            提示 = ""
+        except Exception as e:  # noqa: BLE001
+            if getattr(e, "errno", None) == -6:
+                提示 = ("写操作被服务端拒绝（errno:-6）：会话里的 STOKEN 已失效"
+                        "（读接口只认 BDUSS，写接口认 BDUSS + STOKEN）。"
+                        "请在浏览器打开 pan.baidu.com 确认仍登录，"
+                        "复制整段 Cookie（含 BDUSS 与 STOKEN）后"
+                        "用「🍪 导入Cookie」重新登录。")
+            else:
+                提示 = f"写权限探针异常：{type(e).__name__}: {str(e)[:120]}"
+        _写探针缓存写入(提示, 现在)
+        return 提示
 
     # ---------------- 账号 ----------------
 
@@ -140,6 +207,13 @@ class 后端(后端基类):
                 ctx.认证.取模板变量()
             except Exception as e:
                 详情["refresh_error"] = str(e)[:200]
+                # ✅ 回退路径：模板变量接口回 -6 的会话，loginStatus 仍会给 bdstoken
+                try:
+                    if ctx.认证.从登录态补bdstoken():
+                        详情.pop("refresh_error", None)
+                        详情["bdstoken_from"] = "loginStatus"
+                except Exception:
+                    pass
             try:
                 u = ctx.认证.取当前用户()
                 用户名 = str(u.get("uname") or "")
@@ -149,18 +223,15 @@ class 后端(后端基类):
                 })
             except Exception as e:
                 详情["user_error"] = str(e)[:200]
+            # 写权限探测（只读判断，不产生任何副作用）：
+            #   有 bdstoken 也可能没有写权限 —— 百度把读/写授权分开判定，
+            #   实测"只读会话"（STOKEN 失效）下写接口恒返回 errno:-6。
+            #   探针结果直接摆到界面上，用户一眼就知道该去干什么。
+            提示 = self._写权限提示(ctx)
+            if 提示:
+                详情["write_error"] = 提示
         except Exception as e:
             详情["error"] = str(e)[:200]
-        # 写权限探测（只读判断，不产生任何副作用）：
-        #   有 bdstoken 也可能没有写权限——百度把读/写授权分开判定，
-        #   实测写接口在"只读会话"下恒返回 errno:-6。
-        try:
-            m = _导入()
-            令牌 = m["全局会话仓库"].获取bdstoken()
-            if not 令牌:
-                详情["write_hint"] = "缺少 bdstoken：写操作会失败，请重新登录"
-        except Exception:
-            pass
         return {
             "logged_in": 已登录,
             "user": 用户名,
@@ -916,6 +987,46 @@ class 后端(后端基类):
     def login_password(self, 账号: str = "", 密码: str = "",
                        额外: dict | None = None) -> dict:
         return self._不支持("账号密码登录")
+
+    # ---------------- 退出登录 ----------------
+
+    def 退出登录(self) -> dict:
+        """清掉本机保存的百度会话（数据/会话.json）。只动本地文件。"""
+        m = _导入()
+        清除: list[str] = []
+        try:
+            仓库 = m["全局会话仓库"]
+            路径 = getattr(仓库, "文件路径", None)
+            仓库.清空()
+            if 路径 is not None:
+                清除.append(str(路径))
+        except Exception as e:  # noqa: BLE001
+            return {"状态": "失败", "消息": f"清空百度会话失败：{e}",
+                    "提示": "可在适配器原 GUI 里退出登录"}
+        try:
+            for 名字 in ("会话.json", "令牌.json", "凭证.json"):
+                文件 = self.项目根 / "数据" / 名字
+                if 文件.is_file():
+                    文件.unlink()
+                    清除.append(str(文件))
+        except Exception as e:  # noqa: BLE001
+            self.记录(f"[百度] 清理残留凭证文件失败：{e}", "warning")
+        try:
+            self._本地.ctx = None      # 作废缓存的网络上下文（旧 Cookie 不再复用）
+        except Exception:
+            pass
+        self.记录("[百度] 已退出登录（本地会话已清除）")
+        信息 = {}
+        try:
+            信息 = self.account()
+        except Exception:
+            pass
+        return {
+            "状态": "成功",
+            "消息": "已退出登录，本地会话已清除",
+            "清除": 清除,
+            "账号": 信息,
+        }
 
     def login_email(self, 邮箱: str = "", 密码: str = "",
                     额外: dict | None = None) -> dict:

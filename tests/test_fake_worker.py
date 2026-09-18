@@ -39,6 +39,11 @@ class 假网盘桥测试(unittest.TestCase):
         self.临时.cleanup()
 
     def test_上传下载列目录删除(self):
+        # 假网盘现在如实反映"凭证文件在不在"（见 后端_假.account）：
+        # 没有凭证就是未登录，所以这里先登录一次再干活。
+        self.assertFalse(self.适配器.账号状态().已登录,
+                         "还没登录时应当是未登录")
+        self.assertEqual(self.适配器.令牌登录("demo-token").get("状态"), "成功")
         self.assertTrue(self.适配器.账号状态().已登录)
         self.assertEqual(self.适配器.列目录("/"), [])
         结果 = self.适配器.上传(str(self.本地 / "hello.txt"), "/测试/子目录",

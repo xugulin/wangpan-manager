@@ -125,9 +125,15 @@ class 后端(后端基类):
         用户名 = ""
         详情 = {}
         try:
+            # 登录凭证文件在不在：界面靠这个把"你在原 GUI 里退出了"同步过来
+            文件 = getattr(仓库, "文件路径", None)
+            详情["no_credential"] = not (文件 is not None and 文件.is_file())
+        except Exception:
+            pass
+        try:
             ctx = self._ctx()
             用户 = ctx.认证.取当前用户(令牌)
-            详情 = dict(用户 or {})
+            详情 = {**详情, **dict(用户 or {})}
             用户名 = str(详情.get("name") or 详情.get("nickname") or "")
         except Exception as e:
             详情["error"] = str(e)[:200]
@@ -190,9 +196,13 @@ class 后端(后端基类):
             for 表 in (self._扫码会话, self._短信会话):
                 for 键 in list(表):
                     if 现在 - float(表[键].get("创建") or 0) > 900.0:
+                        # 短信会话上挂着复用的登录服务：过期时顺手关掉，
+                        # 别把 httpx 客户端一直攒在内存里（长跑进程）。
+                        self._关掉登录服务(表[键])
                         表.pop(键, None)
                 while len(表) > 8:  # 长跑进程里别越堆越多
                     最早 = min(表, key=lambda k: float(表[k].get("创建") or 0))
+                    self._关掉登录服务(表[最早])
                     表.pop(最早, None)
 
     @staticmethod
@@ -401,17 +411,25 @@ class 后端(后端基类):
             self._清理登录会话()
         self.记录(f"[光鸭] 已取得设备授权码：用户码 {用户码 or '（无）'}，"
                  f"有效期 {有效期秒}s，轮询间隔 {轮询间隔}s")
+        # ⚠️ 光鸭的登录是**设备授权码**：服务端把「验证地址」整条 URL 交给客户端，
+        #    适配器原 GUI（界面/弹窗/二维码弹窗.py）就是**把这条地址本身画成二维码**
+        #    （qrcode.add_data(链接)）—— 用光鸭 App 扫这个码即完成授权。
+        #    我们以前只回「验证地址」，界面对「设备码」类型不渲染二维码，
+        #    用户看到的就是"二维码出不来、只能手打一长串用户码"，登录自然慢。
+        #    这里把同一条地址同时放进 `二维码链接`，界面就会本地画码。
         return {
             "状态": "成功",
             "类型": "设备码",
             "验证地址": 验证地址,
+            "二维码链接": 验证地址,
             "用户码": 用户码,
             "会话": 会话,
             "有效期秒": 有效期秒,
             "轮询间隔": 轮询间隔,
             "消息": f"已申请设备授权码（用户码 {用户码 or '见验证地址'}）",
-            "提示": (f"请在浏览器打开验证地址，并输入用户码 {用户码}"
-                    if 用户码 else "请在浏览器打开验证地址完成授权"),
+            "提示": ("用光鸭 App 扫描二维码即可授权"
+                    + (f"；也可以打开验证地址并输入用户码 {用户码}"
+                       if 用户码 else "；也可以直接在浏览器打开验证地址")),
         }
 
     def login_qr_wait(self, 会话: str = "", 超时秒: float = 180.0) -> dict:
@@ -542,8 +560,26 @@ class 后端(后端基类):
 
     # ---------------- 短信 ----------------
 
+    @staticmethod
+    def _关掉登录服务(条目: dict) -> None:
+        """关掉一条短信会话上挂着的登录服务（幂等）。"""
+        try:
+            服务 = (条目 or {}).pop("服务", None)
+            if 服务 is not None:
+                服务.关闭()
+        except Exception:
+            pass
+
     def login_sms_send(self, 手机号: str) -> dict:
-        """⚠️ 会真的调适配器发短信（真实扣费）：只有号码校验通过才会外呼。"""
+        """⚠️ 会真的调适配器发短信（真实扣费）：只有号码校验通过才会外呼。
+
+        ⚠️ 关键差异（对齐适配器原 GUI 的 短信登录对话框）：原 GUI 是
+        **一个 登录服务 实例走完 发送 → 校验 → 登录** 全流程，httpx 客户端、
+        连接池、服务端下发的会话 Cookie 全程保留；而桥以前每一步都
+        `_新建登录服务()` 再 `关闭()`，等于三份互不相干的客户端，
+        短信登录成功率自然比原 GUI 低。现在把服务实例挂在会话上复用，
+        校验完成或会话过期时再关闭。
+        """
         规范号 = self._规范手机号(手机号)
         if not 规范号:
             return self.登录失败(
@@ -557,18 +593,21 @@ class 后端(后端基类):
             captcha_token = 服务.短信登录_初始化盾(规范号)
             数据 = 服务.短信登录_发送验证码(规范号, captcha_token)
         except Exception as e:
-            return self.登录失败(
-                f"发送短信验证码失败：{e}",
-                "若被风控拦截，请先在光鸭 App/网页端登录一次再试")
-        finally:
             try:
                 服务.关闭()
             except Exception:
                 pass
+            return self.登录失败(
+                f"发送短信验证码失败：{e}",
+                "若被风控拦截，请先在光鸭 App/网页端登录一次再试")
 
         数据 = dict(数据) if isinstance(数据, dict) else {}
         verification_id = str(数据.get("verification_id") or "")
         if not verification_id:
+            try:
+                服务.关闭()
+            except Exception:
+                pass
             return self.登录失败("发送验证码响应异常（没有 verification_id）",
                              f"响应：{self._安全响应(数据)}")
         try:
@@ -582,6 +621,7 @@ class 后端(后端基类):
                 "手机号": 规范号,
                 "verification_id": verification_id,
                 "创建": time.time(),
+                "服务": 服务,          # 跨步骤复用同一客户端（见上面注释）
             }
             self._清理登录会话()
         脱敏 = self._脱敏手机号(规范号)
@@ -626,7 +666,7 @@ class 后端(后端基类):
             return self.登录失败("短信会话缺少手机号", "请重新点击「发送验证码」")
 
         try:
-            服务 = self._新建登录服务()
+            服务 = 条目.get("服务") or self._新建登录服务()
         except Exception as e:
             return self.登录失败(f"加载光鸭登录服务失败：{e}")
         try:
@@ -639,11 +679,6 @@ class 后端(后端基类):
             # 验证码错/过期都可能，保留会话让用户直接重输验证码
             return self.登录失败(f"短信登录失败：{e}",
                              "验证码错误可直接重试；已过期请重新发送")
-        finally:
-            try:
-                服务.关闭()
-            except Exception:
-                pass
 
         # 适配器 短信登录_登录() 内部已经存过令牌；这里再按公开口径写一次，
         # 保证过期时间准确，并清掉可能残留的上一个账号的刷新令牌。
@@ -652,6 +687,8 @@ class 后端(后端基类):
                 self._写入令牌(令牌数据)
         except Exception as e:
             return self.登录失败(f"短信登录成功但保存令牌失败：{e}")
+        finally:
+            self._关掉登录服务(条目)
         with self._登录锁:
             self._短信会话.pop(会话, None)
         self.记录("[光鸭] 短信登录成功，令牌已写入适配器令牌仓库")
@@ -740,6 +777,59 @@ class 后端(后端基类):
     def login_password(self, 账号: str = "", 密码: str = "",
                        额外: dict | None = None) -> dict:
         return self._不支持登录("password")
+
+    # ---------------- 退出登录 ----------------
+
+    def 退出登录(self) -> dict:
+        """清掉本机保存的光鸭令牌（数据/令牌.json），并把登录态同步收干净。
+
+        只动本地文件：不调云端接口撤令牌、不碰云端文件。
+        用户现场反馈：在原 GUI 里退出登录后，网盘管理这边列表还在、还能上传；
+        根因就是没人把"凭证没了"这件事同步给界面 —— 这里从桥这一层就把
+        内存令牌、各线程网络上下文、目录缓存全部作废，account() 立刻回未登录。
+        """
+        m = self._导入()
+        清除: list[str] = []
+        # 退出登录时把还挂着的登录会话一起收掉（短信会话上有复用的登录服务）
+        with self._登录锁:
+            for 键 in list(self._短信会话):
+                self._关掉登录服务(self._短信会话.pop(键, None) or {})
+            self._扫码会话.clear()
+        try:
+            仓库 = m["全局令牌仓库"]
+            路径 = getattr(仓库, "文件路径", None)
+            仓库.清空令牌()
+            if 路径 is not None:
+                清除.append(str(路径))
+        except Exception as e:  # noqa: BLE001
+            return self.登录失败(f"清空光鸭令牌失败：{e}",
+                             "可在适配器原 GUI 里退出登录")
+        # 兜底：万一仓库路径与项目数据目录不一致，这里再扫一遍
+        try:
+            for 名字 in ("令牌.json", "凭证.json", "会话.json"):
+                文件 = self.项目根 / "数据" / 名字
+                if 文件.is_file():
+                    文件.unlink()
+                    清除.append(str(文件))
+        except Exception as e:  # noqa: BLE001
+            self.记录(f"[光鸭] 清理残留凭证文件失败：{e}", "warning")
+        # 作废所有线程的网络上下文与目录/列缓存：否则下一次调用还会拿着旧令牌
+        self._失效上下文()
+        try:
+            self.记录("[光鸭] 已退出登录（本地令牌已清除）")
+        except Exception:
+            pass
+        信息 = {}
+        try:
+            信息 = self.account()
+        except Exception:
+            pass
+        return {
+            "状态": "成功",
+            "消息": "已退出登录，本地令牌已清除",
+            "清除": 清除,
+            "账号": 信息,
+        }
 
     # ---------------- 路径/ID ----------------
 

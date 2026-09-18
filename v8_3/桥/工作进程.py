@@ -179,6 +179,8 @@ class 工作进程:
                 str(参数.get("account") or ""),
                 str(参数.get("password") or ""),
                 dict(参数.get("extra") or {}))
+        if 命令 == "logout":
+            return self._后端.退出登录()
         if 命令 == "login_email":
             return self._后端.login_email(
                 str(参数.get("email") or ""),

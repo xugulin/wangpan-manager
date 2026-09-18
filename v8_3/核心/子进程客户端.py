@@ -428,6 +428,14 @@ class 子进程适配器(云盘适配器):
                             {"account": 账号, "password": 密码,
                              "extra": 额外 or {}}, 超时=180.0) or {})
 
+    def 退出登录(self) -> dict:
+        """清掉该网盘的**本地**登录凭证（删除动作在桥进程侧执行）。
+
+        返回 ``{"状态": "成功"|"失败", "消息": ..., "清除": [...]}``。
+        界面拿到成功后会立刻把本页置为未登录（清列表 + 禁写 + 灭绿点）。
+        """
+        return dict(self.调用("logout", {}, 超时=60.0) or {})
+
     def 邮箱登录(self, 邮箱: str, 密码: str,
                 额外: dict | None = None) -> dict:
         return dict(self.调用("login_email",
