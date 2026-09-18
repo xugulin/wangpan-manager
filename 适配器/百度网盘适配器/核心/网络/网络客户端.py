@@ -210,6 +210,12 @@ class 网络读超时(接口错误):
 # ==========================================================================
 # 网络客户端
 # ==========================================================================
+#: 会话刷新的**全局**节流/重入状态。
+#: 必须是全局的：刷新会话时会新建网络客户端，按实例记状态等于没记 ——
+#: 实测就是那样递归下去的（RecursionError，242 条重复日志，主程序被拖崩）。
+_刷新节流: dict = {"进行中": None, "上次时间": 0.0, "上次结果": False}
+
+
 class 网络客户端:
     """百度网盘 HTTP 客户端。
 
@@ -502,19 +508,32 @@ class 网络客户端:
         会话 —— 实测一次会话里刷出 2000+ 条同样的失败日志，白烧 CPU 和网络，
         界面也会被拖卡。现在 30 秒内只真正刷一次，其余请求直接复用上次结论。
         """
+        import threading as _threading
         import time as _time
+        全局 = _刷新节流
+        # ① 重入保护：刷新会话本身要发请求（而且往往新建客户端），
+        #    请求再失败又会回来刷新 —— 不加这个会**无限递归**
+        #    （实测：RecursionError + 242 条重复日志，最后把主程序拖崩）。
+        本线程 = _threading.get_ident()
+        if 全局.get("进行中") == 本线程:
+            return False
+        # ② 节流：没登录时每个请求都回 errno:-6，别每个都真刷一次
         现在 = _time.time()
-        上次 = getattr(self, "_上次刷新尝试", 0.0)
-        上次结果 = getattr(self, "_上次刷新结果", False)
-        if 现在 - 上次 < 30.0:
-            return 上次结果
-        self._上次刷新尝试 = 现在
+        if 现在 - float(全局.get("上次时间") or 0.0) < 30.0:
+            return bool(全局.get("上次结果"))
+        全局["进行中"] = 本线程
+        全局["上次时间"] = 现在
         try:
             结果 = bool(self.会话刷新器 and self.会话刷新器())
-        except Exception as e:
+        except RecursionError:
+            logger.warning("[网络] 会话刷新出现递归，已中止本次刷新")
+            结果 = False
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"[网络] 会话刷新失败：{type(e).__name__}: {e}")
             结果 = False
-        self._上次刷新结果 = 结果
+        finally:
+            全局["进行中"] = None
+        全局["上次结果"] = 结果
         return 结果
 
     def _刷新会话_原(self) -> bool:

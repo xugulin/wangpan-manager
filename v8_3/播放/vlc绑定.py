@@ -931,6 +931,14 @@ class VLC:
     # ---------------- 收尾 ----------------
 
     def 关闭(self) -> None:
+        """停止播放并释放 libvlc 资源。**绝不阻塞界面线程**。
+
+        为什么要把释放丢到后台线程：``libvlc_media_player_release`` 会等播放器
+        内部线程收工，而播网盘视频时 VLC 正卡在 HTTP 流上读数据，release 会一直
+        等下去 —— 用户实测"播放网盘视频 → 关闭播放窗口 → 界面卡死，点哪都没反应"，
+        根因就是这里在 GUI 线程里同步 release。现在：先请求停止（不阻塞），
+        再把释放交给后台线程，界面立刻恢复。
+        """
         if self._已关闭:
             return
         self._已关闭 = True
@@ -938,18 +946,26 @@ class VLC:
             self.停止()
         except Exception:
             pass
-        try:
-            if self._播放器:
-                self._lib.libvlc_media_player_release(self._播放器)
-        except Exception:
-            pass
-        try:
-            if self._实例:
-                self._lib.libvlc_release(self._实例)
-        except Exception:
-            pass
+        播放器, 实例, 库 = self._播放器, self._实例, self._lib
         self._播放器 = None
         self._实例 = None
+        if not 播放器 and not 实例:
+            return
+
+        def _收尾() -> None:
+            try:
+                if 播放器:
+                    库.libvlc_media_player_release(播放器)
+            except Exception:
+                pass
+            try:
+                if 实例:
+                    库.libvlc_release(实例)
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=_收尾, name="vlc-释放", daemon=True).start()
 
 
 def 准备干净环境(项目根: str | Path) -> dict:

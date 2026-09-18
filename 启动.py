@@ -90,6 +90,23 @@ def _取出日志参数(argv: list[str]) -> tuple[list[str], str, bool, bool]:
     return 其余, 级别, 静默, 自检
 
 
+def _装卡死自诊断() -> None:
+    """卡死时按需打印所有线程的调用栈。
+
+    用法：界面假死时在终端执行 ``kill -USR1 <启动.py 的 PID>``，
+    所有线程的 Python 调用栈会写进 stderr（也就是 数据/界面日志.txt 与终端），
+    一眼就能看出卡在哪个函数 —— 排查"点了没反应"这类问题全靠它。
+    """
+    try:
+        import faulthandler
+        import signal
+        faulthandler.enable()
+        if hasattr(signal, "SIGUSR1"):
+            faulthandler.register(signal.SIGUSR1, all_threads=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> int:
     argv, 级别, 静默, 要自检 = _取出日志参数(list(sys.argv[1:]))
 
@@ -127,4 +144,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    _装卡死自诊断()
     raise SystemExit(main())
