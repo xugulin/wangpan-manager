@@ -155,6 +155,7 @@ class 凭证仓库:
         self._文件路径 = Path(文件路径) if 文件路径 else _默认存储文件()
         self._锁 = threading.RLock()
         self._数据: dict | None = None
+        self._文件时间: float = 0.0
         # 启动即尝试加载一次，便于 GUI 立刻判断登录态
         self._加载()
 
@@ -163,6 +164,23 @@ class 凭证仓库:
     @property
     def 文件路径(self) -> Path:
         return self._文件路径
+
+    def _必要时重载(self) -> None:
+        """磁盘凭证比内存新就重读（登录在另一个进程里完成，这里是桥进程）。
+
+        与百度那边同一个坑：仓库只在进程启动时加载一次，于是"明明登录成功了，
+        列目录却一直报未登录"，非要重启程序才生效。
+        """
+        try:
+            mtime = self._文件路径.stat().st_mtime
+        except Exception:      # noqa: BLE001
+            return
+        if mtime <= self._文件时间:
+            return
+        with self._锁:
+            if mtime > self._文件时间:
+                self._加载()
+                self._文件时间 = mtime
 
     def _加载(self) -> dict | None:
         """从磁盘加载（不加锁，调用方保证）"""
@@ -267,6 +285,7 @@ class 凭证仓库:
 
     def 取Cookie(self, 安全余量: float = 0.0) -> str:
         """取可用的 Cookie 字符串；无效或已过期时返回 "" """
+        self._必要时重载()
         if not self.是否有效(安全余量):
             return ""
         return 拼接Cookie字符串(self.取Cookie字典())
@@ -299,6 +318,7 @@ class 凭证仓库:
           2. 无 expires_at  → 距离 saved_at 不超过 7 天
         另外必须能通过 `校验Cookie` 的必需字段检查。
         """
+        self._必要时重载()
         with self._锁:
             if self._数据 is None:
                 self._加载()

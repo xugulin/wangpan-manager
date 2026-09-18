@@ -135,6 +135,7 @@ class 令牌仓库:
         self._文件路径 = Path(文件路径) if 文件路径 else _默认存储文件()
         self._文件路径.parent.mkdir(parents=True, exist_ok=True)
 
+        self._文件时间: float = 0.0
         self._内存令牌: str | None = None
         self._刷新令牌: str = ""
         self._过期时间戳: float = 0.0
@@ -162,6 +163,19 @@ class 令牌仓库:
         """自定义刷新实现（一般用默认即可）"""
         with self._锁:
             self._刷新回调 = 回调 or _默认刷新实现
+
+    def _必要时重载(self) -> None:
+        """磁盘令牌比内存新就重读（登录在另一个进程里完成，这里是桥进程）。"""
+        try:
+            mtime = self._文件路径.stat().st_mtime
+        except Exception:      # noqa: BLE001
+            return
+        if mtime <= self._文件时间:
+            return
+        with self._锁:
+            if mtime > self._文件时间:
+                self._加载()
+                self._文件时间 = mtime
 
     def _加载(self) -> None:
         if not self._文件路径.exists():
@@ -291,6 +305,7 @@ class 令牌仓库:
         若已过期或即将过期，会先用 refresh_token 静默刷新；
         刷新失败返回 None，调用方需引导用户重新登录。
         """
+        self._必要时重载()
         # 先判断是否需要刷新（刷新内部会加锁）
         if self._需要刷新():
             self._尝试刷新()
@@ -309,6 +324,7 @@ class 令牌仓库:
             return self._内存令牌
 
     def 获取刷新令牌(self) -> str:
+        self._必要时重载()
         with self._锁:
             return self._刷新令牌
 
@@ -317,6 +333,7 @@ class 令牌仓库:
             return self._用户标识
 
     def 是否有效(self, 安全余量: float = 60.0) -> bool:
+        self._必要时重载()
         with self._锁:
             return (
                 bool(self._内存令牌)

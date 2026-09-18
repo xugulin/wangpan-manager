@@ -329,9 +329,20 @@ class 网络客户端:
                     logger.warning(f"[网络] 会话刷新失败：{e}")
                 bdstoken = self.取会话().get("bdstoken")
             if not bdstoken:
-                raise 接口错误("缺少 bdstoken：请先登录或调用认证服务刷新会话",
-                               errno=未登录)
-            参数["bdstoken"] = bdstoken
+                # ⚠️ 这里**不再直接抛错**。
+                #
+                # 实测（真机会话）：`/api/list`、`/rest/2.0/xpan/nas?method=uinfo`
+                # 这些读接口**不需要 bdstoken 也能成功**；而取 bdstoken 的
+                # `/api/gettemplatevariable` 对某些会话会回 errno:-6。
+                # 以前缺 bdstoken 就在这里 raise，导致"明明登录成功、也能列目录的会话"
+                # 被本地逻辑挡死 —— 界面表现就是一直未登录/列表空白，重启也没用。
+                # 现在照发请求，让服务端 errno 说话：真需要 bdstoken 的接口
+                # （上传、改名、删除等写操作）会回 errno:-6，网络层已有
+                # "刷新会话后重放一次"的自愈路径。
+                logger.warning("[网络] 没有 bdstoken，仍按无 bdstoken 发送；"
+                               "若服务端要求会回 errno:-6 并触发自愈重放")
+            else:
+                参数["bdstoken"] = bdstoken
         return 参数
 
     # ---------------- 业务码检查 ----------------
@@ -485,7 +496,28 @@ class 网络客户端:
         return 响应 if raw else 数据
 
     def _刷新会话(self) -> bool:
-        """调用会话刷新器；异常与 False 一律视为失败。"""
+        """调用会话刷新器；异常与 False 一律视为失败。
+
+        ⚠️ 加了**节流**：没登录时每个请求都会回 errno:-6，于是每个请求都来刷一次
+        会话 —— 实测一次会话里刷出 2000+ 条同样的失败日志，白烧 CPU 和网络，
+        界面也会被拖卡。现在 30 秒内只真正刷一次，其余请求直接复用上次结论。
+        """
+        import time as _time
+        现在 = _time.time()
+        上次 = getattr(self, "_上次刷新尝试", 0.0)
+        上次结果 = getattr(self, "_上次刷新结果", False)
+        if 现在 - 上次 < 30.0:
+            return 上次结果
+        self._上次刷新尝试 = 现在
+        try:
+            结果 = bool(self.会话刷新器 and self.会话刷新器())
+        except Exception as e:
+            logger.warning(f"[网络] 会话刷新失败：{type(e).__name__}: {e}")
+            结果 = False
+        self._上次刷新结果 = 结果
+        return 结果
+
+    def _刷新会话_原(self) -> bool:
         try:
             return bool(self.会话刷新器 and self.会话刷新器())
         except Exception as e:

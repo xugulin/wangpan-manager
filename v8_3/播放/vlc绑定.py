@@ -976,6 +976,16 @@ def 准备干净环境(项目根: str | Path) -> dict:
             结果[名] = str(路径)
         except Exception:
             pass
+    # libvlc 的缩略图缓存会在第一次播放时自己 mkdir，但**只会建一级**；
+    # 目录不存在时它每个缩略图尺寸都刷一条 ERROR 到日志（实测启动后满屏
+    # "failed to create directory, this error can be expected on first run"）。
+    # 这里替它把目录先建好，日志就干净了。
+    try:
+        缓存 = 目录表["XDG_CACHE_HOME"] / "thumbnails"
+        for 档 in ("normal", "large", "x-large"):
+            (缓存 / 档).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     return 结果
 
 

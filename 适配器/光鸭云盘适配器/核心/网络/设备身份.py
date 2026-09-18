@@ -11,9 +11,25 @@ import platform
 import uuid
 from pathlib import Path
 
-存储目录 = Path.home() / ".光鸭云盘"
-存储目录.mkdir(parents=True, exist_ok=True)
-存储文件 = 存储目录 / "设备信息.json"
+def _存储位置() -> Path:
+    """设备信息存哪儿？
+
+    **优先放适配器自己的 数据/ 目录**，绝不往用户家目录里写东西 ——
+    本项目承诺"纯绿色、不污染系统与用户目录"。以前这里写的是
+    ``Path.home() / ".光鸭云盘"`` 并且在**导入时**就 mkdir，
+    结果程序一启动，用户家目录里立刻多出一个 ``~/.光鸭云盘``
+    （隔离环境实测抓到的就是这个）。家目录现在只作为最后兜底，
+    而且改成真正要写的时候才创建。
+    """
+    try:
+        项目根 = Path(__file__).resolve().parents[2]   # 核心/网络/设备身份.py → 上 2 级
+        return 项目根 / "数据" / "设备信息.json"
+    except Exception:      # pragma: no cover - 理论上到不了
+        return Path.home() / ".光鸭云盘" / "设备信息.json"
+
+
+存储文件 = _存储位置()
+存储目录 = 存储文件.parent
 
 
 def _读取存储() -> dict:
@@ -26,6 +42,8 @@ def _读取存储() -> dict:
 
 
 def _写入存储(数据: dict) -> None:
+    # 用到才建目录（导入时不再碰磁盘）
+    存储文件.parent.mkdir(parents=True, exist_ok=True)
     存储文件.write_text(
         json.dumps(数据, ensure_ascii=False, indent=2),
         encoding="utf-8",

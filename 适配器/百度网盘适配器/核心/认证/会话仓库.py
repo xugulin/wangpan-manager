@@ -93,7 +93,32 @@ class 会话仓库:
         self._文件 = Path(文件路径) if 文件路径 else _默认文件
         self._锁 = threading.RLock()
         self._数据: dict[str, Any] = {}
+        self._文件时间: float = 0.0
         self._加载()
+
+    # ---------------- 跨进程同步 ----------------
+    def _必要时重载(self) -> None:
+        """磁盘上的会话比内存新，就重读一次。
+
+        登录是在**另一个进程**里完成的（登录对话框 / 网盘原 GUI 都是独立进程），
+        而列目录、上传下载走的是**桥进程**里的这份仓库 —— 它只在进程启动时加载过
+        一份内存副本。以前不做重载，于是现象是：
+
+            「扫码明明成功了，可列目录一直报 未登录或登录已过期（errno:-6），
+              界面一直显示等待中/未登录；**重启程序**后才发现其实早就登录好了」
+
+        重启能"治好"正是因为桥进程跟着重启、重新读了一次盘。现在改成每次取会话前
+        比一下文件修改时间（stat 很便宜），变了就重载 —— 不用重启。
+        """
+        try:
+            mtime = self._文件.stat().st_mtime
+        except OSError:
+            return
+        if mtime <= self._文件时间:
+            return
+        with self._锁:
+            if mtime > self._文件时间:
+                self._加载()
 
     # ---------------- 基础 ----------------
 
@@ -105,6 +130,10 @@ class 会话仓库:
         if not self._文件.is_file():
             logger.debug(f"[会话] 无已保存会话：{self._文件}")
             return
+        try:
+            self._文件时间 = self._文件.stat().st_mtime
+        except OSError:
+            pass
         try:
             with self._文件.open(encoding="utf-8") as f:
                 self._数据 = json.load(f) or {}
@@ -132,6 +161,7 @@ class 会话仓库:
 
     def 取会话(self) -> dict[str, Any]:
         """返回当前会话的浅拷贝（网络客户端每请求调用）。"""
+        self._必要时重载()
         with self._锁:
             return dict(self._数据)
 
@@ -166,6 +196,7 @@ class 会话仓库:
 
     def 是否有效(self) -> bool:
         """最小必需集是否齐备（BDUSS 或 BDUSS_BFESS 之一 + STOKEN）。"""
+        self._必要时重载()
         with self._锁:
             有bduss = bool(self._数据.get("bduss") or self._数据.get("bduss_bfess"))
             有stoken = bool(self._数据.get("stoken"))
