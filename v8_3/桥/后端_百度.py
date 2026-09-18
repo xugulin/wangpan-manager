@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import threading
 import time
@@ -1157,6 +1158,79 @@ class 后端(后端基类):
 
     # ---------------- 导入 Cookie ----------------
 
+    def _从内置浏览器导入(self, 凭证) -> dict:
+        """把内置浏览器窗口捕获的 cookie 落成会话，并验证读 + bdstoken + 写。
+
+        与"从外部浏览器调试端口取"的区别：这条路是程序内嵌 Chromium
+        自己登录来的，**不依赖外部浏览器、不依赖调试端口**，
+        而且走的就是百度网页版登录 —— pan 域 STOKEN 一定在。
+        """
+        try:
+            import sys as _sys
+            根 = str(self.项目根)
+            if 根 not in _sys.path:
+                _sys.path.insert(0, 根)
+            from 核心.认证.浏览器会话导入 import 会话字段
+        except Exception as e:  # noqa: BLE001
+            return self.登录失败(f"会话字段模块不可用：{e}")
+        饼 = []
+        for c in (凭证 or []):
+            if isinstance(c, dict):
+                饼.append(c)
+        名字表 = sorted({str(c.get("name") or "") for c in 饼})
+        域名表 = sorted({str(c.get("domain") or "") for c in 饼})
+        self.记录(f"[百度] 内置浏览器带来 {len(饼)} 条 cookie；"
+                 f"名字：{'、'.join(名字表[:20])}；域名：{'、'.join(域名表[:8])}")
+        字段 = 会话字段(饼)
+        if not 字段.get("bduss"):
+            有stoken = any(str(c.get("name")) == "STOKEN" for c in 饼)
+            return self.登录失败(
+                "内置浏览器里还没拿到 BDUSS（可能没登录成功）",
+                f"共收到 {len(饼)} 条 cookie"
+                + (f"（有 STOKEN 但没有 BDUSS）" if 有stoken else "")
+                + f"；名字：{'、'.join(名字表[:12]) or '（空）'}"
+                + "。请在弹出的窗口里登录（扫码/短信都行），"
+                  "确认能看到文件列表后再点「✅ 我已登录完成」")
+        m = _导入()
+        仓库 = m["全局会话仓库"]
+        旧会话 = dict(仓库.取会话() or {})
+        成功 = False
+        try:
+            # ⚠️ 不要 清空() 再写：用户可能只是补一个 STOKEN 进来，
+            #    抹掉别的字段反而更糟。这里按字段合并（保存会话 内部会先重载）。
+            for 键, 值 in 字段.items():
+                if 值:
+                    仓库.保存会话(**{键: 值})
+            self.记录("[百度] 已写入内置浏览器会话："
+                     + "、".join(f"{k}({len(v)})" for k, v in 字段.items()))
+            模板 = self._刷新模板变量(仓库)
+            if not (模板.get("bdstoken") or 仓库.获取bdstoken()):
+                return self.登录失败("内置浏览器会话未被服务端接受（没下发 bdstoken）",
+                                 "请在窗口里确认已经进入网盘首页（能看到文件列表）")
+            # ⚠️ 只要 BDUSS + bdstoken 都拿到了，**先按成功处理**（会话确实写进去了，
+            #    用户也真的登录了）；写权限单独报，能写就说能写，不能写就说清原因。
+            成功 = True
+            _写状态缓存.update({"指纹": "", "状态": "", "时间": 0.0})
+            状态 = self._写权限状态()
+            if 状态 == "可写":
+                self.记录("[百度] ✅ 内置浏览器登录成功，写权限已验证可用")
+                return self.登录成功(
+                    "内置浏览器登录成功（含 pan 域 STOKEN）",
+                    "写操作（上传/改名/删除）已验证可用，可以关闭登录窗口了")
+            # 读得通但写不了：如实说，并给下一步
+            self.记录(f"[百度] 内置浏览器会话写权限：{状态}", "warning")
+            return self.登录成功(
+                "内置浏览器登录成功（含 pan 域 STOKEN）",
+                f"会话已写入并可读；写权限复测结果：{状态}。"
+                "若上传/改名/删除被拒，请在窗口里打开 pan.baidu.com 首页"
+                "（能看到文件列表）后点「✅ 我已登录完成」再试一次")
+        except Exception as e:  # noqa: BLE001
+            self.记录(f"[百度] 内置浏览器导入失败：{type(e).__name__}: {e}", "warning")
+            return self.登录失败(f"内置浏览器导入失败：{type(e).__name__}: {e}")
+        finally:
+            if not 成功:
+                self._还原会话(仓库, 旧会话)
+
     def _从浏览器导入会话(self) -> dict:
         """从本机浏览器（调试端口）取回完整会话，落盘并**验证写权限**。
 
@@ -1247,6 +1321,15 @@ class 后端(后端基类):
         if 文本 in ("__取浏览器会话__", "{\"__取浏览器会话__\": true}",
                   '{"__取浏览器会话__": true}'):
             return self._从浏览器导入会话()
+        # 内置浏览器（方案 B）：界面把 cookie 列表原样送过来
+        if 文本.startswith("{") and '"\u5185\u7f6e\u6d4f\u89c8\u5668" in 文本' or \
+                文本.startswith("{") and '"内置浏览器"' in 文本:
+            try:
+                载荷 = json.loads(文本)
+            except Exception as e:  # noqa: BLE001
+                return self.登录失败(f"内置浏览器凭证解析失败：{e}")
+            凭证 = 载荷.get("凭证") or 载荷.get("cookies") or []
+            return self._从内置浏览器导入(凭证)
         if not 文本:
             return self.登录失败(
                 "Cookie 文本为空",

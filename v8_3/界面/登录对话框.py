@@ -276,7 +276,36 @@ class 登录对话框(QDialog):
         行.addWidget(self.Cookie登录按钮)
         布局.addLayout(行)
 
-        # 百度专用：从本机浏览器直接取**完整**会话（含 HttpOnly 的 pan 域 STOKEN）
+        # 方案 B：程序**内置**浏览器登录（推荐）——不依赖外部浏览器/调试端口，
+        # 走的就是网盘网页版登录，登录完自动取走完整会话（含 HttpOnly 凭证）。
+        内置行 = QHBoxLayout()
+        可用, 原因 = (False, "")
+        try:
+            from .内置浏览器登录 import 可用 as _内置可用
+            可用, 原因 = _内置可用()
+        except Exception as e:  # noqa: BLE001
+            可用, 原因 = False, str(e)
+        self.内置浏览器按钮 = QPushButton("🌐 用内置浏览器登录（推荐）")
+        self.内置浏览器按钮.setObjectName("PrimaryButton")
+        self.内置浏览器按钮.setToolTip(
+            "在程序里打开网盘网页登录（扫码 / 短信 / 账号密码都行）。\n"
+            "登录成功后**自动取走完整会话**（含 HttpOnly 的 BDUSS 与 pan 域 STOKEN）——\n"
+            "不用复制粘贴、不用外部浏览器、不用调试端口。\n"
+            "这一步能解决「扫码登录只能读、上传/改名/删除报 errno:-6」。")
+        self.内置浏览器按钮.setEnabled(bool(可用))
+        if not 可用:
+            self.内置浏览器按钮.setToolTip(原因 or "内置浏览器不可用")
+        self.内置浏览器按钮.clicked.connect(self._内置浏览器登录)
+        内置行.addWidget(self.内置浏览器按钮)
+        内置说明 = QLabel(
+            "推荐用这个：它就是网盘网页版登录，登录完凭证自动回填"
+            + ("" if 可用 else f"（当前不可用：{原因}）"))
+        内置说明.setWordWrap(True)
+        内置说明.setStyleSheet("color: #95a5a6; font-size: 11px;")
+        内置行.addWidget(内置说明, 1)
+        布局.addLayout(内置行)
+
+        # 也可以用外部浏览器（需要它开着调试端口）
         if 类型 == "baidu":
             浏览器行 = QHBoxLayout()
             self.浏览器导入按钮 = QPushButton("🌐 从浏览器导入完整会话")
@@ -296,6 +325,37 @@ class 登录对话框(QDialog):
             浏览器行.addWidget(说明2, 1)
             布局.addLayout(浏览器行)
         return 面板
+
+    def _内置浏览器登录(self):
+        """打开内置浏览器窗口登录，登录完成后把凭证交给桥落库。"""
+        try:
+            from .内置浏览器登录 import 内置浏览器登录窗口
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "不可用", f"内置浏览器不可用：{e}")
+            return
+        类型 = str(self.实例.get("类型") or self.标识)
+        self._设置状态("已打开内置浏览器，请在窗口里完成登录…")
+
+        结果盒: dict = {}
+
+        def 完成(凭证):
+            结果盒["凭证"] = list(凭证 or [])
+            self._日志(f"内置浏览器已捕获 {len(结果盒['凭证'])} 条 cookie，正在回填…")
+            import json as _json
+            载荷 = _json.dumps({"内置浏览器": True, "凭证": 结果盒["凭证"]},
+                            ensure_ascii=False)
+            self._跑("内置浏览器登录",
+                   lambda 进度: self.适配器.Cookie登录(载荷))
+
+        try:
+            窗口 = 内置浏览器登录窗口(类型, self, 完成回调=完成)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "打开失败", str(e))
+            return
+        self._内置窗口 = 窗口          # 持引用，别被回收
+        窗口.exec()
+        if not 结果盒.get("凭证"):
+            self._设置状态("已关闭内置浏览器（没有捕获到凭证）", "#e67e22")
 
     def _从浏览器导入(self):
         """从本机浏览器取完整会话（含 pan 域 STOKEN），解决写权限不完整。"""

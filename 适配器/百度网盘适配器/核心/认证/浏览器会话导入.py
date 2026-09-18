@@ -165,6 +165,18 @@ def _抓cookie(端口: int) -> tuple[list[dict], str]:
     return (结果 or {}).get("cookies") or [], "浏览器"
 
 
+def _文本(值) -> str:
+    """cookie 字段统一成 str（PySide6 的 name/domain/value 都是 bytes）。"""
+    if 值 is None:
+        return ""
+    if isinstance(值, (bytes, bytearray)):
+        try:
+            return bytes(值).decode("utf-8")
+        except Exception:
+            return bytes(值).decode("latin-1", "replace")
+    return str(值)
+
+
 def 会话字段(饼: list[dict]) -> dict:
     """把 cookie 列表整理成会话仓库认的字段。
 
@@ -173,17 +185,20 @@ def 会话字段(饼: list[dict]) -> dict:
     """
     表: dict[str, list[dict]] = {}
     for c in 饼 or []:
-        if "baidu" not in str(c.get("domain", "")):
+        域 = _文本(c.get("domain"))
+        if "baidu" not in 域:
             continue
-        表.setdefault(str(c.get("name") or ""), []).append(c)
+        表.setdefault(_文本(c.get("name")), []).append(
+            {"name": _文本(c.get("name")), "value": _文本(c.get("value")),
+             "domain": 域})
 
     def 取(名: str, 域名优先: tuple[str, ...]) -> str:
         候选 = 表.get(名) or []
         for 域 in 域名优先:
-            命中 = [c for c in 候选 if str(c.get("domain")) == 域]
+            命中 = [c for c in 候选 if _文本(c.get("domain")) == 域]
             if 命中:
-                return str(命中[0].get("value") or "")
-        return str(候选[0].get("value") or "") if 候选 else ""
+                return _文本(命中[0].get("value"))
+        return _文本(候选[0].get("value")) if 候选 else ""
 
     字段 = {
         "bduss": 取("BDUSS", (".baidu.com", "baidu.com")),

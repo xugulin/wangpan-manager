@@ -2168,6 +2168,53 @@ def main() -> int:
             _os2.environ.pop("V8_3_不联网", None)
         else:
             _os2.environ["V8_3_不联网"] = _旧2
+    # ---- 方案 B：内置浏览器登录（不依赖外部浏览器/调试端口）----
+    # 用户现场：扫码登录的 BDUSS 进不了网页版 pan 域 → 写操作全废。
+    # 内置浏览器走的**就是网页版登录**，登录完自动取走完整会话（含 HttpOnly）。
+    from v8_3.界面.内置浏览器登录 import (
+        可用 as _内置可用, 拼cookie头 as _拼, 取cookie值 as _取值,
+        内置浏览器登录窗口 as _内置窗口, 内置浏览器目录 as _内置目录,
+        读取当前离线cookie as _读库,
+    )
+    能用, 原因 = _内置可用()
+    检查(能用 or bool(原因), f"内置浏览器可用性检查有结论：{能用} / {原因 or 'OK'}")
+    检查(_内置目录().name == "内置浏览器",
+         f"内置浏览器数据放在项目内（{_内置目录()}）")
+    # cookie 组装规则（"自动回填"的核心：同名 cookie 要按域名取对的那份）
+    _凭证 = [
+        {"name": "BDUSS", "value": "B" * 10, "domain": ".baidu.com"},
+        {"name": "STOKEN", "value": "S" * 10, "domain": ".passport.baidu.com"},
+        {"name": "STOKEN", "value": "P" * 10, "domain": ".pan.baidu.com"},
+        {"name": "BAIDUID", "value": "U" * 10, "domain": ".baidu.com"},
+    ]
+    检查(_取值(_凭证, "STOKEN", (".pan.baidu.com",)) == "P" * 10,
+         "同名 cookie 按域名优先取 —— pan 域那份才是写权限认的")
+    _头 = _拼(_凭证, ("BDUSS", "STOKEN"))
+    检查("BDUSS=" in _头 and "STOKEN=" in _头, f"能拼出 Cookie 头：{_头[:48]}…")
+    # 直读 profile 的 Cookies 库（比 Qt 的按 URL 过滤可靠：BDUSS 挂在
+    # .baidu.com 下，按 https://www.baidu.com/ 过滤会漏）
+    _库条目 = _读库(("BDUSS", "STOKEN"))
+    检查(isinstance(_库条目, list), f"能从内置浏览器库读 cookie：{len(_库条目)} 条")
+    检查(all(not str(c["name"]).startswith("b'") for c in _库条目),
+         "库里读出来的 cookie 名字是干净字符串（不会出现 b'BDUSS'）")
+    # 窗口能建起来 + 能捕获 cookie + 会提示还缺什么
+    _窗 = _内置窗口("baidu", None, 完成回调=lambda _c: None)
+    try:
+        _窗.show()
+        泵(0.3)
+        检查(hasattr(_窗, "状态标签") and hasattr(_窗, "_视图"),
+             "内置浏览器窗口建起来了（有视图与状态栏）")
+        _窗._收字典({"name": "STOKEN", "value": "x" * 8,
+                  "domain": ".pan.baidu.com", "httpOnly": True})
+        _名 = [c["name"] for c in _窗._凭证]
+        检查("STOKEN" in _名, f"窗口能收下 cookie：{_名}")
+        _窗._查凭证()
+        泵(0.2)
+        检查("还缺" in _窗.状态标签.text() or "✅" in _窗.状态标签.text(),
+             f"窗口会提示还缺哪些凭证：{_窗.状态标签.text()[:60]}")
+    finally:
+        _窗.close()
+
     # ---- 百度「从浏览器导入完整会话」（写权限的正解）----
     # 用户现场：扫码登录后能列目录、上传/改名/删除全报 errno:-6。
     # 真机实测根因：写权限 = BDUSS + **pan 域** STOKEN，扫码那份会话缺它；
@@ -2195,8 +2242,12 @@ def main() -> int:
     try:
         等待(lambda: bool(百度对话.能力), 30, "等待百度能力表")
         百度对话._切方式("cookie")
+        检查(hasattr(百度对话, "内置浏览器按钮"),
+             "百度登录对话框有「🌐 用内置浏览器登录（推荐）」按钮")
+        检查("自动取走完整会话" in 百度对话.内置浏览器按钮.toolTip(),
+             "按钮提示写清了它会自动取走完整会话")
         检查(hasattr(百度对话, "浏览器导入按钮"),
-             "百度 Cookie 面板有「🌐 从浏览器导入完整会话」按钮")
+             "百度 Cookie 面板也有「🌐 从浏览器导入完整会话」按钮（外部浏览器）")
         检查("STOKEN" in 百度对话.浏览器导入按钮.toolTip(),
              "按钮提示里写清了它解决的是 pan 域 STOKEN 缺失")
         # 点一下：假适配器会收到 __取浏览器会话__ 这条指令（真机由桥去抓 cookie）
