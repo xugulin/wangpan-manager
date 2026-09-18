@@ -537,6 +537,11 @@ class 登录对话框(QDialog):
                 except Exception:
                     pass
             self._通知成功()
+            # 扫码登录拿到的是"只读会话"，桥会自愈（内置浏览器 → 外部调试端口）。
+            # 这里**马上复测一次**，成功就把网盘页那行"写操作不可用"清掉；
+            # 不这么做用户得手动点「🔄 刷新状态」或重启才看到恢复
+            # （用户实测反馈过这个体验问题）。
+            self._复测写权限()
         elif 状态 == "不支持":
             self._设置状态(f"⚠️ {结果.get('消息', '该方式不被支持')}", "#e67e22")
         elif 状态 in ("超时", "已取消"):
@@ -565,6 +570,40 @@ class 登录对话框(QDialog):
         self.发送验证码按钮.setEnabled(True)
         self.Cookie登录按钮.setEnabled(True)
         self.令牌登录按钮.setEnabled(True)
+
+    def _复测写权限(self) -> None:
+        """登录成功后后台复测一次写权限（只有百度有这条命令，别的网盘静默跳过）。"""
+        适配器 = self.适配器
+        if not hasattr(适配器, "写权限复测"):
+            return
+
+        def 动作(进度):
+            return dict(适配器.写权限复测() or {})
+
+        def 好了(结果):
+            结果 = dict(结果 or {})
+            可写 = bool(结果.get("可写"))
+            self._日志("写权限复测：" + ("✅ 可写" if 可写 else
+                                   f"⚠️ {结果.get('消息') or '仍不可写'}"))
+            if 可写:
+                # 清掉页面状态栏里那行"只能读"，并让状态标签立刻重画
+                try:
+                    页 = self.主窗口._网盘页面.get(self.标识)
+                    if 页 is not None and getattr(页, "_上次详情", None):
+                        页._上次详情.pop("write_error", None)
+                        if hasattr(页, "状态标签"):
+                            文字 = 页.状态标签.text()
+                            if "写操作不可用" in 文字:
+                                页.状态标签.setText(
+                                    文字.split("；⚠️")[0] + "；写操作可用")
+                except Exception:
+                    pass
+                try:
+                    self.主窗口.刷新网盘状态(self.标识)
+                except Exception:
+                    pass
+
+        self._跑("复测写权限", 动作, 处理器=好了)
 
     def _通知成功(self):
         self._停止核对()

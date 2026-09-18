@@ -179,6 +179,11 @@ class 工作进程:
                 str(参数.get("account") or ""),
                 str(参数.get("password") or ""),
                 dict(参数.get("extra") or {}))
+        if 命令 == "write_probe":
+            方法 = getattr(self._后端, "write_probe", None)
+            if 方法 is None:
+                return {"状态": "不支持", "消息": "该后端没有写权限复测"}
+            return 方法()
         if 命令 == "logout":
             return self._后端.退出登录()
         if 命令 == "login_email":
