@@ -1,6 +1,6 @@
 <div align="center">
 
-# 网盘管理 V1.0
+# 网盘管理 V1.0.1
 
 **一个绿色免安装的网盘管家：百度网盘 · 夸克网盘 · 光鸭云盘，一个界面全搞定**
 
@@ -25,10 +25,10 @@
 
 | 系统 | 包 | 说明 |
 |---|---|---|
-| **Windows** | `wangpan-manager-V1.0.0-Windows-full-with-whisper-model` | **推荐**：含 AI 语音模型，字幕离线可用 |
-| **Windows** | `wangpan-manager-V1.0.0-Windows-lite-no-model` | 精简版：省 460 MB，首次用字幕时自动联网下模型 |
-| **Linux** | `wangpan-manager-V1.0.0-Linux-full-with-whisper-model` | 完整版（x86_64） |
-| **Linux** | `wangpan-manager-V1.0.0-Linux-lite-no-model` | 精简版（x86_64） |
+| **Windows** | `wangpan-manager-V1.0.1-Windows-full-with-whisper-model` | **推荐**：含 AI 语音模型，字幕离线可用 |
+| **Windows** | `wangpan-manager-V1.0.1-Windows-lite-no-model` | 精简版：省 460 MB，首次用字幕时自动联网下模型 |
+| **Linux** | `wangpan-manager-V1.0.1-Linux-full-with-whisper-model` | 完整版（x86_64） |
+| **Linux** | `wangpan-manager-V1.0.1-Linux-lite-no-model` | 精简版（x86_64） |
 
 **怎么下：每个包分成若干 60 MB 分卷**（`.zip.part01`、`.zip.part02` …），
 把**同一个包的所有分卷**下载到**同一个文件夹**，再执行附带的合并脚本：
@@ -48,6 +48,15 @@
 > 想看到报错信息？Windows 双击 `启动（看报错）.bat`，会在黑窗口里打印日志。
 
 ---
+
+## 🆕 V1.0.1 修了什么
+
+- 下拉框不再出现"两个箭头"（现在只有一个，位置在右侧按钮区正中）
+- **页面/弹窗内容放不下时可以上下左右滑动**，控件不再被窗口缩放压扁变形
+- 新增网盘弹窗的说明文字不再被裁掉，底部「确定/取消」始终可见
+- 传输表格不再被挤变形（列有最小宽度，窗口不够宽时横向滑动查看）
+
+> 功能与 V1.0.0 完全一致，这一版只动界面体验。
 
 ## ✨ 功能亮点
 

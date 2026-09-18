@@ -58,7 +58,7 @@ def 生成说明(整包在的: list[str], 分卷全的: list[str]) -> str:
     for 平台 in ("Windows", "Linux"):
         for 口味, 标签 in (("full-with-whisper-model", "完整版"),
                         ("lite-no-model", "精简版")):
-            名 = f"wangpan-manager-V1.0.0-{平台}-{口味}.zip"
+            名 = f"wangpan-manager-V{更新.当前版本()}-{平台}-{口味}.zip"
             状态 = ("整包" if 名 in 整包在的 else
                   ("分卷" if 名 in 分卷全的 else "缺失"))
             情况.append((平台, 标签, 名, 状态))

@@ -28,7 +28,15 @@ from pathlib import Path
 包内容 = 构建目录 / "包内容"
 Windows运行时 = 构建目录 / "windows"
 
-版本 = "1.0.0"
+def _读版本() -> str:
+    """版本号只在 v8_3/__init__.py 里定义一次，这里读出来用（别再手写）。"""
+    for 行 in (项目根 / "v8_3" / "__init__.py").read_text(encoding="utf-8").splitlines():
+        if 行.startswith("__version__"):
+            return 行.split("=", 1)[1].strip().strip('"').strip("'")
+    raise SystemExit("读不到 __version__")
+
+
+版本 = _读版本()
 
 #: 打进包里的源码/文档（从项目根拷）
 源码项 = ("启动.py", "启动.sh", "pyproject.toml", "README.md",

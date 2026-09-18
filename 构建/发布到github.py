@@ -28,7 +28,14 @@ from urllib.parse import quote
 
 拥有人 = "xugulin"
 仓库名 = "wangpan-manager"
-标签 = "V1.0.0"
+def _读版本() -> str:
+    for 行 in (项目根 / "v8_3" / "__init__.py").read_text(encoding="utf-8").splitlines():
+        if 行.startswith("__version__"):
+            return 行.split("=", 1)[1].strip().strip('"').strip("'")
+    raise SystemExit("读不到 __version__")
+
+
+标签 = f"V{_读版本()}"
 API = "https://api.github.com"
 上传API = "https://uploads.github.com"
 
