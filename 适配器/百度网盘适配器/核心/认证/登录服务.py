@@ -436,33 +436,48 @@ class 登录服务:
         logger.info(f"[登录] 已取得会话：{命中}")
         return True
 
-    def 建立pan域会话_换发stoken(self) -> bool:
-        """再访问一次 pan 域，把 passport 域那份 STOKEN 换成 pan 域那份。
+    def 建立pan域会话_换发stoken(self, 最多尝试: int = 3) -> bool:
+        """反复访问 pan 域，直到把 passport 域那份 STOKEN 换发成 pan 域那份。
 
-        真机实测（2026-09-19）：**pan 域的 STOKEN 不在登录响应里**，
-        而是访问 pan 域（`/v3/login/api/auth/?return_type=5&u=https://pan.baidu.com/disk/main`）
-        时由服务端换发的。少了这一步，会话就是"只能读"：
-        `/api/list` 正常、`/api/gettemplatevariable` 与所有写接口 errno:-6。
+        ✅ 真机实测（2026-09-19）：
+        * **pan 域的 STOKEN 不在登录响应里**，是访问 pan 域时由服务端换发的；
+          少了它，会话就是"只能读"：`/api/list` 正常，写接口一律 errno:-6。
+        * 换发**不是一次就中**：实测第一次访问可能只回
+          `errmsg=Auth Login Params Not Complete`（且不下发 STOKEN），
+          隔一两秒再访问才拿到 pan 域那份（与浏览器里那份完全一致）。
+          所以这里**重试最多 4 次、每次间隔 1.2 秒**，一拿到就返回。
 
-        :return: 是否真的换到了不同的 STOKEN（True 通常意味着写权限已就绪）
+        :return: 是否真的换到了与之前不同的 STOKEN
         """
         之前 = self.仓库.获取stoken()
-        self.建立网盘会话()
-        # 顺带把 pan 域首页走一遍：实测这一下也会触发换发
-        try:
-            self.网络.请求("GET", "/disk/main", 基础地址=pan基础地址,
-                        带业务头=False, 需要认证=False, raw=True)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[登录] 访问 pan 首页异常（可忽略）：{e}")
-        self.种植子域会话()
-        之后 = self.仓库.获取stoken()
-        if 之后 and 之后 != 之前:
-            logger.info("[登录] ✅ 已换发 pan 域 STOKEN（写权限就绪）")
-            return True
-        if 之后:
-            logger.info("[登录] pan 域 STOKEN 与换取会话时相同（可能已是 pan 域那份）")
+        上次错误 = ""
+        for 第几次 in range(1, max(1, int(最多尝试)) + 1):
+            try:
+                self.建立网盘会话()
+            except Exception as e:  # noqa: BLE001
+                上次错误 = f"{type(e).__name__}: {e}"
+            # 顺带把 pan 域首页走一遍：实测这一下也会触发换发
+            try:
+                self.网络.请求("GET", "/disk/main", 基础地址=pan基础地址,
+                            带业务头=False, 需要认证=False, raw=True)
+            except Exception as e:  # noqa: BLE001
+                上次错误 = f"{type(e).__name__}: {e}"
+            现在 = self.仓库.获取stoken()
+            if 现在 and 现在 != 之前:
+                logger.info(f"[登录] ✅ 已换发 pan 域 STOKEN（第 {第几次} 次访问时拿到）")
+                try:
+                    self.种植子域会话()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"[登录] 种植子域异常（可忽略）：{e}")
+                return True
+            if 第几次 < 最多尝试:
+                time.sleep(0.6)
+        if 之前:
+            logger.info("[登录] pan 域访问完成，但 STOKEN 未变化"
+                       "（可能已经是 pan 域那份，或账号侧还没换发）")
             return False
-        logger.warning("[登录] 仍未拿到 STOKEN（写操作会失败，可稍后重试或导入浏览器会话）")
+        logger.warning("[登录] 仍未拿到 STOKEN（写操作会失败）"
+                      + (f"：{上次错误}" if 上次错误 else ""))
         return False
 
     def 种植子域会话(self) -> list[str]:

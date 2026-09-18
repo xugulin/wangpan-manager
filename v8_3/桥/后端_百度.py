@@ -245,13 +245,27 @@ class 后端(后端基类):
             self.记录(f"[百度] 补种 pan 域会话：登录服务不可用（{e}）", "warning")
             return False
         try:
-            服务.建立网盘会话()
-            子域 = 服务.种植子域会话()
-            self.记录("[百度] 已补种 pan 域会话"
-                     f"（子域：{'、'.join(子域) if 子域 else '无'}）")
-            return True
+            之前 = 服务.仓库.获取stoken()
+            # 优先用适配器里那条"最多 4 次、间隔 1.2 秒"的换发逻辑
+            换到了 = False
+            try:
+                换到了 = bool(服务.建立pan域会话_换发stoken())
+            except Exception as e:  # noqa: BLE001
+                self.记录(f"[百度] 换发 pan 域 STOKEN 异常：{e}", "warning")
+            if not 换到了:
+                # 兜底：老路径（建立会话 + 种植子域）
+                try:
+                    服务.建立网盘会话()
+                    子域 = 服务.种植子域会话()
+                    self.记录("[百度] 已补种 pan 域会话"
+                             f"（子域：{'、'.join(子域) if 子域 else '无'}）")
+                except Exception as e:  # noqa: BLE001
+                    self.记录(f"[百度] 补种 pan 域会话失败：{type(e).__name__}: {e}",
+                             "warning")
+            之后 = 服务.仓库.获取stoken()
+            return bool(之后 and 之后 != 之前) or 换到了
         except Exception as e:  # noqa: BLE001
-            self.记录(f"[百度] 补种 pan 域会话失败：{type(e).__name__}: {e}", "warning")
+            self.记录(f"[百度] 补种 pan 域会话异常：{type(e).__name__}: {e}", "warning")
             return False
         finally:
             try:
@@ -1049,6 +1063,14 @@ class 后端(后端基类):
 
             self.记录("[百度] 已确认，正在用登录令牌换取 BDUSS / STOKEN …")
             服务.换取会话(令牌)          # 失败会抛 接口错误
+            # ⚠️ 实测（2026-09-19）：扫码换取到的只是 **passport 域** STOKEN，
+            #    写接口只认 **pan 域**那份，而 pan 域那份是"访问 pan 域时换发"的，
+            #    且不一定一次就中 —— 所以走适配器里那条"重试 3 次"的换发逻辑。
+            try:
+                换到了 = 服务.建立pan域会话_换发stoken()
+                self.记录("[百度] pan 域 STOKEN 换发：" + ("成功" if 换到了 else "未变化"))
+            except Exception as e:  # noqa: BLE001
+                self.记录(f"[百度] pan 域 STOKEN 换发异常（不影响登录）：{e}", "warning")
             服务.建立网盘会话()          # 建 pan 域会话（内部失败只记日志）
             try:
                 # 同适配器 完成扫码登录()：种植 pcs / pcsdata 子域，上传通道才不带 401；
@@ -1071,6 +1093,31 @@ class 后端(后端基类):
                 提示 = f"登录成功，但 bdstoken 未取到（写操作可能不可用）：{e}"
                 self.记录(f"[百度] 补齐 bdstoken 失败（不影响登录）："
                          f"{type(e).__name__}: {e}", "warning")
+            # 扫码得到的会话**可能只能读**（实测：它的 BDUSS 进不了网页版 pan 域，
+            # 服务端因此不下发 pan 域 STOKEN → 上传/改名/删除恒 errno:-6）。
+            # 这里当场验一次写权限，只读就立刻自愈（补种 pan 域 → 浏览器会话），
+            # 并把结论如实写进提示 —— 用户不必自己去猜"为什么上传失败"。
+            try:
+                _写状态缓存.update({"指纹": "", "状态": "", "时间": 0.0})
+                状态 = self._写权限状态()
+                if 状态 == "可写":
+                    提示 += "；写操作（上传/改名/删除）已验证可用"
+                else:
+                    if self._试从浏览器补全会话():
+                        _写状态缓存.update({"指纹": "", "状态": "", "时间": 0.0})
+                        状态 = self._写权限状态()
+                    if 状态 == "可写":
+                        提示 += "；写操作已验证可用（已从浏览器补全会话）"
+                    else:
+                        原因 = str(_最近补会话.get("失败原因") or "")
+                        提示 += ("；⚠️ 这份扫码会话只能读（服务端没给 pan 域 STOKEN），"
+                               "上传/改名/删除会被拒绝。"
+                               + (f"自动补全失败：{原因}。" if 原因 else "")
+                               + "请在带调试端口的浏览器里登录 pan.baidu.com 后，"
+                                 "点「🌐 从浏览器导入完整会话」。")
+                    self.记录(f"[百度] 扫码登录后的写权限：{状态}", "warning")
+            except Exception as e:  # noqa: BLE001
+                self.记录(f"[百度] 扫码登录后写权限检查失败（不影响登录）：{e}", "warning")
             self.记录("[百度] 扫码登录成功")
             return self.登录成功("百度扫码登录成功", 提示)
         except Exception as e:  # noqa: BLE001
