@@ -35,6 +35,7 @@ from .后台线程 import 任务线程, 线程池管理器
             "qwen2.5:3b", "llama3.2:3b"]
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
+    QInputDialog,
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
     QGroupBox,
     QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
@@ -244,8 +245,39 @@ class AI状态页面(QWidget):
         密钥只写进本项目自己的 ``配置.json``（``AI.api密钥``）；
         界面与日志都只显示遮盖后的形态，不打印明文。
         """
-        组 = QGroupBox("🔑 DeepSeek API 密钥（云端）")
+        组 = QGroupBox("🔑 在线模型（多家厂家，各自一把密钥）")
         外层 = QVBoxLayout(组)
+
+        # ---- 厂家：每一家有自己的接口地址 + 密钥 + 模型，可随时切换 ----
+        厂家行 = QHBoxLayout()
+        厂家行.addWidget(QLabel("厂家："))
+        self.厂家下拉 = QComboBox()
+        self.厂家下拉.setMinimumWidth(220)
+        self.厂家下拉.setToolTip(
+            "点这里切换厂家。每家各存一份接口地址与密钥，互不干扰。\n"
+            "模型名通过该厂家的接口用你的密钥实时拉取（不是内置写死的名单）。")
+        self.厂家下拉.currentIndexChanged.connect(self._切换厂家)
+        厂家行.addWidget(self.厂家下拉, 1)
+        self.新增厂家按钮 = QPushButton("➕ 添加厂家")
+        self.新增厂家按钮.setToolTip("从内置预设里挑一家（百炼/Kimi/智谱/火山/硅基流动…）或自定义")
+        self.新增厂家按钮.clicked.connect(self._新增厂家)
+        厂家行.addWidget(self.新增厂家按钮)
+        self.删除厂家按钮 = QPushButton("🗑 删除")
+        self.删除厂家按钮.clicked.connect(self._删除厂家)
+        厂家行.addWidget(self.删除厂家按钮)
+        外层.addLayout(厂家行)
+
+        地址行 = QHBoxLayout()
+        地址行.addWidget(QLabel("接口地址："))
+        self.接口地址框 = QLineEdit()
+        self.接口地址框.setPlaceholderText(
+            "例如 https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.接口地址框.setToolTip(
+            "直接填该厂家的接口地址（OpenAI 兼容网关的 /v1 地址）即可 ——\n"
+            "本项目不绑定任何品牌，只按这个地址发请求。")
+        self.接口地址框.returnPressed.connect(self._保存厂家)
+        地址行.addWidget(self.接口地址框, 1)
+        外层.addLayout(地址行)
 
         self.密钥状态标签 = QLabel("🔑 正在读取密钥状态…")
         self.密钥状态标签.setWordWrap(True)
@@ -258,11 +290,11 @@ class AI状态页面(QWidget):
         行.addWidget(QLabel("密钥："))
         self.密钥输入框 = QLineEdit()
         self.密钥输入框.setEchoMode(QLineEdit.Password)
-        self.密钥输入框.setPlaceholderText("sk-…（粘贴 DeepSeek 控制台里的 API key）")
+        self.密钥输入框.setPlaceholderText("粘贴该厂家的 API Key（只存本地 配置.json）")
         self.密钥输入框.setMinimumWidth(320)
         self.密钥输入框.setToolTip(
-            "直接粘贴密钥后按「💾 保存密钥」或回车即可生效。\n"
-            "保存会写进本项目 配置.json 的 AI.api密钥，并立刻重建 AI 层。")
+            "这是**当前厂家**的密钥。切换厂家时会各自记住，互不覆盖。\n"
+            "保存写进本项目 配置.json（AI.在线模型），并立刻重建 AI 层。")
         self.密钥输入框.returnPressed.connect(self._保存密钥)
         行.addWidget(self.密钥输入框, 1)
         self.显示密钥框 = QCheckBox("👁 显示")
@@ -302,7 +334,18 @@ class AI状态页面(QWidget):
     # ==================== 云端密钥 ====================
 
     def _当前密钥(self) -> str:
-        """当前真正在用的密钥：优先运行时（它才是干活的那个），退回主窗口配置。"""
+        """当前**这个厂家**的密钥。
+
+        多厂家之后密钥是按厂家分开存的（``AI.在线模型.厂家.<id>.密钥``），
+        所以先读当前厂家；老配置里那份平铺的 ``AI.api密钥`` 只作为兜底。
+        """
+        try:
+            厂家 = self._在线段()["厂家"].get(self._在线段()["当前"]) or {}
+            值 = str(厂家.get("密钥") or "").strip()
+            if 值:
+                return 值
+        except Exception:  # noqa: BLE001
+            pass
         try:
             运行时 = self.运行时
             if 运行时 is not None:
@@ -325,7 +368,200 @@ class AI状态页面(QWidget):
             return "*" * len(密钥)
         return f"{密钥[:6]}…{密钥[-4:]}"
 
+    # ==================== 在线厂家（多家切换） ====================
+
+    def _在线段(self) -> dict:
+        from ..配置 import 在线模型段
+        return 在线模型段(self.主窗口.配置)
+
+    def _写回在线段(self, 段: dict) -> None:
+        """写回配置并落盘 + 重建 AI 层。"""
+        from ..配置 import 保存配置, 写回在线模型, 配置文件 as 默认配置路径
+        写回在线模型(self.主窗口.配置, 段)
+        路径 = getattr(self.主窗口, "配置路径", None) or 默认配置路径
+        保存配置(self.主窗口.配置, 路径)
+        try:
+            self.主窗口._确保AI(强制=True)
+        except TypeError:
+            try:
+                self.主窗口._确保AI()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _刷新厂家下拉(self) -> None:
+        段 = self._在线段()
+        self.厂家下拉.blockSignals(True)
+        self.厂家下拉.clear()
+        for 标识, 项 in 段["厂家"].items():
+            标 = "🔑 " if str(项.get("密钥") or "").strip() else "⚪ "
+            self.厂家下拉.addItem(f"{标}{项.get('名称') or 标识}", 标识)
+        idx = self.厂家下拉.findData(段["当前"])
+        self.厂家下拉.setCurrentIndex(max(0, idx))
+        self.厂家下拉.blockSignals(False)
+        self.删除厂家按钮.setEnabled(len(段["厂家"]) > 1)
+
+    def _切换厂家(self, _索引=0) -> None:
+        标识 = self.厂家下拉.currentData()
+        if not 标识:
+            return
+        段 = self._在线段()
+        if 标识 == 段["当前"]:
+            self._载入厂家到界面()
+            return
+        # 先把当前界面上编辑到一半的内容存回原厂家，再切
+        self._保存厂家(静默=True)
+        段 = self._在线段()
+        段["当前"] = 标识
+        self._写回在线段(段)
+        self._载入厂家到界面()
+        self._记日志(f"[在线模型] 已切换到「{段['厂家'][标识].get('名称') or 标识}」")
+        self.刷新()
+
+    def _载入厂家到界面(self) -> None:
+        from ..配置 import 当前厂家
+        厂家 = 当前厂家(self.主窗口.配置)
+        self.接口地址框.setText(str(厂家.get("接口地址") or ""))
+        self.接口地址框.setModified(False)
+        if not self.密钥输入框.isModified():
+            self.密钥输入框.setText(str(厂家.get("密钥") or ""))
+        self.密钥输入框.setModified(False)
+        self._刷新密钥区()
+
+    def _保存厂家(self, 静默: bool = False) -> None:
+        段 = self._在线段()
+        标识 = 段["当前"]
+        厂家 = dict(段["厂家"].get(标识) or {})
+        厂家["接口地址"] = self.接口地址框.text().strip().rstrip("/")
+        厂家["密钥"] = self.密钥输入框.text().strip()
+        模型 = self.模型下拉框.currentData() if hasattr(self, "模型下拉框") else ""
+        if 模型:
+            厂家["模型"] = str(模型)
+        段["厂家"][标识] = 厂家
+        self._写回在线段(段)
+        self.接口地址框.setModified(False)
+        self.密钥输入框.setModified(False)
+        self._刷新厂家下拉()
+        if not 静默:
+            self._记日志(f"[在线模型] 已保存「{厂家.get('名称') or 标识}」的接口地址与密钥")
+            self.刷新()
+
+    def _新增厂家(self) -> None:
+        from ..配置 import 在线厂家预设
+        名单 = list(在线厂家预设.keys())
+        选择, 好 = QInputDialog.getItem(
+            self, "添加厂家", "选一家（自带的接口地址已填好，粘个密钥就能用）：",
+            名单, 0, False)
+        if not 好 or not 选择:
+            return
+        段 = self._在线段()
+        标识 = 选择 if 选择 not in 段["厂家"] else f"{选择}_{len(段['厂家']) + 1}"
+        from ..配置 import _规格化厂家
+        段["厂家"][标识] = _规格化厂家(选择, {})
+        段["当前"] = 标识
+        self._写回在线段(段)
+        self._刷新厂家下拉()
+        self._载入厂家到界面()
+        self._记日志(f"[在线模型] 已添加厂家「{选择}」，填好密钥后点「🔄 拉取模型」")
+
+    def _删除厂家(self) -> None:
+        段 = self._在线段()
+        if len(段["厂家"]) <= 1:
+            return
+        标识 = 段["当前"]
+        名称 = 段["厂家"][标识].get("名称") or 标识
+        if QMessageBox.question(
+                self, "删除厂家",
+                f"删除厂家「{名称}」？\n它的接口地址与密钥会一起删掉。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        段["厂家"].pop(标识, None)
+        段["当前"] = next(iter(段["厂家"]))
+        self._写回在线段(段)
+        self._刷新厂家下拉()
+        self._载入厂家到界面()
+        self.刷新()
+
+    def _拉取模型(self) -> None:
+        """用当前厂家的密钥去它的接口拉一次模型清单（后台，不卡界面）。"""
+        from ..配置 import 当前厂家
+        厂家 = 当前厂家(self.主窗口.配置)
+        地址 = str(厂家.get("接口地址") or "").strip()
+        密钥 = self.密钥输入框.text().strip() or str(厂家.get("密钥") or "")
+        if not 地址:
+            QMessageBox.information(self, "提示", "先填这个厂家的接口地址。")
+            return
+        if not 密钥:
+            QMessageBox.information(self, "提示", "先粘这个厂家的 API Key，再拉模型。")
+            return
+        if not 密钥.isascii():
+            QMessageBox.warning(
+                self, "密钥格式不对",
+                "API Key 里混进了非 ASCII 字符（多半是从别处复制时带上了中文或空格）。\n"
+                "请重新复制纯密钥再试。")
+            return
+        def 按钮(状态: str) -> None:
+            钮 = getattr(self, "拉取模型按钮", None) or getattr(self, "刷新模型按钮", None)
+            if 钮 is not None:
+                钮.setEnabled(状态 == "开始")
+                钮.setText("⏳" if 状态 == "开始" else "🔄")
+
+        按钮("开始")
+
+        def 干():
+            import httpx
+            基 = 地址.rstrip("/")
+            应答 = httpx.get(f"{基}/models",
+                          headers={"Authorization": f"Bearer {密钥}"},
+                          timeout=20.0)
+            应答.raise_for_status()
+            数据 = 应答.json() or {}
+            名单 = [str(m.get("id") or "") for m in (数据.get("data") or [])
+                  if m.get("id")]
+            if not 名单:
+                raise RuntimeError("该接口没有返回任何模型（可能不支持 /models）")
+            return 名单
+
+        def 好了(名单):
+            按钮("结束")
+            段 = self._在线段()
+            标识 = 段["当前"]
+            厂家 = dict(段["厂家"].get(标识) or {})
+            厂家["模型列表"] = list(名单)
+            厂家["模型来源"] = "接口"
+            段["厂家"][标识] = 厂家
+            self._写回在线段(段)
+            self._记日志(f"[在线模型] 拉到 {len(名单)} 个模型：{'、'.join(名单[:6])}"
+                      + ("…" if len(名单) > 6 else ""))
+            self.刷新()
+
+        def 坏了(错误):
+            按钮("结束")
+            提示 = (f"拉取失败：{错误}\n\n"
+                  "有些网关不提供 /models 接口（比如火山方舟要填接入点 ID）。\n"
+                  "这种情况可以直接在下拉框里手输模型名，或点「➕ 添加到模型列表」。")
+            QMessageBox.warning(self, "拉取模型失败", 提示)
+            self._记日志(f"[在线模型] 拉取模型失败：{错误}")
+
+        线程 = 任务线程(干, 父=self)
+        线程.成功.connect(好了)
+        线程.失败.connect(坏了)
+        self._登记线程(线程)
+        线程.start()
+
     def _刷新密钥区(self):
+        # 厂家下拉与"接口地址"要跟着当前厂家走（每家一份密钥/地址）
+        try:
+            self._刷新厂家下拉()
+            厂家 = self._在线段()["厂家"].get(self._在线段()["当前"], {})
+            if not self.接口地址框.isModified():
+                self.接口地址框.setText(str(厂家.get("接口地址") or ""))
+            if not self.密钥输入框.isModified():
+                self.密钥输入框.setText(str(厂家.get("密钥") or ""))
+                self.密钥输入框.setModified(False)
+        except Exception:  # noqa: BLE001
+            pass
         密钥 = self._当前密钥()
         if 密钥:
             self.密钥状态标签.setText(
@@ -800,12 +1036,22 @@ class AI状态页面(QWidget):
     # ==================== 模型 / 价格 ====================
 
     def _刷新模型列表(self):
+        """🔄：用当前厂家的接口地址 + 密钥重新拉一次模型清单（后台执行）。
+
+        用户的要求是"用 API Key 准确获取各厂家支持的模型"，所以这里不再走
+        DeepSeek 专用的固定名单，而是直接问当前厂家的 ``/models``。
+        拉不到（有的网关不提供）就退回该厂家的推荐清单，并在下拉框里保留手输。
+        """
+        自 = self
+        if hasattr(自, "_拉取模型"):
+            自._拉取模型()
+            return
         运行时 = self.运行时
         if 运行时 is None:
             return
         try:
             运行时.刷新模型()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         self._填充模型下拉()
 
@@ -817,6 +1063,29 @@ class AI状态页面(QWidget):
             模型列表 = list(运行时.获取模型列表() or [])
         except Exception:
             模型列表 = []
+        # 当前厂家"用密钥拉到过的清单"也并进来：切厂家后下拉框立刻是这家真实支持的模型
+        try:
+            from ..配置 import 当前厂家
+            厂家 = 当前厂家(self.主窗口.配置)
+            已有 = set(模型列表)
+            for 名 in (厂家.get("模型列表") or []):
+                if 名 and 名 not in 已有:
+                    模型列表.append(名)
+            当前厂家模型 = str(厂家.get("模型") or "")
+        except Exception:  # noqa: BLE001
+            当前厂家模型 = ""
+        if not 模型列表:
+            模型列表 = [str((运行时.AI配置 or {}).get("模型") or "deepseek-flash")]
+        if 当前厂家模型 and 当前厂家模型 not in 模型列表:
+            模型列表.insert(0, 当前厂家模型)
+        # 该厂家已经拉过自己的清单 → 就只显示这家的模型，别把上一家的混进来
+        try:
+            厂家清单 = [str(x) for x in (厂家.get("模型列表") or []) if x]
+        except Exception:  # noqa: BLE001
+            厂家清单 = []
+        if 厂家清单:
+            去重 = list(dict.fromkeys(([当前厂家模型] if 当前厂家模型 else []) + 厂家清单))
+            模型列表 = 去重
         if not 模型列表:
             模型列表 = [str((运行时.AI配置 or {}).get("模型") or "deepseek-flash")]
         当前 = str((运行时.AI配置 or {}).get("模型") or "")

@@ -1965,6 +1965,50 @@ def main() -> int:
     弹窗.close(); 弹窗.deleteLater()
     泵(0.2)
 
+    print("\n[34] 在线模型：多家厂家，各自一把密钥（用户要求像 harness 那样）")
+    from v8_3.配置 import _规格化厂家, 在线模型段, 写回在线模型, 当前厂家, 在线厂家预设
+    段 = 在线模型段(窗口.配置)
+    写回在线模型(窗口.配置, 段)          # 顺手验证迁移/写回不炸
+    检查("deepseek" in 段["厂家"], "老的单密钥配置被迁移成 deepseek 厂家（密钥不丢）")
+    检查(len(在线厂家预设) >= 6, f"内置了 {len(在线厂家预设)} 家预设（含百炼/Kimi/智谱/火山…）")
+    检查(any("百炼" in v.get("名称", "") for v in 在线厂家预设.values()),
+         "预设里有阿里云百炼")
+
+    if 窗口._AI页面 is None:
+        窗口.切换到AI页()
+    泵(0.3)
+    AI页 = 窗口.AI页面()
+    检查(hasattr(AI页, "厂家下拉") and hasattr(AI页, "接口地址框"),
+         "AI 页有厂家下拉与接口地址输入框")
+    # 加一家百炼，验证"每家各存一份地址与密钥、模型清单来自该厂家"
+    段 = 在线模型段(窗口.配置)
+    段["厂家"]["deepseek"] = _规格化厂家("deepseek", {"密钥": "sk-deepseek-自检",
+                                                 "模型": "deepseek-flash"})
+    段["厂家"]["bailian"] = _规格化厂家("bailian", {
+        "密钥": "sk-bailian-自检", "模型": "qwen-plus",
+        "模型列表": ["qwen-plus", "qwen-max"]})
+    段["当前"] = "bailian"
+    写回在线模型(窗口.配置, 段)
+    AI页._载入厂家到界面()
+    AI页.刷新()
+    泵(0.4)
+    检查("dashscope" in AI页.接口地址框.text(),
+         f"选中百炼时接口地址跟着切（{AI页.接口地址框.text()[:48]}）")
+    检查(AI页.密钥输入框.text() == "sk-bailian-自检", "密钥跟着厂家切（不是同一把）")
+    下拉 = [AI页.模型下拉框.itemText(i) for i in range(AI页.模型下拉框.count())]
+    检查("qwen-plus" in 下拉, f"模型下拉来自该厂家（{下拉[:3]}）")
+    检查("deepseek-flash" not in 下拉, "不再把上一家的模型混进来")
+    AI页.厂家下拉.setCurrentIndex(AI页.厂家下拉.findData("deepseek"))
+    泵(0.4)
+    检查(AI页.密钥输入框.text() == "sk-deepseek-自检", "切回 DeepSeek 时用它自己那把密钥")
+    检查("deepseek" in AI页.接口地址框.text(), "接口地址也跟着切回去")
+    检查(hasattr(AI页, "_拉取模型"), "有「用密钥拉取该厂家模型」的入口")
+    # 收尾：把配置恢复成只有 deepseek，免得影响后面的检查
+    段 = 在线模型段(窗口.配置)
+    段["厂家"].pop("bailian", None)
+    段["当前"] = "deepseek"
+    写回在线模型(窗口.配置, 段)
+
     print("\n[30] 关闭窗口（清理子进程）")
     窗口.close()
     泵(0.3)

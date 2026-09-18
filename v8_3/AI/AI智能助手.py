@@ -65,9 +65,53 @@ logger = logging.getLogger(__name__)
 
 
 class AI智能助手:
+    #: 默认（DeepSeek 官方）地址；实际用哪个厂家由 ``self.厂家`` 决定
     余额查询地址 = "https://api.deepseek.com/user/balance"
     模型列表地址 = "https://api.deepseek.com/models"
     对话接口地址 = "https://api.deepseek.com/chat/completions"
+
+    @staticmethod
+    def _拼地址(基地址: str, 路径: str) -> str:
+        """按厂家的接口地址拼出具体端点（自动处理结尾的 / 与 /v1）。
+
+        用户要求"直接填链接就行"，所以这里不认厂家品牌，只认地址：
+        任何 OpenAI 兼容网关（百炼 / Kimi / 智谱 / 火山 / 硅基流动 / 自建…）都适用。
+        """
+        基 = str(基地址 or "").strip().rstrip("/")
+        if not 基:
+            return ""
+        路径 = 路径.lstrip("/")
+        return f"{基}/{路径}"
+
+    def _取厂家(self) -> dict:
+        """当前在用的厂家（含接口地址、密钥、模型）。
+
+        厂家信息挂在整份配置的 ``AI.在线模型`` 上；助手这边持有 ``_原始配置``，
+        拿不到就退回一条"只含当前密钥/地址"的兜底，保证老调用方式也能跑。
+        """
+        try:
+            from ..配置 import 当前厂家
+            整份 = getattr(self, "_原始配置", None)
+            if isinstance(整份, dict) and 整份.get("AI"):
+                return dict(当前厂家(整份))
+        except Exception:      # noqa: BLE001
+            pass
+        return {"接口地址": str(self.AI配置.get("接口地址") or ""),
+                "密钥": self.api密钥,
+                "模型": str(self.AI配置.get("模型") or ""),
+                "名称": "当前厂家"}
+
+    def _地址(self, 路径: str, 兜底: str) -> str:
+        厂家 = self._取厂家()
+        地址 = self._拼地址(厂家.get("接口地址", ""), 路径)
+        return 地址 or 兜底
+
+    @property
+    def 是DeepSeek(self) -> bool:
+        """是不是 DeepSeek 官方（余额/峰谷价/模型别名这些只对它有意义）。"""
+        厂家 = self._取厂家()
+        地址 = str(厂家.get("接口地址") or "").lower()
+        return (not 地址) or ("deepseek" in 地址) or (厂家.get("名称", "").startswith("DeepSeek"))
 
     官方模型白名单 = ["deepseek-flash", "deepseek-v4-pro"]
 
@@ -207,14 +251,28 @@ class AI智能助手:
             return
         try:
             响应 = httpx.get(
-                self.模型列表地址,
+                self._地址("models", self.模型列表地址),
                 headers={"Authorization":
                         f"Bearer {self.api密钥}"},
-                timeout=10)
+                timeout=15)
             响应.raise_for_status()
             数据 = 响应.json()
-            api模型 = [m["id"] for m in 数据.get("data", [])
+            api模型 = [str(m.get("id") or "") for m in 数据.get("data", [])
                       if m.get("id")]
+            if api模型 and not self.是DeepSeek:
+                # 别的厂家（百炼/Kimi/智谱/火山/硅基流动…）：**API 说什么就是什么**。
+                # 以前这里一律套 DeepSeek 的白名单过滤，结果别家模型全被滤掉、
+                # 只剩内置信箱里的 DeepSeek 名字 —— 用户反馈"模型名称不太准确"就是这个。
+                厂家 = self._取厂家()
+                推荐 = [str(x) for x in (厂家.get("推荐模型") or [])]
+                排序 = {名: i for i, 名 in enumerate(推荐)}
+                self.可用模型列表 = sorted(
+                    dict.fromkeys(api模型),
+                    key=lambda m: (排序.get(m, 999), m))
+                self._原始模型映射 = {m: m for m in self.可用模型列表}
+                logger.info("✅ 可用模型（%s）: %s",
+                            厂家.get("名称") or "在线厂家", self.可用模型列表[:8])
+                return
             有效模型 = []
             原始映射 = {}
             for 原始id in api模型:
@@ -314,6 +372,11 @@ class AI智能助手:
         if self.禁用网络:
             return {"成功": False, "余额": 0,
                     "错误": "已禁用网络"}
+        if not self.是DeepSeek:
+            # 余额查询是 DeepSeek 官方专有接口，别家没有 —— 明确说清楚，
+            # 而不是拿 DeepSeek 的地址去请求、报一个看不懂的错。
+            return {"成功": False, "余额": 0,
+                    "错误": "当前厂家不提供余额查询（只有 DeepSeek 官方有）"}
         try:
             响应 = httpx.get(
                 self.余额查询地址,
@@ -626,7 +689,7 @@ class AI智能助手:
         API模型ID = self.获取原始模型ID(模型)
         try:
             响应 = httpx.post(
-                self.对话接口地址,
+                self._地址("chat/completions", self.对话接口地址),
                 headers={
                     "Authorization": f"Bearer {self.api密钥}",
                     "Content-Type": "application/json",

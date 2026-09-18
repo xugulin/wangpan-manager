@@ -608,6 +608,139 @@ def _归一高峰时段(高峰: dict) -> dict:
             "时段": [dict(x) for x in 官方高峰时段["时段"]], "时区": 时区}
 
 
+# ============================================================================
+# 在线模型：多厂家（各自 API Key + 直接填接口地址）
+# ============================================================================
+#: 内置厂家预设：只要能对上接口地址，用户只需要粘一个 API Key 就能用。
+#: ``取模型`` 说明怎么拿模型名：``models`` = 标准 ``GET {地址}/models``（大多数网关都支持）；
+#: ``预置`` = 该网关不提供模型列表接口，只能用下面这份推荐清单（用户也可以手填）。
+在线厂家预设: dict = {
+    "deepseek": {
+        "名称": "DeepSeek 官方",
+        "接口地址": "https://api.deepseek.com/v1",
+        "推荐模型": ["deepseek-flash", "deepseek-v4-pro"],
+        "取模型": "models",
+        "备注": "本项目内置了它的峰谷价与余额查询",
+    },
+    "bailian": {
+        "名称": "阿里云百炼（通义千问）",
+        "接口地址": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "推荐模型": ["qwen-plus", "qwen-max", "qwen-turbo", "qwen3-max",
+                  "deepseek-v3.2", "kimi-k2-instruct"],
+        "取模型": "models",
+        "备注": "控制台 → API-KEY 里创建；模型名也可在「模型广场」查",
+    },
+    "moonshot": {
+        "名称": "月之暗面 Kimi",
+        "接口地址": "https://api.moonshot.cn/v1",
+        "推荐模型": ["kimi-k2-0905-preview", "moonshot-v1-8k", "moonshot-v1-32k"],
+        "取模型": "models",
+    },
+    "zhipu": {
+        "名称": "智谱 GLM",
+        "接口地址": "https://open.bigmodel.cn/api/paas/v4",
+        "推荐模型": ["glm-4.5", "glm-4-plus", "glm-4-flash"],
+        "取模型": "models",
+    },
+    "volces": {
+        "名称": "火山方舟（豆包）",
+        "接口地址": "https://ark.cn-beijing.volces.com/api/v3",
+        "推荐模型": ["doubao-seed-1-6", "doubao-1-5-pro-32k"],
+        "取模型": "预置",
+        "备注": "模型名通常要填「接入点 ID」（ep- 开头），请按控制台为准",
+    },
+    "siliconflow": {
+        "名称": "硅基流动 SiliconFlow",
+        "接口地址": "https://api.siliconflow.cn/v1",
+        "推荐模型": ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"],
+        "取模型": "models",
+    },
+    "hunyuan": {
+        "名称": "腾讯混元",
+        "接口地址": "https://api.hunyuan.cloud.tencent.com/v1",
+        "推荐模型": ["hunyuan-turbos-latest", "hunyuan-large"],
+        "取模型": "models",
+    },
+    "qianfan": {
+        "名称": "百度千帆",
+        "接口地址": "https://qianfan.baidubce.com/v2",
+        "推荐模型": ["ernie-4.5-turbo-128k", "ernie-speed-128k"],
+        "取模型": "models",
+    },
+    "自定义": {
+        "名称": "自定义（自己填接口地址）",
+        "接口地址": "",
+        "推荐模型": [],
+        "取模型": "models",
+        "备注": "任何 OpenAI 兼容网关都行：填它的 /v1 地址 + 密钥",
+    },
+}
+
+
+def _规格化厂家(名: str, 项: dict) -> dict:
+    预设 = dict(在线厂家预设.get(名) or {})
+    合并 = dict(预设)
+    合并.update({k: v for k, v in (项 or {}).items() if v is not None})
+    合并["名称"] = str(合并.get("名称") or 名)
+    合并["接口地址"] = str(合并.get("接口地址") or "").rstrip("/")
+    合并["密钥"] = str(合并.get("密钥") or "").strip()
+    合并["模型"] = str(合并.get("模型") or "")
+    合并["模型列表"] = [str(x) for x in (合并.get("模型列表") or []) if str(x).strip()]
+    合并["模型来源"] = str(合并.get("模型来源") or "")
+    合并.setdefault("取模型", "models")
+    # 默认模型：没选就取推荐里的第一个
+    if not 合并["模型"] and 合并.get("推荐模型"):
+        合并["模型"] = str(合并["推荐模型"][0])
+    return 合并
+
+
+def 在线模型段(配置: dict | None = None) -> dict:
+    """读 ``AI.在线模型``，并把老式单密钥配置迁移进来。
+
+    老配置只有 ``AI.api密钥 / 接口地址 / 模型`` 三个平铺字段（那时只支持 DeepSeek 一家）。
+    这里统一看成"deepseek 这个厂家"，用户已有的密钥不会丢。
+    """
+    配置 = 配置 if 配置 is not None else 加载配置()
+    ai = 配置.get("AI") or {}
+    段 = dict(ai.get("在线模型") or {})
+    厂家表 = {k: _规格化厂家(k, v) for k, v in (段.get("厂家") or {}).items() if isinstance(v, dict)}
+    if not 厂家表:
+        # 迁移：把老的平铺字段包成 deepseek 厂家
+        旧地址 = str(ai.get("接口地址") or "").strip()
+        厂家表 = {"deepseek": _规格化厂家("deepseek", {
+            "接口地址": 旧地址 or 在线厂家预设["deepseek"]["接口地址"],
+            "密钥": str(ai.get("api密钥") or ""),
+            "模型": str(ai.get("模型") or ""),
+        })}
+        段["当前"] = "deepseek"
+    当前 = str(段.get("当前") or "").strip()
+    if 当前 not in 厂家表:
+        当前 = next(iter(厂家表))
+    return {"当前": 当前, "厂家": 厂家表}
+
+
+def 当前厂家(配置: dict | None = None) -> dict:
+    """当前在用的在线厂家（含密钥、接口地址、模型）。"""
+    段 = 在线模型段(配置)
+    return dict(段["厂家"][段["当前"]])
+
+
+def 写回在线模型(配置: dict, 段: dict) -> None:
+    """把 ``在线模型`` 段写回整份配置（调用方负责落盘）。
+
+    同时把"当前厂家"的密钥/地址/模型同步到老的平铺字段，兼容还没升级的代码路径。
+    """
+    ai = dict(配置.get("AI") or {})
+    ai["在线模型"] = 段
+    当前 = 段.get("厂家", {}).get(段.get("当前", "")) or {}
+    if 当前:
+        ai["api密钥"] = 当前.get("密钥", "")
+        ai["接口地址"] = 当前.get("接口地址", "")
+        if 当前.get("模型"):
+            ai["模型"] = 当前["模型"]
+    配置["AI"] = ai
+
+
 def AI配置(配置: dict | None = None) -> dict:
     配置 = 配置 if 配置 is not None else 加载配置()
     ai = 配置.get("AI") or {}
