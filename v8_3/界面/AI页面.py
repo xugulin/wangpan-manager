@@ -27,6 +27,12 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
+
+from .后台线程 import 任务线程, 线程池管理器
+
+#: 常用本地模型（检测不到 ollama 时也先列出来，保证下拉框有东西可选）
+推荐本地模型 = ["deepseek-r1:1.5b", "deepseek-r1:7b", "qwen2.5:7b",
+            "qwen2.5:3b", "llama3.2:3b"]
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
@@ -61,8 +67,13 @@ class AI状态页面(QWidget):
         super().__init__(父)
         self.主窗口 = 主窗口
         self._价格过期阈值 = 24 * 3600
+        self._登记线程 = 线程池管理器(self.主窗口)
+        self._本地模型忙 = False          # 检测/测速/启动/拉取进行中：按钮先禁用
         self._构建()
         self.刷新()
+        # 本地模型检测是阻塞操作（要戳本机端口），**不能在构建/刷新里同步做**，
+        # 否则切到 AI 页就会卡住（用户反馈过）。这里改成后台跑，结果回来再填界面。
+        self.延迟检测本地模型()
 
     # ==================== 便捷访问 ====================
 
@@ -484,6 +495,7 @@ class AI状态页面(QWidget):
         self.本地模型框.setMinimumWidth(220)
         self.本地模型框.currentIndexChanged.connect(self._保存本地模型选项)
         行2.addWidget(self.本地模型框)
+        self.本地按钮们: list = []
         检测按钮 = QPushButton("🔍 检测")
         检测按钮.clicked.connect(lambda: self.刷新本地模型(重新检测=True))
         行2.addWidget(检测按钮)
@@ -498,6 +510,14 @@ class AI状态页面(QWidget):
         拉取按钮.setToolTip("ollama pull <模型>；1.5B 约 1.1 GB")
         拉取按钮.clicked.connect(self._拉取本地模型)
         行2.addWidget(拉取按钮)
+        self.一键按钮 = QPushButton("⬇️ 一键装好离线模型")
+        self.一键按钮.setToolTip(
+            "自动完成：检测本机推理服务 → 缺就下载便携版 ollama 到项目目录"
+            "（不装进系统、不写注册表）→ 拉取一个小模型 → 打开本地模型开关。\n"
+            "全程后台执行，界面不会卡。")
+        self.一键按钮.clicked.connect(self._一键装本地模型)
+        行2.addWidget(self.一键按钮)
+        self.本地按钮们.extend([检测按钮, 测速按钮, 启动按钮, 拉取按钮, self.一键按钮])
         指引按钮 = QPushButton("📖 安装指引")
         指引按钮.clicked.connect(self._显示本地模型指引)
         行2.addWidget(指引按钮)
@@ -511,19 +531,64 @@ class AI状态页面(QWidget):
         外层.addWidget(self.本地提示标签)
         return 组
 
+    def _后台跑(self, 工作, 完成回调, *参数, 忙碌文本: str = "",
+              失败前缀: str = "❌ ", **关键字) -> None:
+        """把阻塞工作丢后台线程，主线程只更新界面。"""
+        if 忙碌文本:
+            self.本地状态标签.setText(忙碌文本)
+        if hasattr(self, "本地按钮们"):
+            for 钮 in self.本地按钮们:
+                钮.setEnabled(False)
+        线程 = 任务线程(工作, *参数, 父=self, **关键字)
+        线程.成功.connect(lambda 结果: 完成回调(结果))
+        线程.失败.connect(
+            lambda 错误: self.本地状态标签.setText(f"{失败前缀}{错误}"))
+        线程.finished.connect(self._本地模型收工)
+        self._登记线程(线程)
+        线程.start()
+
+    def _本地模型收工(self) -> None:
+        self._本地模型忙 = False
+        for 钮 in getattr(self, "本地按钮们", []):
+            钮.setEnabled(True)
+
+    def 延迟检测本地模型(self) -> None:
+        """后台检测一次本地模型（不阻塞界面）。"""
+        运行时 = self.运行时
+        if 运行时 is None:
+            return
+
+        def 干():
+            摘要 = 运行时.获取本地模型摘要() or {}
+            运行时.获取本地模型状态(重新检测=True)
+            return 运行时.获取本地模型摘要() or 摘要
+
+        self._本地模型忙 = True
+        self._后台跑(干, self._套用本地模型, 忙碌文本="🏠 正在检测本地模型…")
+
     def 刷新本地模型(self, 重新检测: bool = False) -> None:
+        """刷新本地模型区。
+
+        ``重新检测=True`` 时**后台**重新探测（以前是同步的，一点就卡住）；
+        否则只读缓存，绝不碰网络/端口 —— 保证切页、刷新都不卡。
+        """
+        if 重新检测:
+            self.延迟检测本地模型()
+            return
+        self._套用本地模型(None)
+
+    def _套用本地模型(self, 摘要=None) -> None:
         运行时 = self.运行时
         if 运行时 is None:
             self.本地状态标签.setText("🏠 AI 运行时未就绪")
             return
-        try:
-            摘要 = 运行时.获取本地模型摘要() or {}
-            if 重新检测:
-                运行时.获取本地模型状态(重新检测=True)
+        if 摘要 is None:
+            # 只读缓存：绝不在这里探测端口（那是后台线程的活）
+            try:
                 摘要 = 运行时.获取本地模型摘要() or {}
-        except Exception as e:  # noqa: BLE001
-            self.本地状态标签.setText(f"🏠 本地模型检测失败：{e}")
-            return
+            except Exception as e:  # noqa: BLE001
+                self.本地状态标签.setText(f"🏠 本地模型刷新失败：{e}")
+                return
         self.本地状态标签.setText(
             ("🏠 " + 运行时.获取本地模型一行())
             + (f"　｜　{t} tokens/s" if (t := 摘要.get("每秒tokens")) else ""))
@@ -541,8 +606,14 @@ class AI状态页面(QWidget):
             self.本地用途框.blockSignals(False)
         except Exception:
             pass
-        模型列表 = list(摘要.get("模型列表") or [])
+        模型列表 = [str(m) for m in (摘要.get("模型列表") or []) if str(m).strip()]
         当前 = str(摘要.get("模型") or "")
+        # 检测不到服务时列表会是空的 —— 那就填上"常推荐的本地模型"，
+        # 否则下拉框是空的、还没法选（用户反馈过）。
+        if not 模型列表:
+            模型列表 = [m for m in 推荐本地模型 if m != 当前]
+            if 当前:
+                模型列表.insert(0, 当前)
         if 模型列表:
             self.本地模型框.blockSignals(True)
             现有 = [self.本地模型框.itemText(i)
@@ -552,6 +623,7 @@ class AI状态页面(QWidget):
                 self.本地模型框.addItems(模型列表)
             idx = self.本地模型框.findText(当前)
             self.本地模型框.setCurrentIndex(max(0, idx))
+            self.本地模型框.setEnabled(True)
             self.本地模型框.blockSignals(False)
         if not 摘要.get("可用"):
             self.本地提示标签.setText(
@@ -577,27 +649,45 @@ class AI状态页面(QWidget):
         self.刷新本地模型(重新检测=True)
 
     def _本地模型测速(self) -> None:
-        if self.运行时 is None:
+        """测速要加载模型（几十秒），必须后台跑，否则界面直接卡死。"""
+        运行时 = self.运行时
+        if 运行时 is None:
             return
-        self.本地状态标签.setText("⏱ 正在测速…（首次会加载模型，可能要十几秒）")
-        QApplication.processEvents()
-        结果 = self.运行时.本地模型测速()
-        if not 结果.get("成功"):
-            self.本地状态标签.setText(f"❌ 测速失败：{结果.get('错误')}")
-            return
-        self.本地状态标签.setText(
-            f"✅ {结果.get('模型')} · 用时 {结果.get('用时秒')}s · "
-            f"{结果.get('每秒tokens')} tokens/s · 免费")
-        self._记日志(f"[本地模型] 测速：{结果.get('用时秒')}s / "
-                  f"{结果.get('每秒tokens')} tokens/s")
+
+        def 干():
+            return 运行时.本地模型测速() or {}
+
+        def 好了(结果):
+            if not 结果.get("成功"):
+                self.本地状态标签.setText(f"❌ 测速失败：{结果.get('错误')}")
+                return
+            self.本地状态标签.setText(
+                f"✅ {结果.get('模型')} · 用时 {结果.get('用时秒')}s · "
+                f"{结果.get('每秒tokens')} tokens/s · 免费")
+            self._记日志(f"[本地模型] 测速：{结果.get('用时秒')}s / "
+                      f"{结果.get('每秒tokens')} tokens/s")
+
+        self._后台跑(干, 好了, 忙碌文本="⏱ 正在测速…（首次会加载模型，可能要十几秒）")
 
     def _启动本地服务(self) -> None:
-        if self.运行时 is None:
+        """启动 ollama 之类要拉起进程，可能要几十秒，必须后台跑。"""
+        运行时 = self.运行时
+        if 运行时 is None:
             return
-        self.本地状态标签.setText("▶ 正在启动本地服务…")
-        QApplication.processEvents()
-        成功, 消息 = self.运行时.启动本地服务()
-        self.本地状态标签.setText(("✅ " if 成功 else "❌ ") + 消息)
+
+        def 干():
+            return 运行时.启动本地服务()
+
+        def 好了(结果):
+            try:
+                成功, 消息 = 结果
+            except Exception:  # noqa: BLE001
+                成功, 消息 = False, str(结果)
+            self.本地状态标签.setText(("✅ " if 成功 else "❌ ") + str(消息))
+            if 成功:
+                self.延迟检测本地模型()
+
+        self._后台跑(干, 好了, 忙碌文本="▶ 正在启动本地服务…（可能要几十秒）")
         self.刷新本地模型(重新检测=True)
 
     def _拉取本地模型(self) -> None:
@@ -613,11 +703,57 @@ class AI状态页面(QWidget):
                 f"将从 Ollama registry 拉取 {模型}（可能要下载 1GB 左右），继续？"
         ) != QMessageBox.Yes:
             return
-        self.本地状态标签.setText(f"📥 正在拉取 {模型}…（可在日志页看进度）")
-        QApplication.processEvents()
-        成功, 消息 = self.运行时.拉取本地模型(模型)
-        self.本地状态标签.setText(("✅ " if 成功 else "❌ ") + 消息)
-        self.刷新本地模型(重新检测=True)
+        def 干():
+            return self.运行时.拉取本地模型(模型)
+
+        def 好了(结果):
+            try:
+                成功, 消息 = 结果
+            except Exception:  # noqa: BLE001
+                成功, 消息 = False, str(结果)
+            self.本地状态标签.setText(("✅ " if 成功 else "❌ ") + str(消息))
+            if 成功:
+                self.延迟检测本地模型()
+
+        self._后台跑(干, 好了,
+                  忙碌文本=f"📥 正在拉取 {模型}…（可能要几分钟，日志页有进度）")
+
+    def _一键装本地模型(self) -> None:
+        """一键装好离线模型：检测 → 下载便携运行时 → 启动 → 拉模型 → 打开开关。
+
+        整个过程（可能几十分钟的下载）都在后台线程里，界面全程可响应，
+        进度实时写在状态标签上。
+        """
+        运行时 = self.运行时
+        if 运行时 is None:
+            return
+        if QMessageBox.question(
+                self, "一键装好离线模型",
+                "将自动完成：\n"
+                "  ① 检测本机推理服务\n"
+                "  ② 没有就把便携版 ollama 下到项目目录（不装系统、不需要管理员）\n"
+                "  ③ 启动服务 ④ 拉取一个小模型（约 1 GB）⑤ 打开本地模型开关\n\n"
+                "下载量可能 1～2 GB，网络不好时会比较慢。现在开始？"
+        ) != QMessageBox.Yes:
+            return
+
+        def 进展(文本: str) -> None:
+            # 这个回调在后台线程里，只能设置文本（QLabel 的 setText 是线程安全的）
+            self.本地状态标签.setText(f"⚙️ {文本}")
+
+        def 干():
+            return 运行时.一键装本地模型(进度回调=进展)
+
+        def 好了(结果):
+            try:
+                成功, 消息 = 结果
+            except Exception:  # noqa: BLE001
+                成功, 消息 = False, str(结果)
+            self.本地状态标签.setText(("✅ " if 成功 else "❌ ") + str(消息))
+            self._记日志(f"[本地模型] 一键安装：{消息}")
+            self._套用本地模型(None)
+
+        self._后台跑(干, 好了, 忙碌文本="⚙️ 正在准备离线模型…")
 
     def _显示本地模型指引(self) -> None:
         from ..AI.运行时 import AI运行时

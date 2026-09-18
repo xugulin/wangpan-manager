@@ -213,8 +213,34 @@ class 对话结果:
         }
 
 
+def 项目便携目录() -> Path:
+    """项目内的便携运行时目录（一键安装就装这儿，不碰系统、不碰用户目录）。"""
+    return Path(__file__).resolve().parents[2] / "运行环境" / "本地模型"
+
+
+def 项目内可执行文件() -> Path:
+    名字 = "ollama.exe" if os.name == "nt" else "ollama"
+    根 = 项目便携目录()
+    for 候选 in (根 / 名字, 根 / "bin" / 名字):
+        if 候选.is_file():
+            return 候选
+    return 根 / 名字
+
+
+def 模型仓库目录() -> Path:
+    """本地模型权重放项目里（设 OLLAMA_MODELS），不写 ~/.ollama。"""
+    return Path(__file__).resolve().parents[2] / "数据" / "本地模型" / "模型"
+
+
+def 服务日志路径() -> Path:
+    return Path(__file__).resolve().parents[2] / "数据" / "本地模型" / "serve.log"
+
+
 def _找可执行文件() -> str:
-    """找 ollama 可执行文件：PATH → 用户目录安装 → 常见位置。"""
+    """找 ollama 可执行文件：项目内便携版 → PATH → 用户目录 → 常见位置。"""
+    项目内 = 项目内可执行文件()
+    if 项目内.is_file() and os.access(项目内, os.X_OK):
+        return str(项目内)
     候选 = shutil.which("ollama")
     if 候选:
         return 候选
@@ -227,6 +253,80 @@ def _找可执行文件() -> str:
         except Exception:
             continue
     return ""
+
+
+def 便携版下载地址() -> str:
+    """官方便携包地址（Linux 是 tgz，Windows 是 zip）。"""
+    if os.name == "nt":
+        return "https://ollama.com/download/ollama-windows-amd64.zip"
+    import platform
+    架构 = platform.machine().lower()
+    if 架构 in ("aarch64", "arm64"):
+        return "https://ollama.com/download/ollama-linux-arm64.tgz"
+    return "https://ollama.com/download/ollama-linux-amd64.tgz"
+
+
+def 下载便携运行时(进度回调=None) -> tuple[bool, str]:
+    """把官方便携版 ollama 下载并解压到**项目内** ``运行环境/本地模型``。
+
+    这样做的好处：整个项目文件夹依然可以整体搬走/删掉，不写系统目录、
+    不装包管理器、不需要 sudo —— 与"绿色版"的承诺一致。
+    """
+    if httpx is None:
+        return False, "缺少 httpx，无法下载"
+    目标目录 = 项目便携目录()
+    可执行 = 项目内可执行文件()
+    if 可执行.is_file():
+        return True, f"项目内已有便携运行时：{可执行}"
+    地址 = 便携版下载地址()
+    压缩包 = 目标目录 / ("ollama.zip" if 地址.endswith(".zip") else "ollama.tgz")
+    try:
+        目标目录.mkdir(parents=True, exist_ok=True)
+        已下 = 0
+        with httpx.stream("GET", 地址, follow_redirects=True,
+                          timeout=httpx.Timeout(30.0, read=600.0)) as 应答:
+            应答.raise_for_status()
+            总量 = int(应答.headers.get("content-length") or 0)
+            with open(压缩包, "wb") as 文件:
+                for 块 in 应答.iter_bytes(1024 * 512):
+                    文件.write(块)
+                    已下 += len(块)
+                    if 进度回调 is not None:
+                        try:
+                            进度回调(已下, 总量)
+                        except Exception:
+                            pass
+    except Exception as e:  # noqa: BLE001
+        return False, f"下载失败：{type(e).__name__}: {e}"
+    try:
+        if 压缩包.suffix == ".zip":
+            import zipfile
+            with zipfile.ZipFile(压缩包) as 包:
+                包.extractall(目标目录)
+        else:
+            import tarfile
+            with tarfile.open(压缩包) as 包:
+                包.extractall(目标目录)
+        压缩包.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001
+        return False, f"解压失败：{type(e).__name__}: {e}"
+    if not 可执行.is_file():
+        # 有的包会多套一层目录（bin/、ollama-linux-amd64/），这里兜一下
+        找到 = ""
+        for 候选 in 目标目录.rglob("ollama*"):
+            if 候选.is_file() and os.access(候选, os.X_OK) and 候选.suffix != ".zip":
+                找到 = str(候选)
+                break
+        if 找到:
+            try:
+                shutil.copy2(找到, 可执行)
+            except Exception:
+                return True, f"已解压到 {目标目录}（可执行文件在 {找到}）"
+    try:
+        可执行.chmod(0o755)
+    except Exception:
+        pass
+    return True, f"便携运行时已就位：{可执行}"
 
 
 def 探测到的运行时(超时秒: float = 1.5) -> list[dict]:
@@ -531,12 +631,18 @@ class 本地模型客户端:
         可执行 = _找可执行文件()
         if not 可执行:
             return False, "没找到 ollama 可执行文件：\n" + self.安装指引()
-        日志文件 = Path.home() / ".local" / "ollama" / "serve.log"
+        日志文件 = 服务日志路径()
         try:
             日志文件.parent.mkdir(parents=True, exist_ok=True)
             句柄 = 日志文件.open("a", encoding="utf-8")
             环境 = os.environ.copy()
             环境.setdefault("OLLAMA_HOST", "127.0.0.1:11434")
+            # 模型权重也放项目里：这样整个文件夹可搬走、删掉不留残留
+            try:
+                模型仓库目录().mkdir(parents=True, exist_ok=True)
+                环境.setdefault("OLLAMA_MODELS", str(模型仓库目录()))
+            except Exception:
+                pass
             self._进程 = subprocess.Popen(
                 [可执行, "serve"], stdout=句柄, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, env=环境,

@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
 from ..配置 import (
     保存配置, 加载配置, 动作, 界面配置, 设置界面配置, 配置文件,
     网盘实例列表, 新增网盘实例, 更新网盘实例, 删除网盘实例, 适配器规格表,
+    项目根,
 )
 from .控件样式 import 安装控件样式
 from .主题管理器 import (主题管理器, 高度_管理按钮, 高度_功能按钮,
@@ -95,6 +97,37 @@ class 空状态页(QWidget):
         按钮行.addStretch(1)
         布局.addLayout(按钮行)
         布局.addStretch(1)
+
+
+#: 记住装过的翻译器（QTranslator 必须有人持有引用，否则会被回收）
+_翻译器 = None
+
+
+def 安装中文翻译(应用) -> None:
+    """让 Qt 自带的右键菜单/对话框按钮显示中文。
+
+    Qt 内置的编辑框右键菜单（Undo/Cut/Copy/Paste/Select All…）默认是英文，
+    用户反馈过。PySide6 自带 ``qtbase_zh_CN.qm``，装上就都变中文了
+    （顺带把标准按钮也从 OK/Cancel 变成 确定/取消）。
+    """
+    global _翻译器
+    if _翻译器 is not None:
+        return
+    try:
+        from PySide6.QtCore import QLibraryInfo, QTranslator
+        from PySide6.QtWidgets import QApplication
+        # 注意：installTranslator 是 QApplication 的方法。以前这里传进来的是主窗口，
+        # 于是抛 AttributeError 被 except 吞掉 —— 右键菜单一直是英文，还查不出原因。
+        应用 = QApplication.instance() or 应用
+        if 应用 is None or not hasattr(应用, "installTranslator"):
+            return
+        路径 = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        翻译 = QTranslator(应用)
+        if 翻译.load("qtbase_zh_CN", 路径):
+            应用.installTranslator(翻译)
+            _翻译器 = 翻译
+    except Exception:  # noqa: BLE001 - 翻译装不上也不该影响启动
+        pass
 
 
 class 主窗口(QMainWindow):
@@ -180,6 +213,7 @@ class 主窗口(QMainWindow):
 
         主布局.addWidget(self._构建左侧栏())
 
+        安装中文翻译(self)
         self._页面外框: dict[int, QWidget] = {}   # id(页面) → 它的滚动外框
         self._页面对象: dict[int, QWidget] = {}   # id(页面) → 页面（活着引用，避免 id 被复用）
         self.堆叠 = QStackedWidget()
@@ -390,6 +424,12 @@ class 主窗口(QMainWindow):
         self.删除按钮.setToolTip("从配置里移除当前网盘（不动适配器目录和登录数据）")
         self.删除按钮.clicked.connect(self.删除当前网盘)
         管理布局.addWidget(self.删除按钮)
+
+        self.退出按钮 = QPushButton("⏻\n退出程序")
+        self.退出按钮.setFixedHeight(高度_管理按钮)
+        self.退出按钮.setToolTip("关闭网盘管理（会先停掉正在跑的传输并清理后台进程）")
+        self.退出按钮.clicked.connect(self.close)
+        管理布局.addWidget(self.退出按钮)
 
         # 多出来的高度全给导航面板（它会喂给内部的网盘列表，多露几个网盘按钮），
         # 「网盘管理」自然被顶到底部；不够高时整体上下滚动，绝不压缩按钮。
@@ -704,7 +744,13 @@ class 主窗口(QMainWindow):
         if 数据["启用"]:
             self.切换网盘页(标识)
 
-    def 删除当前网盘(self):
+    def 删除当前网盘(self, 自动选择: str = "") -> None:
+        """删除当前网盘。
+
+        ``自动选择`` 为空时弹确认框（三个按钮：只删除配置 / 连数据一起删 / 取消）；
+        传 ``"只删除配置"`` 或 ``"连数据"`` 时跳过弹窗直接执行 —— 自检和脚本用得上
+        （模态弹窗在离屏自检里会一直等下去）。
+        """
         标识 = self._当前标识 or self._选择网盘("删除哪个网盘？")
         if not 标识:
             return
@@ -713,19 +759,55 @@ class 主窗口(QMainWindow):
             return
         if not self._确认可打断("删除网盘"):
             return
-        答案 = QMessageBox.question(
-            self, "确认删除网盘",
-            f"从 V8_3 配置里删除「{实例['名称']}」（{标识}）？\n\n"
-            f"适配器目录与其登录数据都会原样保留：\n{实例['路径']}\n"
-            "（不会删除任何网盘上的文件）",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if 答案 != QMessageBox.Yes:
-            return
+        目录 = str(实例.get("路径") or "")
+        框 = QMessageBox(self)
+        框.setWindowTitle("确认删除网盘")
+        框.setIcon(QMessageBox.Warning)
+        框.setText(f"删除网盘「{实例['名称']}」（{标识}）？")
+        框.setInformativeText(
+            f"适配器目录：\n{目录}\n\n"
+            "「删除配置」= 只从配置里移除，目录和登录数据留着（下次可复用）；\n"
+            "「连数据一起删」= 同时删掉上面的目录（登录凭证、缓存都没了，"
+            "下次新增会分配一个新目录）。\n"
+            "两种都不会动网盘上的任何文件。")
+        只删配置 = 框.addButton("只删除配置", QMessageBox.AcceptRole)
+        连数据 = 框.addButton("连数据一起删", QMessageBox.DestructiveRole)
+        框.addButton("取消", QMessageBox.RejectRole)
+        框.setDefaultButton(只删配置)
+        if 自动选择:
+            删数据 = 自动选择 in ("连数据", "连数据一起删")
+        else:
+            框.exec()
+            点了 = 框.clickedButton()
+            if 点了 not in (只删配置, 连数据):
+                return
+            删数据 = 点了 is 连数据
         try:
             删除网盘实例(self.配置, 标识)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "删除失败", str(e))
             return
+        if 删数据 and 目录:
+            # 自动选择（自检/脚本）时不要弹模态框：在离屏自检里模态框会一直等下去，
+            # 把整轮自检挂死；改成写日志，人工操作时才提示。
+            def 提示(标题: str, 文本: str) -> None:
+                if 自动选择:
+                    self.追加日志(f"[{实例['名称']}] {标题}：{文本}")
+                else:
+                    QMessageBox.information(self, 标题, 文本)
+
+            try:
+                目标 = Path(目录)
+                真实 = 目标.resolve()
+                if 目标.is_dir() and (项目根 in 真实.parents
+                                 or 真实.parent == 项目根):
+                    shutil.rmtree(目标)
+                    self.追加日志(f"[{实例['名称']}] 已删除适配器目录：{目录}")
+                else:
+                    提示("未删除目录",
+                       f"这个目录不在项目内，为安全起见没有自动删除：\n{目录}")
+            except Exception as e:  # noqa: BLE001
+                提示("目录删除失败", str(e))
         self.动作.移除适配器(标识)
         self._移除页面(标识)
         if self._当前标识 == 标识:

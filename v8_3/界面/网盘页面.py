@@ -54,6 +54,7 @@ class 网盘页面(QWidget):
         self.标识 = self.实例["标识"]
         self.名称 = self.实例.get("名称") or self.标识
         self.当前目录 = "/"
+        self._上次已登录 = False      # 用来识别"刚刚登录成功"，好自动列一次目录
         self._文件列表: list = []
         self._显示列表: list[dict] = []
         self._显示量 = self.首屏显示量
@@ -288,6 +289,14 @@ class 网盘页面(QWidget):
         self.状态标签.setText(f"{登录}，用户：{用户}{容量}{警告}")
         if 登录.startswith("🟢"):
             self.主窗口.设置网盘状态(self.标识, True)
+            # 刚登录成功、或列表还是空的：自动列一次目录 ——
+            # 用户反馈"登录成功后文件列表不会自动加载，得手动刷新"。
+            刚登录 = not self._上次已登录
+            self._上次已登录 = True
+            if 刚登录 or self.文件表格.rowCount() == 0:
+                self.加载当前目录()
+        else:
+            self._上次已登录 = False
 
     def _状态失败(self, 标识: str, 错误: str):
         if 标识 != self.标识:

@@ -169,6 +169,50 @@ class AI运行时:
         except Exception as e:  # noqa: BLE001
             return False, str(e)
 
+    def 一键装本地模型(self, 进度回调=None) -> tuple[bool, str]:
+        """一键把离线模型装好：检测 → 下载便携运行时 → 启动 → 拉模型 → 打开开关。
+
+        全程在后台线程里跑（AI 页负责起线程），这里只管按步骤做、把进展回调出去。
+        """
+        def 报(文本: str) -> None:
+            if 进度回调 is not None:
+                try:
+                    进度回调(文本)
+                except Exception:
+                    pass
+
+        from .本地模型 import (下载便携运行时, 项目内可执行文件, 默认模型)
+        报("① 检测本机是否已有可用推理服务…")
+        状态 = self.获取本地模型状态(重新检测=True)
+        if 状态 is None or not getattr(状态, "可用", False):
+            可执行 = 项目内可执行文件()
+            if not (可执行.is_file() or __import__("shutil").which("ollama")):
+                报("② 没检测到服务，正在下载便携版 ollama 到项目目录（约 1 GB）…")
+                好, 消息 = 下载便携运行时()
+                if not 好:
+                    return False, f"下载便携运行时失败：{消息}"
+                报(f"   {消息}")
+            报("③ 启动本地服务…")
+            好, 消息 = self.启动本地服务()
+            if not 好:
+                return False, f"启动本地服务失败：{消息}"
+            报(f"   {消息}")
+        模型 = ""
+        try:
+            模型 = str(self.助手.本地模型配置.模型 or "") or 默认模型
+        except Exception:
+            模型 = 默认模型
+        报(f"④ 拉取模型 {模型}（首次要下 1 GB 左右，之后就不用再下）…")
+        好, 消息 = self.拉取本地模型(模型)
+        if not 好:
+            return False, f"拉取模型失败：{消息}"
+        报("⑤ 打开本地模型开关并保存…")
+        self.保存本地模型配置(启用=True, 模型=模型)
+        状态 = self.获取本地模型状态(重新检测=True)
+        可用 = bool(getattr(状态, "可用", False))
+        return 可用, (f"完成：{模型} 已就绪"
+                   + ("" if 可用 else "（服务还没就绪，稍后点「检测」再看）"))
+
     def 拉取本地模型(self, 模型: str = ""):
         try:
             return self.助手.本地模型.拉取模型(模型)

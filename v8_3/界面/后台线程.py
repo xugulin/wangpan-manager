@@ -136,6 +136,31 @@ class 恢复线程(QThread):
             self.完成.emit({"error": str(e)})
 
 
+class 任务线程(QThread):
+    """把任意可调用对象丢到后台线程执行，结果用信号送回。
+
+    AI 页的"检测本地模型 / 测速 / 启动服务 / 拉取模型"都是**阻塞**操作：
+    探测端口要几秒、加载模型要几十秒、下载模型要几分钟。这些以前直接在按钮回调里
+    同步调用，界面就会卡死甚至崩掉（用户反馈：勾"启用本地模型"、点"启动本地服务"、
+    切到 AI 页都会卡）。统一走这个线程，界面全程可响应。
+    """
+
+    成功 = Signal(object)
+    失败 = Signal(str)
+
+    def __init__(self, 工作: Callable, *参数, 父=None, **关键字):
+        super().__init__(父)
+        self._工作 = 工作
+        self._参数 = 参数
+        self._关键字 = 关键字
+
+    def run(self):
+        try:
+            self.成功.emit(self._工作(*self._参数, **self._关键字))
+        except Exception as e:  # noqa: BLE001 - 界面要展示任何失败
+            self.失败.emit(str(e))
+
+
 def 线程池管理器(窗口):
     """把线程挂到窗口上并在结束后清理，避免 QThread 被提前回收。"""
 

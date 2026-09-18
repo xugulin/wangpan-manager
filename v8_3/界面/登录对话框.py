@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from .后台线程 import 文件操作线程
+from .后台线程 import 账号状态线程, 文件操作线程
 
 #: 方式键 → (按钮文字, 图标)
 方式标题 = {
@@ -479,6 +479,7 @@ class 登录对话框(QDialog):
         self.令牌登录按钮.setEnabled(True)
 
     def _通知成功(self):
+        self._停止核对()
         """登录成功后让网盘页刷新状态。"""
         try:
             self.主窗口.刷新网盘状态(self.标识)
@@ -574,6 +575,55 @@ class 登录对话框(QDialog):
         self.取消扫码按钮.setEnabled(True)
         self._跑("等待扫码", lambda 进度: self.适配器.扫码等待(
             self._扫码会话, min(超时, self.扫码默认超时)))
+        self._开始核对登录()
+
+    # ---------------- 扫码期间主动核对（防止"已登录却一直显示等待中"） ----------------
+
+    def _开始核对登录(self) -> None:
+        """每隔几秒查一次账号状态。
+
+        用户反馈：扫码后界面一直停在"等待中"，重启才发现其实已经登录成功 ——
+        适配器内部的扫码轮询有时就是不上报成功。与其等它，不如直接问账号状态，
+        一旦已登录就当成功处理（顺带立刻加载文件列表）。
+        """
+        if getattr(self, "_核对计时", None) is None:
+            self._核对计时 = QTimer(self)
+            self._核对计时.setInterval(3000)
+            self._核对计时.timeout.connect(self._核对一次)
+        self._核对中 = False
+        self._核对计时.start()
+
+    def _停止核对(self) -> None:
+        计时 = getattr(self, "_核对计时", None)
+        if 计时 is not None:
+            计时.stop()
+
+    def _核对一次(self) -> None:
+        if self.成功 or getattr(self, "_核对中", False):
+            return
+        适配器 = getattr(self, "适配器", None)
+        if 适配器 is None:
+            return
+        self._核对中 = True
+        线程 = 账号状态线程(self.标识, lambda _标识: 适配器, self)
+        def 好(_标识: str, 信息: dict):
+            self._核对中 = False
+            if self.成功:
+                return
+            if 信息.get("logged_in"):
+                self._停止核对()
+                self._处理结果({"状态": "成功",
+                            "消息": "扫码登录成功（已核对账号状态）",
+                            "账号": 信息})
+        def 坏(_标识: str, _错误: str):
+            self._核对中 = False
+        线程.成功.connect(好)
+        线程.失败.connect(坏)
+        线程.finished.connect(线程.deleteLater)
+        线程.start()
+        if not hasattr(self, "_核对线程们"):
+            self._核对线程们 = []
+        self._核对线程们.append(线程)
 
     def _本地渲染二维码(self, 内容: str) -> bool:
         """有些网盘只给二维码链接（如夸克），界面这边用 qrcode 库自己画。"""
@@ -681,6 +731,7 @@ class 登录对话框(QDialog):
     # ==================== 关闭 ====================
 
     def closeEvent(self, 事件):
+        self._停止核对()
         try:
             if self._扫码会话:
                 self.适配器.扫码取消(self._扫码会话)
