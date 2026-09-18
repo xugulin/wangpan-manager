@@ -549,6 +549,26 @@ class 后端(后端基类):
                 })
             except Exception as e:
                 详情["user_error"] = str(e)[:200]
+            # 容量（总/已用/可用）：/api/quota 一次调用就能拿全
+            try:
+                容量 = ctx.认证.取容量() or {}
+                总 = 容量.get("total")
+                已用 = 容量.get("used")
+                可用 = 容量.get("free")
+                try:
+                    # ⚠️ 实测：百度 /api/quota 的 free 可能是 0（与 used/total 明显不符），
+                    # 这时用 总-已用 现算，别给用户显示"可用 0"。
+                    if (not 可用) and 总 and 已用:
+                        可用 = max(0, int(总) - int(已用))
+                except Exception:
+                    可用 = 容量.get("free")
+                详情["member"] = {
+                    "total_capacity": 总,
+                    "use_capacity": 已用,
+                    "free_capacity": 可用,
+                }
+            except Exception as e:  # noqa: BLE001
+                详情["容量错误"] = str(e)[:120]
             # 写权限实测（真打一次写接口）：
             #   有 bdstoken / 有 STOKEN 都**不等于**能写 —— 百度把读/写授权
             #   分开判定，实测"只读会话"（passport 域 STOKEN 或失效 STOKEN）

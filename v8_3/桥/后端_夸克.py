@@ -200,6 +200,24 @@ class 后端(后端基类):
 
     # ---------------- 账号 ----------------
 
+    def _把刷新后的cookie落库(self, 仓库, 网络) -> None:
+        """夸克会在响应里滚动下发新的 ``__puus``；把它写回凭证仓库。
+
+        不写回的话：下一次新建上下文又用旧 Cookie → 服务端回
+        ``require login [guest]``（实测：第一次能拿容量，第二次就失败，
+        表现就是"用户：- / 时好时坏"）。
+        """
+        try:
+            内存 = str(getattr(网络, "Cookie", "") or "")
+            if not 内存:
+                return
+            旧 = str(仓库.取Cookie() or "")
+            if 内存 != 旧:
+                仓库.保存Cookie(内存)
+                self.记录("[夸克] 已把服务端刷新的 Cookie 写回凭证仓库")
+        except Exception as e:  # noqa: BLE001
+            self.记录(f"[夸克] Cookie 落库失败（不影响本次）：{e}", "warning")
+
     def account(self) -> dict:
         m = _导入()
         仓库 = m["全局凭证仓库"]
@@ -208,12 +226,40 @@ class 后端(后端基类):
         用户名 = ""
         try:
             ctx = self._ctx()
-            信息 = ctx.认证.取账号信息()
+            信息 = {}
+            try:
+                信息 = ctx.认证.取账号信息() or {}
+            except Exception as e:  # noqa: BLE001
+                # 服务端滚动下发的 __puus 可能已过期：重建上下文（会重新读库）再试一次
+                详情["首次错误"] = str(e)[:120]
+                self._本地.ctx = None
+                ctx = self._ctx()
+                信息 = ctx.认证.取账号信息() or {}
+            self._把刷新后的cookie落库(仓库, ctx.网络)
+            总 = 信息.get("total_capacity")
+            已用 = 信息.get("use_capacity")
+            可用 = 信息.get("free_capacity")
+            if 可用 is None and 总 is not None and 已用 is not None:
+                try:
+                    可用 = max(0, int(总) - int(已用))
+                except Exception:
+                    可用 = None
+            # 隐藏空间（secret_*）单独给，界面按需要展示
             详情["member"] = {
-                "total_capacity": 信息.get("total_capacity"),
-                "use_capacity": 信息.get("use_capacity"),
+                "total_capacity": 总,
+                "use_capacity": 已用,
+                "free_capacity": 可用,
                 "member_type": 信息.get("member_type"),
+                "secret_total_capacity": 信息.get("secret_total_capacity"),
+                "secret_use_capacity": 信息.get("secret_use_capacity"),
             }
+            # 用户名：member_info 里可能有昵称字段，有就用（没有就留空，界面不显示"-"）
+            内部 = 信息.get("member_info") if isinstance(信息.get("member_info"), dict) else {}
+            for 键 in ("nickname", "nick_name", "user_name", "username", "name"):
+                值 = 内部.get(键) or 信息.get(键)
+                if 值:
+                    用户名 = str(值)
+                    break
         except Exception as e:
             详情["error"] = str(e)[:200]
         return {

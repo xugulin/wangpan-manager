@@ -131,7 +131,8 @@ class 退出登录界面测试(unittest.TestCase):
     def test_登录后退出把界面收干净(self):
         适配器 = self.窗口.动作.适配器("fake_1")
         self.assertEqual(适配器.令牌登录("a", "b").get("状态"), "成功")
-        self.页.刷新管理区()
+        # 登录成功会让页面清缓存（登录后立即加载），这里再强制刷一次更稳
+        self.页._刷新管理区(强制=True)
         self.assertTrue(self.等待(lambda: "已登录" in self.页.状态标签.text()),
                         f"应显示已登录：{self.页.状态标签.text()}")
         self.assertTrue(self.等待(lambda: self.页.文件表格.rowCount() > 0),
@@ -153,7 +154,7 @@ class 退出登录界面测试(unittest.TestCase):
         """模拟：在原生 GUI 里退出登录（凭证文件消失），本页要跟着变。"""
         适配器 = self.窗口.动作.适配器("fake_1")
         适配器.令牌登录("a", "b")
-        self.页.刷新管理区()
+        self.页._刷新管理区(强制=True)
         self.assertTrue(self.等待(lambda: self.页.文件表格.rowCount() > 0),
                         "先要有列表，才谈得上'退出后还在不在'")
         self.凭证.unlink()

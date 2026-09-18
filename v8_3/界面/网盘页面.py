@@ -63,6 +63,7 @@ class 网盘页面(QWidget):
         self._上次双击 = 0.0
         self._登录后重试剩余 = 0
         self._凭证同步中 = False
+        self._状态缓存: dict | None = None
         self._操作线程: list = []
 
         self._构建()
@@ -159,12 +160,16 @@ class 网盘页面(QWidget):
 
         加一个"同步中"闸门：监视器 + 10 秒兜底轮询 + 退出登录三路都可能触发，
         没有闸门时会叠出好几次"检查中…"，界面看着像卡住了。
+
+        ⚠️ 这里必须**清掉账号状态缓存并强制刷新**：凭证变了（登录成功/被删），
+        20 秒的保鲜期会让我们拿着旧结论不放，用户看到的就是"明明登录了还显示未登录"。
         """
         self._重挂凭证监视()
+        self._状态缓存 = None
         if getattr(self, "_凭证同步中", False):
             return
         self._凭证同步中 = True
-        self._刷新管理区()
+        self._刷新管理区(强制=True)
 
     # ==================== 界面 ====================
 
@@ -428,6 +433,7 @@ class 网盘页面(QWidget):
 
     def _置为未登录(self, 原因: str = "") -> None:
         self._上次已登录 = False
+        self._状态缓存 = None
         self._登录后重试剩余 = 0
         self._文件列表 = []
         self._显示列表 = []
@@ -486,13 +492,26 @@ class 网盘页面(QWidget):
         才在 `_状态成功` 里补一次列目录。现在两者并行：**列表先出，状态栏后到**。
         """
         self._上次已登录 = True
+        # ⚠️ 必须让账号状态缓存失效：刚登录成功时若还拿 20 秒前的"未登录"结论
+        #    去套，界面会显示"未登录"直到缓存过期（用户会以为登录没生效）。
+        self._状态缓存 = None
         self._登录后重试剩余 = int(self.登录后列目录重试)
         self.加载当前目录(路径)
 
-    def _刷新管理区(self, 首次: bool = False):
+    #: 账号状态的"新鲜期"（秒）：这段时间内重复刷新直接用上次结果，
+    #: 不再发桥调用、也不再闪一下"⏳ 检查中…"（用户反馈"检测太频繁、界面一直闪"）。
+    账号状态保鲜秒 = 20.0
+
+    def _刷新管理区(self, 首次: bool = False, 强制: bool = False):
         if self.动作.规格(self.标识) is None:
             self.状态标签.setText("⚪ 该网盘未启用（在左下角「编辑网盘」里启用）")
             return
+        if not 强制:
+            上次 = getattr(self, "_状态缓存", None)
+            if 上次 and (time.time() - float(上次.get("时间") or 0)
+                       < self.账号状态保鲜秒):
+                self._状态成功(self.标识, dict(上次.get("信息") or {}))
+                return
         self.状态标签.setText("⏳ 检查中…")
         线程 = 账号状态线程(self.标识, self.动作.适配器, self)
         线程.成功.connect(self._状态成功)
@@ -505,14 +524,31 @@ class 网盘页面(QWidget):
         if 标识 != self.标识:
             return
         self._凭证同步中 = False
+        if 信息:
+            self._状态缓存 = {"时间": time.time(), "信息": dict(信息)}
         登录 = "🟢 已登录" if 信息.get("logged_in") else "⚪ 未登录"
-        用户 = 信息.get("user") or "-"
+        用户 = str(信息.get("user") or "").strip()
         详情 = 信息.get("detail") or {}
         容量 = ""
         会员 = 详情.get("member") if isinstance(详情.get("member"), dict) else {}
-        for 键, 标签 in (("total_capacity", "总容量"), ("use_capacity", "已用")):
-            if 键 in 会员:
-                容量 += f"，{标签}={self._格式化大小(会员[键])}"
+        # 容量三元组：总 / 已用 / 可用（哪家给就显示哪家；夸克、百度都会给）
+        for 键, 标签 in (("total_capacity", "总容量"),
+                       ("use_capacity", "已用"),
+                       ("free_capacity", "可用")):
+            值 = 会员.get(键)
+            if 值 in (None, ""):
+                # 没有"可用"就用 总-已用 现算（百度/夸克都可能只给两个）
+                if 键 == "free_capacity":
+                    try:
+                        值 = max(0, int(会员.get("total_capacity") or 0)
+                               - int(会员.get("use_capacity") or 0))
+                        if not 值:
+                            值 = None
+                    except Exception:
+                        值 = None
+                if 值 in (None, ""):
+                    continue
+            容量 += f"，{标签}={self._格式化大小(值)}"
         警告 = ""
         if 详情.get("write_error"):
             # 写权限探针（不产生副作用）给了明确原因：直接摆出来，
@@ -522,7 +558,9 @@ class 网盘页面(QWidget):
             警告 = "；⚠️ 读正常，写操作可能需要重新登录"
         # 只报登录态/账号/容量/警告：数据目录不在这里堆（要看/要开有下面那排按钮），
         # 也免得把本机绝对路径一直摆在界面上。
-        self.状态标签.setText(f"{登录}，用户：{用户}{容量}{警告}")
+        self.状态标签.setText(f"{登录}"
+                          + (f"，用户：{用户}" if 用户 else "")
+                          + f"{容量}{警告}")
         可写 = bool(详情.get("write_error") is None)
         self._更新写按钮(bool(信息.get("logged_in")) and 可写)
         if 登录.startswith("🟢"):

@@ -15,6 +15,7 @@ from 后端_基类 import (后端基类, 规范, 多段下载, 读取下载分�
 
 def _导入():
     from 核心.认证.令牌仓库 import 全局令牌仓库
+    from 核心.接口.资产接口 import 资产接口
     from 核心.认证.认证服务 import 认证服务
     from 核心.认证.登录服务 import 登录服务
     from 核心.接口.文件接口 import 文件接口
@@ -135,6 +136,33 @@ class 后端(后端基类):
             用户 = ctx.认证.取当前用户(令牌)
             详情 = {**详情, **dict(用户 or {})}
             用户名 = str(详情.get("name") or 详情.get("nickname") or "")
+            # 容量：用户信息里没有空间字段 → 走资产接口
+            #   POST /assets/v1/get_assets →
+            #   totalSpaceSize / usedSpaceSize / freeSpaceSize（实测 2026-09-19）
+            资产 = {}
+            try:
+                资产 = m["资产接口"](ctx.网络).取资产信息() or {}
+            except Exception as e:  # noqa: BLE001
+                详情["资产错误"] = str(e)[:120]
+            总 = (资产.get("totalSpaceSize") or 详情.get("totalSpace")
+                 or 详情.get("total_space") or 详情.get("spaceSize"))
+            已用 = (资产.get("usedSpaceSize") or 详情.get("usedSpace")
+                  or 详情.get("used_space") or 详情.get("useSpace"))
+            可用 = (资产.get("freeSpaceSize") or 详情.get("freeSpace")
+                  or 详情.get("free_space") or 详情.get("remainSpace"))
+            if 总 is not None or 已用 is not None:
+                try:
+                    可用 = (int(可用) if 可用 not in (None, "") else
+                          (max(0, int(总) - int(已用))
+                           if 总 is not None and 已用 is not None else None))
+                except Exception:
+                    可用 = None
+                详情["member"] = {
+                    "total_capacity": 总,
+                    "use_capacity": 已用,
+                    "free_capacity": 可用,
+                    "member_type": 详情.get("vipType") or 详情.get("memberType"),
+                }
         except Exception as e:
             详情["error"] = str(e)[:200]
         return {
