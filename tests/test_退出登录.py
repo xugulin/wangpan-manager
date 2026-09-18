@@ -164,6 +164,19 @@ class 退出登录界面测试(unittest.TestCase):
         self.assertEqual(self.页.文件表格.rowCount(), 0, "外部退出也要清空列表")
         self.assertFalse(self.页.上传按钮.isEnabled(), "外部退出也要禁用写按钮")
 
+    def test_三家后端都不把模块级_导入写成方法(self):
+        """回归：后端_光鸭/后端_夸克 的 退出登录() 里曾写成 self._导入()，
+        而 `_导入` 是**模块级函数** → 点退出登录必报
+        `'后端' object has no attribute '_导入'`（用户实测截图）。
+        """
+        from pathlib import Path as _P
+        根 = _P(__file__).resolve().parents[1] / "v8_3" / "桥"
+        for 名 in ("后端_光鸭.py", "后端_夸克.py", "后端_百度.py", "后端_假.py"):
+            文本 = (根 / 名).read_text(encoding="utf-8")
+            self.assertNotIn(
+                "self._导入()", 文本,
+                f"{名} 里出现 self._导入()：_导入 是模块级函数，调用会 AttributeError")
+
     def test_页面有退出与重新登录按钮(self):
         self.assertIn("退出登录", self.页.退出登录按钮.text())
         self.assertIn("重新登录", self.页.重新登录按钮.text())

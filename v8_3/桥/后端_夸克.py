@@ -784,7 +784,7 @@ class 后端(后端基类):
 
     def 退出登录(self) -> dict:
         """清掉本机保存的夸克凭证（数据/凭证.json）。只动本地文件。"""
-        m = self._导入()
+        m = _导入()   # 模块级函数，不是方法（写 self. 会 AttributeError）
         清除: list[str] = []
         try:
             仓库 = m["全局凭证仓库"]
