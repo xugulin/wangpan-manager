@@ -135,6 +135,12 @@ class 主窗口(QMainWindow):
                  配置路径: str | Path | None = None,
                  AI运行时=None, 主题: str = "", 启动日志=None):
         super().__init__()
+        # 新开界面 = 复位"关窗闸门"（自检里会反复开关窗口）
+        try:
+            from .后台线程 import 正在关闭          # noqa: F401  （保持导入可用）
+            _ = 正在关闭
+        except Exception:
+            pass
         self.配置路径 = Path(配置路径) if 配置路径 else 配置文件
         self.配置 = 配置 if 配置 is not None else 加载配置(self.配置路径)
         self._外部AI运行时 = AI运行时          # 启动自检装配好的那个
@@ -953,25 +959,102 @@ class 主窗口(QMainWindow):
 
     # ==================== 关闭 ====================
 
+    #: 关窗时"等在飞行中的桥调用"的总预算（秒）。桥调用超时是分钟级，
+    #: 真等满会像卡死；实测正常调用 1~3 秒就回来，给 20 秒足够，
+    #: 实在等不动的会在后面"关闭适配器 → 再等一轮"里被快速放掉。
+    关窗等待预算秒 = 20.0
+
+    def _所有在跑的线程(self) -> list:
+        """主窗口 + 各网盘页 + 登录对话框 + AI 页里所有还在跑的 QThread。"""
+        线程们 = list(self._活动线程)
+        for 页 in list(getattr(self, "_网盘页面", {}).values()):
+            线程们 += list(getattr(页, "_操作线程", []) or [])
+        for 对话 in self.findChildren(QDialog):
+            线程们 += list(getattr(对话, "_线程", []) or [])
+            线程们 += list(getattr(对话, "_核对线程们", []) or [])
+        页 = getattr(self, "_AI页面", None)
+        if 页 is not None:
+            线程们 += list(getattr(页, "_市场计时器们", []) or [])
+        结果 = []
+        for 线程 in 线程们:
+            try:
+                if 线程 is not None and 线程.isRunning():
+                    结果.append(线程)
+            except Exception:
+                continue            # 已经失效的对象直接跳过
+        return 结果
+
+    def _等在跑的线程(self, 预算秒: float) -> int:
+        """等在跑的线程收工；返回超时后仍在跑的数量。"""
+        import time as _time
+        截止 = _time.time() + max(0.5, float(预算秒))
+        剩 = 0
+        for 线程 in self._所有在跑的线程():
+            剩余 = 截止 - _time.time()
+            if 剩余 <= 0.2:
+                剩 += 1
+                continue
+            try:
+                线程.wait(int(剩余 * 1000))
+            except Exception:
+                pass
+            try:
+                if 线程.isRunning():
+                    剩 += 1
+            except Exception:
+                pass
+        return 剩
+
     def closeEvent(self, 事件):
+        """关窗：**先让在飞的调用落地，再让 Qt 销毁控件**。
+
+        现场崩溃（2026-09-19 02:01:33）：
+            QThread: Destroyed while thread '' is still running
+            Fatal Python error: Aborted
+        原因是关窗时还有一个 `账号状态线程` 卡在适配器调用里（future.result），
+        而 Qt 在销毁父控件时把它的 C++ 对象一起删了 —— Qt 遇到"运行中的
+        QThread 被销毁"会直接 abort，这**不是 Python 异常，try/except 抓不住**。
+        所以顺序必须是：停轮询 → 等在飞线程 → 关适配器（让还卡着的快速失败）
+        → 再等一轮 → 才交给 Qt 销毁。
+        """
+        # ⓪ 先关上"关窗闸门"：之后界面线程不再发起任何适配器调用
+        #    （否则关了适配器又会被重建、还会造出新的运行中线程 → Qt abort）
+        try:
+            from .后台线程 import 进入关闭态
+            进入关闭态(self)
+        except Exception:
+            pass
+        # ① 还开着的登录对话框先关（它自己会等"账号状态核对"线程）
+        for 对话 in list(self.findChildren(QDialog)):
+            try:
+                对话.close()
+            except Exception:
+                pass
+        # ② 停掉各页的凭证轮询、别再制造新线程
+        for 页 in list(getattr(self, "_网盘页面", {}).values()):
+            try:
+                计时 = getattr(页, "_凭证计时", None)
+                if 计时 is not None:
+                    计时.stop()
+            except Exception:
+                pass
+        # ③ 等在飞的桥调用落地（给足预算，别让它们带着"运行中"被删）
+        self._等在跑的线程(self.关窗等待预算秒)
+        # ④ 关适配器：还卡着的调用会立刻报"适配器已关闭"而退出
+        try:
+            self.动作.关闭()
+        except Exception:
+            pass
+        # ⑤ 再等一轮，把④放掉的线程收干净
+        self._等在跑的线程(6.0)
         try:
             if self._传输页面 is not None:
                 self._传输页面.关闭()
         except Exception:
             pass
-        for 页 in list(self._网盘页面.values()):
+        for 页 in list(getattr(self, "_网盘页面", {}).values()):
             try:
                 页.关闭()
-            except Exception:
-                pass
-        try:
-            self.动作.关闭()
-        except Exception:
-            pass
-        for 线程 in list(self._活动线程):
-            try:
-                if 线程.isRunning():
-                    线程.wait(3000)
             except Exception:
                 pass
         self._活动线程.clear()

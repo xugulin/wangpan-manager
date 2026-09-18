@@ -703,11 +703,26 @@ class 登录对话框(QDialog):
             self._核对中 = False
         线程.成功.connect(好)
         线程.失败.connect(坏)
-        线程.finished.connect(线程.deleteLater)
-        线程.start()
+        # ⚠️ 必须"跑完就从列表里摘掉再 deleteLater"：deleteLater 会把 C++ 对象
+        #    销毁，而 Python 包装还在列表里 → 之后任何 isRunning()/wait() 都会
+        #    抛 "libshiboken: Internal C++ object already deleted"，
+        #    关窗时也就没法正确等待它们（现场 abort 的一部分原因）。
+        线程.finished.connect(lambda t=线程: self._核对线程收工(t))
         if not hasattr(self, "_核对线程们"):
             self._核对线程们 = []
         self._核对线程们.append(线程)
+        线程.start()
+
+    def _核对线程收工(self, 线程) -> None:
+        try:
+            if 线程 in self._核对线程们:
+                self._核对线程们.remove(线程)
+        except Exception:
+            pass
+        try:
+            线程.deleteLater()
+        except Exception:
+            pass
 
     def _本地渲染二维码(self, 内容: str) -> bool:
         """有些网盘只给一条链接/验证地址（夸克、光鸭），界面这边自己画二维码。
@@ -838,7 +853,34 @@ class 登录对话框(QDialog):
                     线程.wait(1500)
             except Exception:
                 pass
+        # ⚠️ 现场崩溃（QThread: Destroyed while thread '' is still running →
+        #    Fatal Python error: Aborted）就是漏了这一组：
+        #    「扫码期间每 6 秒核对一次账号状态」造出来的线程只存在 _核对线程们 里，
+        #    关对话框时没人等它们；线程还卡在适配器调用里，Qt 就把它的 C++ 对象
+        #    连同父对象一起删了 → Qt 直接 abort（不是 Python 异常，抓不住）。
+        self._等核对线程(4000)
         super().closeEvent(事件)
+
+    def _等核对线程(self, 毫秒总预算: int = 4000) -> None:
+        """等"账号状态核对"线程收工；超预算就再给一次机会，但不留着跑。"""
+        import time as _time
+        截止 = _time.time() + max(0.5, 毫秒总预算 / 1000.0)
+        for 线程 in list(getattr(self, "_核对线程们", []) or []):
+            try:
+                if 线程.isRunning():
+                    剩余 = max(0.2, 截止 - _time.time())
+                    线程.wait(int(剩余 * 1000))
+            except Exception:
+                pass
+        # 停掉计时器并清空列表：下次打开对话框不会拿到已经失效的对象
+        try:
+            self._停止核对()
+        except Exception:
+            pass
+        try:
+            self._核对线程们 = []
+        except Exception:
+            pass
 
 
 def error短(文本, 长度: int = 200) -> str:

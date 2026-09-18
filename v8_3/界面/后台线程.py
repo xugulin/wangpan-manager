@@ -12,11 +12,111 @@
 from __future__ import annotations
 
 import threading
+import time
+import weakref
 from typing import Callable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
 from ..核心.传输引擎 import 传输引擎, 传输请求
+
+
+# ==========================================================================
+# 关窗闸门（按**窗口**记，不是全局开关）
+# ==========================================================================
+# 现场崩溃（2026-09-19 02:01:33，用户日志）：
+#     QThread: Destroyed while thread '' is still running
+#     Fatal Python error: Aborted
+# 成因：关窗时还有 QThread 卡在适配器调用里（future.result 最长 120 秒），
+#       Qt 销毁父控件时把运行中的 QThread 一起删了 —— Qt 遇到这种情况直接
+#       abort，**不是 Python 异常，try/except 抓不住**。
+#
+# 修法：窗口开始关窗时登记自己；此后**属于这个窗口的**界面线程不再发起新的
+#       适配器调用（立刻返回"正在关闭"）。关窗流程再去等在飞的调用。
+#
+# ⚠️ 必须按窗口记：自检里会连开好几个窗口，关掉第一个之后新窗口还得能用；
+#    早先写成全局开关时，第一个窗口一关，后面所有窗口的网盘调用都被挡了。
+_正在关的窗口: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def _记一笔(动作: str) -> None:
+    """把闸门的每次开关写进 数据/关窗闸门.log（诊断用，出问题时有据可查）。
+
+    ⚠️ 默认**不写**：只有设了 ``V8_3_闸门日志=1`` 时才落盘，
+    免得平时白写文件（排查"关窗时还有线程在跑"这类问题时再打开）。
+    """
+    import os as _os
+    if str(_os.environ.get("V8_3_闸门日志") or "").strip() in ("", "0", "false", "False"):
+        return
+    try:
+        import os
+        import traceback
+        from pathlib import Path
+        根 = Path(__file__).resolve().parents[2]
+        文件 = Path(os.environ.get("V8_3_闸门日志")
+                  or (根 / "数据" / "关窗闸门.log"))
+        文件.parent.mkdir(parents=True, exist_ok=True)
+        栈 = "".join(traceback.format_stack()[-9:-1])
+        with 文件.open("a", encoding="utf-8") as f:
+            f.write(f"\n===== {time.strftime('%H:%M:%S')} {动作} =====\n{栈}\n")
+    except Exception:
+        pass
+
+
+def 进入关闭态(窗口=None) -> None:
+    """某个窗口开始关窗：登记它，之后属于它的界面线程不再发起网盘调用。"""
+    if 窗口 is None:
+        return
+    _正在关的窗口.add(窗口)
+    _记一笔(f"关闸门 {type(窗口).__name__} id={id(窗口):#x}")
+
+
+def 正在关闭(父=None) -> bool:
+    """这个线程/控件**所属窗口**是不是正在关？
+
+    没给 `父`（或父已销毁）时，只在"有窗口正在关"且**当前没有别的活窗口**时
+    才算关闭 —— 这样自检的多窗口场景不会被上一个窗口的关闭状态误伤。
+    """
+    if 父 is not None:
+        窗口 = None
+        try:
+            窗口 = 父 if getattr(父, "isWindow", None) and 父.isWindow() else None
+            if 窗口 is None:
+                try:
+                    窗口 = 父.window()
+                except Exception:
+                    窗口 = None
+        except Exception:
+            窗口 = None
+        if 窗口 is not None:
+            try:
+                return 窗口 in _正在关的窗口
+            except Exception:
+                return False
+    if not _正在关的窗口:
+        return False
+    try:
+        from PySide6.QtWidgets import QApplication
+        活窗口 = [w for w in QApplication.topLevelWidgets()
+                 if getattr(w, "isWindow", lambda: False)() and w.isVisible()
+                 and hasattr(w, "动作")]
+        if not 活窗口:
+            return False          # 还有别的窗口活着 → 不挡它
+    except Exception:
+        return False
+    # 没有别的活窗口了：这时"某窗口在关"就等于"整个程序在关"
+    return bool(_正在关的窗口)
+
+
+class _关窗守卫:
+    """给界面线程用的守卫：所属窗口在关就直接抛错，别去碰已经关掉的适配器。"""
+
+    def __init__(self, 父=None):
+        self._父 = 父
+
+    def 检查(self):
+        if 正在关闭(self._父):
+            raise RuntimeError("程序正在关闭，已取消这次网盘调用")
 
 
 class 账号状态线程(QThread):
@@ -33,6 +133,7 @@ class 账号状态线程(QThread):
 
     def run(self):
         try:
+            _关窗守卫(self.parent()).检查()
             信息 = self._取适配器(self.标识).账号状态()
             self.成功.emit(self.标识, 信息.to_dict())
         except Exception as e:  # noqa: BLE001 - 界面需要展示任何失败
@@ -53,6 +154,7 @@ class 列目录线程(QThread):
 
     def run(self):
         try:
+            _关窗守卫(self.parent()).检查()
             条目 = self.适配器.列目录(self.路径)
             self.成功.emit(self.标识, self.路径, list(条目))
         except Exception as e:  # noqa: BLE001
@@ -77,6 +179,7 @@ class 文件操作线程(QThread):
 
     def run(self):
         try:
+            _关窗守卫(self.parent()).检查()
             结果 = self._动作(self._进度回调)
             self.完成.emit(self.描述, dict(结果 or {}))
         except Exception as e:  # noqa: BLE001

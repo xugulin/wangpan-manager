@@ -873,9 +873,20 @@ class 网盘页面(QWidget):
 
     def 关闭(self):
         self._加载世代 += 1
+        # 先停掉凭证轮询计时器：不然关窗过程中它还会再造新线程
+        try:
+            if getattr(self, "_凭证计时", None) is not None:
+                self._凭证计时.stop()
+        except Exception:
+            pass
         for 线程 in list(self._操作线程):
             try:
-                线程.wait(2000)
+                # ⚠️ 桥调用超时是按**分钟**算的（账号状态 120s、列目录 120s），
+                # 原来只等 2 秒就放手 —— 线程还活着，父控件一删，
+                # Qt 就报 "QThread: Destroyed while thread is still running"
+                # 并直接 abort（现场崩溃就是这么来的）。
+                if 线程.isRunning():
+                    线程.wait(8000)
             except Exception:
                 pass
             self._清理线程(线程)
