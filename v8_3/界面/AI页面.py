@@ -210,6 +210,9 @@ class AI状态页面(QWidget):
         模型行 = QHBoxLayout()
         模型行.addWidget(QLabel("🧠 模型："))
         self.模型下拉框 = QComboBox()
+        # 可输入 + 自动补全：有的厂家（如百炼）一次返回两百多个模型，必须能打字筛
+        self.模型下拉框.setEditable(True)
+        self.模型下拉框.setInsertPolicy(QComboBox.NoInsert)
         self.模型下拉框.currentIndexChanged.connect(self._切换模型)
         模型行.addWidget(self.模型下拉框, 1)
         self.刷新模型按钮 = QPushButton("🔄")
@@ -1095,7 +1098,17 @@ class AI状态页面(QWidget):
             self.模型下拉框.addItem(模型, 模型)
         idx = self.模型下拉框.findData(当前)
         self.模型下拉框.setCurrentIndex(idx if idx >= 0 else 0)
+        try:
+            补全 = self.模型下拉框.completer()
+            if 补全 is not None:
+                补全.setFilterMode(Qt.MatchFlag.MatchContains)   # 输中间一段也能匹配
+                补全.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        except Exception:  # noqa: BLE001
+            pass
         self.模型下拉框.blockSignals(False)
+        self.模型下拉框.setToolTip(
+            f"当前厂家可用模型（共 {self.模型下拉框.count()} 个，可直接打字筛选）。\n"
+            "名字是用你的密钥从该厂家接口拉取的，不是内置写死的名单。")
 
     def _切换模型(self, _索引=None):
         运行时 = self.运行时

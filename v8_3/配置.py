@@ -625,10 +625,11 @@ def _归一高峰时段(高峰: dict) -> dict:
     "bailian": {
         "名称": "阿里云百炼（通义千问）",
         "接口地址": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "推荐模型": ["qwen-plus", "qwen-max", "qwen-turbo", "qwen3-max",
-                  "deepseek-v3.2", "kimi-k2-instruct"],
+        # 这些名字是按实测 /models 返回的真实清单填的（百炼自己也挂了别家的模型）
+        "推荐模型": ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-plus",
+                  "deepseek-v4.1-flash", "kimi-k3", "glm-5.3"],
         "取模型": "models",
-        "备注": "控制台 → API-KEY 里创建；模型名也可在「模型广场」查",
+        "备注": "控制台 → API-KEY 创建；点「🔄 拉取模型」会列出全部可用模型",
     },
     "moonshot": {
         "名称": "月之暗面 Kimi",

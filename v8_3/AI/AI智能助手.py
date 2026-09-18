@@ -83,6 +83,17 @@ class AI智能助手:
         路径 = 路径.lstrip("/")
         return f"{基}/{路径}"
 
+    #: 非对话类模型的关键词：这些排到列表后面（不是不能用，是不适合当聊天模型）
+    _非对话关键词 = ("embedding", "rerank", "tts", "asr", "speech", "voice",
+                 "cosyvoice", "sambert", "image", "video", "wan", "ocr",
+                 "moderation", "translat")
+
+    @classmethod
+    def _模型门类(cls, 名: str) -> int:
+        """0 = 像对话模型（排前面），1 = 其它（向量/语音/图像…排后面）。"""
+        小写 = str(名 or "").lower()
+        return 1 if any(k in 小写 for k in cls._非对话关键词) else 0
+
     def _取厂家(self) -> dict:
         """当前在用的厂家（含接口地址、密钥、模型）。
 
@@ -268,7 +279,9 @@ class AI智能助手:
                 排序 = {名: i for i, 名 in enumerate(推荐)}
                 self.可用模型列表 = sorted(
                     dict.fromkeys(api模型),
-                    key=lambda m: (排序.get(m, 999), m))
+                    key=lambda m: (0 if m in 排序 else 1,
+                                   排序.get(m, 0),
+                                   self._模型门类(m), m))
                 self._原始模型映射 = {m: m for m in self.可用模型列表}
                 logger.info("✅ 可用模型（%s）: %s",
                             厂家.get("名称") or "在线厂家", self.可用模型列表[:8])
