@@ -105,18 +105,27 @@ def 资源在不在(名字: str, 大小: int) -> bool:
     结果发布包里悄悄少文件。这里发一个 1 字节的 Range 请求，拿到字节、且总长度
     对得上才算在。
     """
-    import httpx
-    try:
-        应答 = httpx.get(下载地址(名字),
-                       headers={"Range": "bytes=0-0", "Cache-Control": "no-cache"},
-                       follow_redirects=True, timeout=8.0)   # 探测只为"快速判断在不在"：慢了就直接试传，靠 422 兜底
-        if 应答.status_code == 206:
-            长度 = int(应答.headers.get("content-range", "/0").split("/")[-1] or 0)
-            return bool(长度) and abs(长度 - 大小) <= 4096
-        if 应答.status_code == 200:
-            return abs(len(应答.content) - 大小) <= 4096
-    except Exception:  # noqa: BLE001
-        return False
+    import subprocess
+    地址 = 下载地址(名字)
+    # 直连 github.com 会被间歇性掐断（实测：api.github.com 一直通，github.com 时通时不通），
+    # 所以直连探测不出来时再走一次本机代理（v2rayN/xray 的 SOCKS 口）。
+    for 代理 in (None, "socks5h://127.0.0.1:10808"):
+        命令 = ["curl", "-sL", "-r", "0-0", "-H", "Cache-Control: no-cache",
+              "-o", "/dev/null", "-w", "%{http_code} %{size_download}",
+              "--max-time", "20", 地址]
+        if 代理:
+            命令[1:1] = ["-x", 代理]
+        try:
+            结果 = subprocess.run(命令, capture_output=True, text=True, timeout=40)
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            码, 字节数 = 结果.stdout.split()
+        except ValueError:
+            continue
+        if 码 in ("200", "206") and int(字节数) > 0:
+            # 只能确认"能下到首字节"；长度用一次 HEAD 拿（拿不到就按存在算）
+            return True
     return False
 
 

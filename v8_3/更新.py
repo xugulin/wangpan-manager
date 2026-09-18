@@ -176,10 +176,18 @@ def 下载发布包(资源列表: list[dict], 目录: str | Path,
     """
     目录 = Path(目录)
     目录.mkdir(parents=True, exist_ok=True)
+    组: list[dict] = []
     单个 = 选择资源(资源列表, 标记, 要完整版)
     if 单个 is not None:
-        return 下载资源(单个, 目录, 进度)
-    组 = 分卷组(资源列表, 标记, 要完整版)
+        try:
+            return 下载资源(单个, 目录, 进度)
+        except Exception:                      # noqa: BLE001
+            # GitHub 的资源列表会返回过期数据：列表里有"整包"、实际只发布了分卷。
+            # 这时退回分卷方式，别让用户对着 404 干瞪眼。
+            组 = 分卷组(资源列表, 标记, 要完整版)
+            if not 组:
+                raise
+    组 = 组 or 分卷组(资源列表, 标记, 要完整版)
     if not 组:
         raise RuntimeError("这个平台还没有可下载的发布包")
     总数 = sum(int(x.get("size") or 0) for x in 组)
