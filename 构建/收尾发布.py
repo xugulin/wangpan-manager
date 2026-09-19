@@ -56,8 +56,8 @@ def 生成说明(整包在的: list[str], 分卷全的: list[str]) -> str:
     正文 = 正文.split("### 📥 具体下哪些文件？")[0].rstrip() + "\n"
     情况 = []
     for 平台 in ("Windows", "Linux"):
-        for 口味, 标签 in (("full-with-whisper-model", "完整版"),
-                        ("lite-no-model", "精简版")):
+        # 正式包名不带口味后缀（只出"不含模型"这一种）；完整版只在本地验证时出现
+        for 口味, 标签 in (("-含AI语音模型", "含语音模型（本地验证用，不发布）"),):
             名 = f"wangpan-manager-V{更新.当前版本()}-{平台}-{口味}.zip"
             状态 = ("整包" if 名 in 整包在的 else
                   ("分卷" if 名 in 分卷全的 else "缺失"))

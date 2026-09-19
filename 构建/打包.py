@@ -2,9 +2,13 @@
 
 用法（项目根下，用自带解释器跑）::
 
-    运行环境/venv/bin/python 构建/打包.py                # 只打"精简版（不含模型）"
-    运行环境/venv/bin/python 构建/打包.py --平台 linux    # 只打 Linux 精简版
+    运行环境/venv/bin/python 构建/打包.py                # 只打"不含模型"的包
+    运行环境/venv/bin/python 构建/打包.py --平台 linux    # 只打 Linux
     运行环境/venv/bin/python 构建/打包.py --口味 全部     # 本地想验完整版时才用
+
+包名**不带口味后缀**：正式包就叫 ``网盘管理-V1.0.1-Linux.zip`` /
+``网盘管理-V1.0.1-Windows.zip``（"不含模型"写在发布页面说明里）；
+本机验证完整版时才会是 ``…-Linux-含AI语音模型.zip``，免得跟正式包重名。
 
 **长期口径（用户要求）：只发布不含模型的包** —— 也就是"精简版"。
 「不含模型」指不含 AI 语音识别模型（faster-whisper 权重），首次用字幕时会
@@ -285,10 +289,11 @@ def main() -> int:
     参数 = 解析.parse_args()
 
     平台们 = ("linux", "windows") if 参数.平台 == "全部" else (参数.平台,)
-    口味们 = ((True, "完整版-含AI语音模型"), (False, "精简版-不含模型")) \
+    # 包名**不带口味后缀**（用户要求）：对外只发"不含模型"的包，说明写在发布页面即可。
+    # 本机验证完整版时才会多出 "-含AI语音模型" 后缀，避免跟正式包重名。
+    口味们 = ((True, "-含AI语音模型"), (False, "")) \
         if 参数.口味 == "全部" else \
-        (((True, "完整版-含AI语音模型"),) if 参数.口味 == "完整"
-         else ((False, "精简版-不含模型"),))
+        (((True, "-含AI语音模型"),) if 参数.口味 == "完整" else ((False, ""),))
 
     发布目录.mkdir(parents=True, exist_ok=True)
     结果: list[tuple[str, int]] = []
@@ -301,7 +306,7 @@ def main() -> int:
     for 平台 in 平台们:
         平台名 = {"linux": "Linux", "windows": "Windows"}[平台]
         for 含模型, 口味名 in 口味们:
-            包名 = f"网盘管理-V{版本}-{平台名}-{口味名}"
+            包名 = f"网盘管理-V{版本}-{平台名}{口味名}"
             说(f"打包：{包名}")
             目标 = 发布目录 / 包名
             if 目标.exists():
