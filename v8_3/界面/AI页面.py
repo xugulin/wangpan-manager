@@ -1431,26 +1431,15 @@ class AI状态页面(QWidget):
         启动按钮.setToolTip("拉起 ollama serve（用户目录安装，不需要 root）")
         启动按钮.clicked.connect(self._启动本地服务)
         行2.addWidget(启动按钮)
-        拉取按钮 = QPushButton("📥 拉取模型")
-        拉取按钮.setToolTip("ollama pull <模型>；1.5B 约 1.1 GB")
-        拉取按钮.clicked.connect(self._拉取本地模型)
-        行2.addWidget(拉取按钮)
-        self.一键按钮 = QPushButton("⬇️ 一键装好离线模型")
-        self.一键按钮.setToolTip(
-            "自动完成：检测本机推理服务 → 缺就下载便携版 ollama 到项目目录"
-            "（不装进系统、不写注册表）→ 拉取一个小模型 → 打开本地模型开关。\n"
-            "全程后台执行，界面不会卡。")
-        self.一键按钮.clicked.connect(self._一键装本地模型)
-        行2.addWidget(self.一键按钮)
-        self.本地按钮们.extend([检测按钮, 测速按钮, 启动按钮, 拉取按钮, self.一键按钮])
-        指引按钮 = QPushButton("📖 安装指引")
-        指引按钮.clicked.connect(self._显示本地模型指引)
-        行2.addWidget(指引按钮)
+        # 用户要求：去掉「📥 拉取模型 / ⬇️ 一键装好离线模型 / 📖 安装指引」三个按钮。
+        # 装模型改到「🛒 模型商店」页（那里有完整的推荐排行与一键装/卸/更新）；
+        # 拉取/一键装/指引这三个后端方法仍然保留（模型商店与命令行都在用）。
+        self.本地按钮们.extend([检测按钮, 测速按钮, 启动按钮])
         行2.addStretch(1)
         外层.addLayout(行2)
 
         self.本地提示标签 = QLabel(
-            "没装运行时也能用：点「📖 安装指引」复制几条命令（全部装在用户目录）。")
+            "装模型请到「🛒 模型商店」页：按推荐指数排行，一键安装/卸载/更新。")
         self.本地提示标签.setWordWrap(True)
         self.本地提示标签.setStyleSheet("font-size: 11px; color: #95a5a6;")
         外层.addWidget(self.本地提示标签)
