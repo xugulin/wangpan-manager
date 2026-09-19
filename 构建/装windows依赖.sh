@@ -23,7 +23,10 @@ uv pip install --python-platform windows --python-version 3.14 \
   --target ./语音识别/python/Lib/site-packages -r /tmp/asr包.txt
 
 echo "=== crcmod：PyPI 上没有 Windows 轮子，用它的纯 Python 实现顶上 ==="
-SRC="/home/xgl/python/网盘管理/运行环境/venv/lib/python3.14/site-packages/crcmod"
+# 相对本脚本推导仓库根（别写死本机路径：别人机器 / CI 上跑不了）
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$HERE/.." && pwd)"
+SRC="$ROOT/运行环境/venv/lib/python3.14/site-packages/crcmod"
 DST="./python主/Lib/site-packages/crcmod"
 mkdir -p "$DST"
 for f in __init__.py crcmod.py predefined.py _crcfunpy.py; do cp "$SRC/$f" "$DST/$f"; done

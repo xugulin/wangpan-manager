@@ -64,7 +64,7 @@ class 短信登录对话框(QDialog):
         手机行 = QHBoxLayout()
         self.手机号输入 = QLineEdit()
         self.手机号输入.setPlaceholderText(
-            "例如：18512828303 或 +86 18512828303")
+            "例如：13800000000 或 +86 13800000000")
         self.手机号输入.setMaxLength(25)
         self.手机号输入.returnPressed.connect(self._点发送验证码)
         手机行.addWidget(self.手机号输入, 1)
@@ -149,7 +149,7 @@ class 短信登录对话框(QDialog):
         号码部分 = 手机号.split(" ", 1)[-1] if " " in 手机号 else ""
         if not 号码部分 or len(号码部分) < 6:
             self._设置状态(
-                "手机号格式不正确，请检查后重试（示例：18512828303）",
+                "手机号格式不正确，请检查后重试（示例：13800000000）",
                 "err")
             return
 

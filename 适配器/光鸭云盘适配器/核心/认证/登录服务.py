@@ -24,7 +24,7 @@
         resp: {"token_type":"Bearer", "access_token",
                "refresh_token", "expires_in":7200, "sub":"..."}
 
-手机号格式：+86 18512828303（国家码 + 空格 + 号码）
+手机号格式：+86 13800000000（国家码 + 空格 + 号码）
 """
 import logging
 import time
@@ -186,7 +186,7 @@ class 登录服务:
     def 短信登录_初始化盾(self, 手机号: str) -> str:
         """步骤 1：初始化盾，返回 captcha_token
 
-        :param 手机号: 完整格式（含国家码），例如 "+86 18512828303"
+        :param 手机号: 完整格式（含国家码），例如 "+86 13800000000"
         :return: captcha_token
         """
         手机号 = 手机号.strip()

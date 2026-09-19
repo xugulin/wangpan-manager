@@ -44,6 +44,7 @@ def _读版本() -> str:
         "v8_3", "工具", "tests", "docs", "适配器")
 
 #: 只给 Linux 的（Windows 包里有 Windows 启动器，不需要 .sh）
+#: 包内容里给 Linux 准备的入口脚本（双击即用）
 Linux源码 = ("启动.sh",)
 
 #: 平台附加文件（各平台只带自己那份，别把 Windows 的 .exe 塞进 Linux 包）
@@ -100,6 +101,68 @@ def 拷源码(顶层: Path, 平台: str) -> None:
     if 平台 == "windows" and 启动器exe.is_file():
         shutil.copy2(启动器exe, 顶层 / "启动.exe")
         (顶层 / "启动.exe").chmod(0o755)
+
+
+def 去掉本机私有路径(顶层: Path, 平台: str) -> int:
+    """把发布包里"构建机的绝对路径"抹掉（既是隐私，也是可移植性）。
+
+    venv / 自带 Python 里天生会留构建机的路径：
+      * ``运行环境/venv/bin/*`` 的 shebang 指向 ``/home/<用户>/...``；
+      * ``运行环境/venv/pyvenv.cfg`` 的 ``home =`` 是构建机路径；
+      * ``activate`` 系列脚本里写死了 VIRTUAL_ENV 前缀；
+      * ``_sysconfigdata_*.py`` 里几百处构建路径。
+
+    这些不影响"用包内解释器跑 启动.py"，但会把构建机的用户名带进发布包。
+    这里统一替换成 ``<项目根>``（运行时用不上这些值），并返回改动文件数。
+    """
+    import re as _re
+    # 任何"绝对家目录路径"都算：/home/xxx、/Users/xxx、C:\Users\xxx
+    模式 = _re.compile(r"(?:/home/|/Users/|[A-Za-z]:\\Users\\)[^\s\"'`;:)]+")
+    改了 = 0
+    for 根, 目录们, 文件们 in os.walk(顶层):
+        # 只处理运行环境里的文件：源码/文档是项目自己的文本，不该被这里改写。
+        # ⚠️ 判断必须排除"顶层自身"，否则第一次迭代就把 运行环境/ 从遍历里剪掉，
+        #    结果一个文件都扫不到（实测踩过：日志显示"改了 0 个文件"）。
+        路径根 = Path(根)
+        if 路径根 != 顶层 and "运行环境" not in 路径根.parts:
+            目录们[:] = []
+            continue
+        目录们[:] = [d for d in 目录们 if d != "__pycache__"]
+        for 名 in 文件们:
+            路径 = Path(根) / 名
+            # ⚠️ 不能只看扩展名：venv 里的 pip3.14 / python3.14 / 各种无扩展名脚本
+            #    都会被后缀过滤漏掉（实测漏了 pip3.14，包里仍带构建机路径）。
+            #    改成"按内容判断是不是文本"：前 8KB 有空字节就当二进制跳过。
+            try:
+                头部 = 路径.open("rb").read(8192)
+            except Exception:
+                continue
+            if b"\x00" in 头部:
+                continue
+            try:
+                原 = 路径.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            # ① 每个以 #! 开头的行都换掉：有的脚本（pip3.14）第一行是空行、
+            #    shebang 在第二行，只处理首行会漏（实测漏掉 2 个文件）。
+            新 = 原
+            行们 = 原.split("\n")
+            for i, 行 in enumerate(行们[:3]):
+                if 行.startswith("#!") and 模式.search(行):
+                    行们[i] = "#!/usr/bin/env python3"
+            新 = "\n".join(行们)
+            # ② 其余构建机路径统一换成占位符 <项目根>
+            #    （venv 的 pyvenv.cfg / _sysconfigdata 里的路径本来就是"构建机专属"，
+            #     包内 启动.sh 会在启动 Python **之前**用绝对路径补回来）
+            新 = 模式.sub("<项目根>", 新)
+            if 新 == 原:
+                continue
+            try:
+                路径.write_text(新, encoding="utf-8")
+                改了 += 1
+            except Exception:
+                continue
+    return 改了
 
 
 def 拷运行环境(顶层: Path, 平台: str, 含模型: bool) -> None:
@@ -239,6 +302,9 @@ def main() -> int:
             拷运行环境(顶层, 平台, 含模型)
             说("  · 清理缓存文件")
             清理垃圾(顶层)
+            说("  · 抹掉构建机的私有路径")
+            抹了 = 去掉本机私有路径(顶层, 平台)
+            说(f"    （改了 {抹了} 个文件）")
             说("  · 压缩")
             zip路径 = 打包(顶层, 发布目录 / f"{包名}.zip")
             shutil.rmtree(目标, ignore_errors=True)
