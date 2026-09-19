@@ -2,9 +2,14 @@
 
 用法（项目根下，用自带解释器跑）::
 
-    运行环境/venv/bin/python 构建/打包.py                # 四个包全打
-    运行环境/venv/bin/python 构建/打包.py --平台 linux    # 只打 Linux
-    运行环境/venv/bin/python 构建/打包.py --口味 精简     # 只打精简版
+    运行环境/venv/bin/python 构建/打包.py                # 只打"精简版（不含模型）"
+    运行环境/venv/bin/python 构建/打包.py --平台 linux    # 只打 Linux 精简版
+    运行环境/venv/bin/python 构建/打包.py --口味 全部     # 本地想验完整版时才用
+
+**长期口径（用户要求）：只发布不含模型的包** —— 也就是"精简版"。
+「不含模型」指不含 AI 语音识别模型（faster-whisper 权重），首次用字幕时会
+自动联网下载；ollama 运行时也不预装（AI 页有「⬇️ 装运行时」按钮，模型在
+「🛒 模型商店」一键装）。所以本脚本默认 ``--口味 精简``。
 
 产物在 ``构建/发布/`` 下。**发布包里不含** ``配置.json`` 与 ``数据/``，
 所以解压出来就是干净的新装，升级覆盖时也不会动用户自己的东西。
@@ -267,7 +272,14 @@ def 备好本地模型运行时() -> None:
 def main() -> int:
     解析 = argparse.ArgumentParser(description="打绿色版压缩包")
     解析.add_argument("--平台", choices=("linux", "windows", "全部"), default="全部")
-    解析.add_argument("--口味", choices=("完整", "精简", "全部"), default="全部")
+    # 用户要求（长期口径）：**只发布不含模型的包**
+    #   * "不含模型" = 不含 AI 语音识别模型（faster-whisper），首次用字幕时自动联网下载；
+    #   * 想本地验证完整版才显式写 --口味 全部（或 --口味 完整）。
+    解析.add_argument("--口味", choices=("完整", "精简", "全部"), default="精简")
+    # 用户口径（长期）：发布包**不预装 ollama**（AI 页有「⬇️ 装运行时」一键补装），
+    # 也不含任何模型权重。想本地验证"预装 ollama"的包才加 --预装ollama。
+    解析.add_argument("--预装ollama", action="store_true",
+                      help="把便携版 ollama 运行时也打进包（默认不打）")
     解析.add_argument("--不要ollama", action="store_true",
                     help="不下载/不预装便携 ollama（默认会预装运行时，但不含模型权重）")
     参数 = 解析.parse_args()
@@ -280,11 +292,12 @@ def main() -> int:
 
     发布目录.mkdir(parents=True, exist_ok=True)
     结果: list[tuple[str, int]] = []
-    if not 参数.不要ollama:
+    if 参数.预装ollama:
         说("准备本地模型运行时（预装 ollama，不含模型权重）")
         备好本地模型运行时()
     else:
-        说("按参数要求：发布包不预装 ollama（AI 页里可点「⬇️ 装运行时」补装）")
+        说("发布包不预装 ollama（AI 页里可点「⬇️ 装运行时」补装；"
+          "想预装加 --预装ollama）")
     for 平台 in 平台们:
         平台名 = {"linux": "Linux", "windows": "Windows"}[平台]
         for 含模型, 口味名 in 口味们:

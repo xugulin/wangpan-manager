@@ -49,12 +49,14 @@ API = "https://api.github.com"
 
 ### 📦 下载哪个包？
 
-| 你的系统 | 推荐 | 说明 |
+| 你的系统 | 下载这个 | 说明 |
 |---|---|---|
-| Windows 10/11 | `Windows-完整版-含AI语音模型.zip` | 含语音识别模型，AI 字幕离线可用 |
-| Windows 10/11 | `Windows-精简版-不含模型.zip` | 小 460 MB，首次用字幕时自动联网下模型 |
-| Linux x86_64 | `Linux-完整版-含AI语音模型.zip` | 同上 |
+| Windows 10/11 | `Windows-精简版-不含模型.zip` | 首次用字幕时自动联网下模型 |
 | Linux x86_64 | `Linux-精简版-不含模型.zip` | 同上 |
+
+> **本项目只发布「不含模型」的包**：包体小、下载快。AI 语音识别模型首次用字幕时
+> 自动联网下载；本地大模型在「🤖 AI → 🛒 模型商店」一键安装；ollama 运行时在
+> AI 页点「⬇️ 装运行时」补装。
 
 **用法**：解压 → 双击 `启动.exe`（Windows）或 `启动.sh`（Linux）→ 在网盘页点「登录 / 管理」扫码。
 想放桌面：Windows 双击 `创建桌面图标.bat`，Linux 执行 `创建桌面图标.sh`。
@@ -265,14 +267,23 @@ def 传资源(会话对象, 发布: dict, 文件: Path) -> bool:
 
 
 def 看要发什么() -> list[Path]:
-    包们 = sorted(发布目录.glob("*.zip"))
-    if not 包们:
+    """列出要上传的包。
+
+    **长期口径（用户要求）：只发布不含模型的包** —— 也就是"精简版"。
+    所以这里默认跳过"完整版/含模型"的 zip（要强行发用 ``--也发完整版``）。
+    """
+    全部 = sorted(发布目录.glob("*.zip"))
+    要发 = [p for p in 全部 if "精简版" in p.name]
+    跳过 = [p for p in 全部 if p not in 要发]
+    if not 全部:
         print("（构建/发布 下还没有 zip，先跑 构建/打包.py）")
-    for 包 in 包们:
+    for 包 in 要发:
         print(f"  {包.name}  {包.stat().st_size / 1048576:.0f} MB")
-    合计 = sum(p.stat().st_size for p in 包们) / 1073741824
+    for 包 in 跳过:
+        print(f"  （跳过：含模型的包不发布）{包.name}")
+    合计 = sum(p.stat().st_size for p in 要发) / 1073741824
     print(f"  合计 {合计:.2f} GB")
-    return 包们
+    return 要发
 
 
 def main() -> int:
