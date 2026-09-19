@@ -909,7 +909,13 @@ class AI状态页面(QWidget):
             self._市场装表.pop(条目.名字, None)
             self.市场状态标签.setText(
                 ("✅ " if 好 else "❌ ") + f"{动作名} {条目.名字}：{消息}")
+            # 模型商店动了本机模型 → 设置页的下拉框/测速/启动服务要跟着变
+            self._已装模型缓存 = None
             self.刷新本地模型(重新检测=True)
+            try:
+                self._刷新本地模型下拉()
+            except Exception:
+                pass
             self._刷新市场目录(强制=False)   # 刷新"本机已装"状态
             if not 好 and "没找到 ollama" in str(消息):
                 self.市场状态标签.setText(
@@ -1424,12 +1430,14 @@ class AI状态页面(QWidget):
         检测按钮 = QPushButton("🔍 检测")
         检测按钮.clicked.connect(lambda: self.刷新本地模型(重新检测=True))
         行2.addWidget(检测按钮)
-        测速按钮 = QPushButton("⏱ 测速")
-        测速按钮.clicked.connect(self._本地模型测速)
+        self.测速按钮 = QPushButton("⏱ 测速")
+        self.测速按钮.clicked.connect(self._本地模型测速)
+        测速按钮 = self.测速按钮
         行2.addWidget(测速按钮)
-        启动按钮 = QPushButton("▶ 启动服务")
-        启动按钮.setToolTip("拉起 ollama serve（用户目录安装，不需要 root）")
-        启动按钮.clicked.connect(self._启动本地服务)
+        self.启动服务按钮 = QPushButton("▶ 启动服务")
+        self.启动服务按钮.setToolTip("拉起 ollama serve（用户目录安装，不需要 root）")
+        self.启动服务按钮.clicked.connect(self._启动本地服务)
+        启动按钮 = self.启动服务按钮
         行2.addWidget(启动按钮)
         # 用户要求：去掉「📥 拉取模型 / ⬇️ 一键装好离线模型 / 📖 安装指引」三个按钮。
         # 装模型改到「🛒 模型商店」页（那里有完整的推荐排行与一键装/卸/更新）；
@@ -1461,10 +1469,102 @@ class AI状态页面(QWidget):
         self._登记线程(线程)
         线程.start()
 
+    #: "本机装了哪些本地模型"的缓存秒数：模型商店装/卸完会立刻清缓存，
+    #: 平时刷新页面不必每次去起 ollama 子进程。
+    已装模型缓存秒 = 5.0
+
+    def _已装本地模型(self, 强制: bool = False) -> list[str]:
+        """本机**已安装**的本地模型列表（来自 ollama list，带短缓存）。
+
+        为什么不用摘要里的"模型列表"：那个在没装服务时会退回"推荐模型"，
+        分不清"没装模型"和"服务没起来"。用户要求"没有本地模型时下拉框为空"
+        —— 只有问实际安装情况才能给准。
+        """
+        现在 = time.time()
+        缓存 = getattr(self, "_已装模型缓存", None)
+        if (not 强制 and 缓存
+                and 现在 - float(缓存[0]) < self.已装模型缓存秒):
+            return list(缓存[1])
+        try:
+            客户端 = self.本地客户端()
+            已装 = dict(客户端.已装模型() or {}) if 客户端 is not None else {}
+        except Exception:
+            已装 = {}
+        列表 = sorted(已装) if 已装 else []
+        self._已装模型缓存 = (现在, 列表)
+        return 列表
+
+    def _刷新本地模型下拉(self, 摘要: dict | None = None,
+                    已装: list[str] | None = None) -> None:
+        """按"本机装了哪些模型"调整下拉框与 测速/启动服务 的可用性。
+
+        用户要求：
+          * 没有本地模型 → 下拉框只显示占位提示、**测速/启动服务不可用**；
+          * 有本地模型 → 下拉框列出来、按钮可用；
+          * 模型商店里装/卸/更新完成后，这里也要跟着变。
+        """
+        已装 = list(已装 if 已装 is not None else self._已装本地模型())
+        当前 = ""
+        try:
+            当前 = str((摘要 or {}).get("模型") or "").strip()
+        except Exception:
+            当前 = ""
+        框 = getattr(self, "本地模型框", None)
+        if 框 is None:
+            return
+        框.blockSignals(True)
+        try:
+            if not 已装:
+                框.clear()
+                # 空选项 + 温馨提示（用户要求）
+                框.addItem("（还没有本地模型 · 请到「🛒 模型商店」安装）", "")
+                框.setCurrentIndex(0)
+                框.setEnabled(False)
+                框.setToolTip("本机还没有可用的本地模型："
+                            "切到「🛒 模型商店」按推荐指数排行挑一个，点「⬇️ 一键安装」")
+            else:
+                现有 = [框.itemText(i) for i in range(框.count())]
+                if 现有 != 已装:
+                    框.clear()
+                    框.addItems(已装)
+                目标 = 当前 if 当前 in 已装 else 已装[0]
+                框.setCurrentIndex(max(0, 框.findText(目标)))
+                框.setEnabled(True)
+                框.setToolTip(f"本机已安装 {len(已装)} 个本地模型")
+        finally:
+            框.blockSignals(False)
+
+        # 测速 / 启动服务：没有模型时不可用（启动服务仍要求"已装运行时"）
+        usable = bool(已装)
+        for 钮, 名字 in ((getattr(self, "测速按钮", None), "测速"),
+                      (getattr(self, "启动服务按钮", None), "启动服务")):
+            if 钮 is None:
+                continue
+            try:
+                钮.setEnabled(usable)
+                if not usable:
+                    钮.setToolTip(f"本机还没有本地模型，无法{名字}；"
+                                "请先到「🛒 模型商店」安装一个")
+                else:
+                    钮.setToolTip("")
+            except Exception:
+                pass
+        if not usable and 摘要 is not None:
+            self.本地提示标签.setText(
+                "还没有本地模型：切到「🛒 模型商店」，按推荐指数挑一个"
+                "（推荐 🥇 qwen3.5:4b），点「⬇️ 一键安装」即可；"
+                "装好回来这里就能测速/启动服务。")
+        return
+
     def _本地模型收工(self) -> None:
         self._本地模型忙 = False
         for 钮 in getattr(self, "本地按钮们", []):
             钮.setEnabled(True)
+        # 收工后再按"有没有模型"校正一次：别把 测速/启动服务 又解开成可点
+        try:
+            self._刷新本地模型下拉()
+        except Exception:
+            pass
 
     def 延迟检测本地模型(self) -> None:
         """后台检测一次本地模型（不阻塞界面）。"""
@@ -1520,26 +1620,10 @@ class AI状态页面(QWidget):
             self.本地用途框.blockSignals(False)
         except Exception:
             pass
-        模型列表 = [str(m) for m in (摘要.get("模型列表") or []) if str(m).strip()]
-        当前 = str(摘要.get("模型") or "")
-        # 检测不到服务时列表会是空的 —— 那就填上"常推荐的本地模型"，
-        # 否则下拉框是空的、还没法选（用户反馈过）。
-        if not 模型列表:
-            模型列表 = [m for m in 推荐本地模型 if m != 当前]
-            if 当前:
-                模型列表.insert(0, 当前)
-        if 模型列表:
-            self.本地模型框.blockSignals(True)
-            现有 = [self.本地模型框.itemText(i)
-                  for i in range(self.本地模型框.count())]
-            if 现有 != 模型列表:
-                self.本地模型框.clear()
-                self.本地模型框.addItems(模型列表)
-            idx = self.本地模型框.findText(当前)
-            self.本地模型框.setCurrentIndex(max(0, idx))
-            self.本地模型框.setEnabled(True)
-            self.本地模型框.blockSignals(False)
-        if not 摘要.get("可用"):
+        # 下拉框只列**本机已安装**的模型；一个都没有就显示占位提示并禁用
+        # （用户要求：没有本地模型时不要塞一堆"推荐模型"让人误以为已经装了）
+        self._刷新本地模型下拉(摘要)
+        if not 摘要.get("可用") and self._已装本地模型():
             self.本地提示标签.setText(
                 str(摘要.get("说明") or "本地模型不可用").splitlines()[0])
 

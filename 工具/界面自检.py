@@ -2184,6 +2184,37 @@ def main() -> int:
     _AI页.切换AI页签("设置"); 泵(0.3)
     检查(_AI页.密钥输入框.isVisible() and _AI页.本地状态标签.isVisible(),
          "AI设置页显示 云端密钥 + 本地模型")
+    # 用户要求：没有本地模型时下拉框为空选项 + 温馨提示，测速/启动服务不可用；
+    # 装了模型后（模型商店）要自动变可用。
+    _AI页._已装模型缓存 = None
+    _真实已装 = _AI页._已装本地模型(强制=True)
+    _AI页._刷新本地模型下拉()
+    _框 = _AI页.本地模型框
+    if _真实已装:
+        # 本机真的装了模型：断言"可用 + 列出真实模型"
+        检查(_框.isEnabled() and _框.count() == len(_真实已装),
+             f"有本地模型时下拉框列出真实模型：{[_框.itemText(i) for i in range(_框.count())]}")
+        检查(_AI页.测速按钮.isEnabled() and _AI页.启动服务按钮.isEnabled(),
+             "有本地模型时测速/启动服务可用")
+    else:
+        # 没有模型：占位 + 禁用
+        检查(_框.count() == 1 and "还没有本地模型" in _框.itemText(0),
+             f"没有本地模型时下拉框只有占位提示：{_框.itemText(0)[:34]}")
+        检查(not _框.isEnabled(), "没有本地模型时下拉框不可选")
+        检查(not _AI页.测速按钮.isEnabled() and not _AI页.启动服务按钮.isEnabled(),
+             "没有本地模型时测速/启动服务不可用")
+        检查("模型商店" in _AI页.本地提示标签.text(),
+             f"提示把用户引到模型商店：{_AI页.本地提示标签.text()[:36]}")
+    # 模拟"模型商店刚装好一个模型"：缓存替换后立刻联动
+    _AI页._已装模型缓存 = (time.time(), ["qwen3.5:4b", "gemma3:270m"])
+    _AI页._刷新本地模型下拉()
+    检查(_框.isEnabled() and _框.count() == 2 and _框.itemText(0) == "qwen3.5:4b",
+         f"装好模型后下拉框立刻可用并列出：{[_框.itemText(i) for i in range(_框.count())]}")
+    检查(_AI页.测速按钮.isEnabled() and _AI页.启动服务按钮.isEnabled(),
+         "装好模型后测速/启动服务立刻可用")
+    _AI页._已装模型缓存 = None      # 还原成真实状态
+    _AI页._刷新本地模型下拉()
+
     # 用户要求：本地模型那一排去掉「拉取模型 / 一键装好离线模型 / 安装指引」
     _本地行按钮 = []
     for _组 in _AI页.本地状态标签.parent().findChildren(QPushButton):
