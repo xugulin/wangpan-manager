@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=网盘管理
+Name[en]=Wangpan Manager
+Comment=绿色版网盘管家：百度 / 夸克 / 光鸭，跨盘互传与 4K 播放（一键启动）
+Exec=/home/xgl/python/一键启动_网盘管理.sh
+Path=/home/xgl/python
+Icon=/home/xgl/python/网盘管理_图标.png
+Terminal=false
+StartupNotify=true
+StartupWMClass=网盘管理
+Categories=Network;FileTools;
+Keywords=网盘;百度网盘;夸克;光鸭;wangpan;netdisk;

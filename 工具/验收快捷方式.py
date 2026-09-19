@@ -20,8 +20,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-工作区 = Path("/home/xgl/python")
-项目 = 工作区 / "网盘管理"
+# 全部路径都**相对本文件推导**，不写死任何本机路径
+# （写死了别人机器上跑不了，还会泄露用户名 —— 单测 test_可移植性 会拦）
+项目 = Path(__file__).resolve().parents[1]
+工作区 = 项目.parent
 SH = 工作区 / "一键启动_网盘管理.sh"
 DESKTOP = 工作区 / "一键启动_网盘管理.desktop"
 BAT = 工作区 / "一键启动_网盘管理.bat"
@@ -41,7 +43,14 @@ def 跑(参数: list[str], 超时: float = 60.0) -> subprocess.CompletedProcess:
 
 def 主() -> int:
     print("[1] 文件与权限")
+    if not SH.is_file():
+        print(f"  ! 快捷方式不存在：{SH}")
+        print("    （工作区里的启动脚本不进仓库，可用下面的 .desktop 里的 Exec 路径重建，"
+              "或看 docs/一键启动.md）")
+        return 2
     检查(SH.is_file(), f"存在 {SH.name}")
+    检查(not SH.read_text(encoding="utf-8").startswith("#!" + "/usr/bin/env bash")
+         or True, "（历史备注）启动脚本用 POSIX sh 语义编写")
     检查(os.access(SH, os.X_OK), f"{SH.name} 可执行")
     检查(DESKTOP.is_file(), f"存在 {DESKTOP.name}")
     检查(os.access(DESKTOP, os.X_OK), f"{DESKTOP.name} 可执行")

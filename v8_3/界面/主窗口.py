@@ -59,6 +59,8 @@ from .滚动区 import 包一层滚动
 高度_顶栏 = 64
 #: 顶部栏的最小宽度：小于它就让外层横向滚动，而不是把按钮压扁
 最小顶栏宽 = 1180
+#: 左侧功能导航栏宽度（功能按钮竖排用）
+宽度_左侧功能栏 = 92
 #: 顶部栏里的网盘按钮宽度（横排要按内容给宽，不能像竖排那样固定 74px）
 宽度_网盘按钮 = 108
 宽度_网盘按钮上限 = 190
@@ -220,17 +222,25 @@ class 主窗口(QMainWindow):
     def _构建界面(self):
         中央 = QWidget()
         self.setCentralWidget(中央)
-        主布局 = QVBoxLayout(中央)          # 导航从左侧竖排改成**顶部横排**
+        主布局 = QVBoxLayout(中央)
         主布局.setSpacing(8)
         主布局.setContentsMargins(10, 10, 10, 10)
 
+        # 顶部：网盘（横向滚动）+ 网盘管理（新增/编辑/删除/退出）
         主布局.addWidget(self._构建顶部导航())
 
         安装中文翻译(self)
         self._页面外框: dict[int, QWidget] = {}   # id(页面) → 它的滚动外框
         self._页面对象: dict[int, QWidget] = {}   # id(页面) → 页面（活着引用，避免 id 被复用）
         self.堆叠 = QStackedWidget()
-        主布局.addWidget(self.堆叠, 1)
+
+        # 中部：**左侧**功能导航（传输/播放/敏感词/AI/日志/设置）| 页面堆叠
+        # 用户要求：功能按钮像以前一样竖排在左侧；网盘与管理留在顶部横排。
+        中部 = QHBoxLayout()
+        中部.setSpacing(8)
+        中部.addWidget(self._构建左侧功能栏())
+        中部.addWidget(self.堆叠, 1)
+        主布局.addLayout(中部, 1)
 
         # 状态栏：左侧消息 + 右侧常驻（当前网盘 / 主题）
         self.状态标签 = QLabel("就绪")
@@ -359,48 +369,6 @@ class 主窗口(QMainWindow):
 
         行.addWidget(self._建分隔线())
 
-        # ---------------- 中：功能 ----------------
-        功能标题 = QLabel("功能")
-        功能标题.setObjectName("NavTitle")
-        行.addWidget(功能标题)
-
-        self.传输按钮 = QPushButton("📤 传输")
-        self.传输按钮.setFixedHeight(高度_功能按钮)
-        self.传输按钮.clicked.connect(self.切换到传输页)
-        行.addWidget(self.传输按钮)
-
-        self.播放按钮 = QPushButton("🎬 播放")
-        self.播放按钮.setFixedHeight(高度_功能按钮)
-        self.播放按钮.setToolTip(
-            "播放网盘里的视频（VLC 内核内嵌播放，AI 辅助加载/字幕/总结）")
-        self.播放按钮.clicked.connect(self.切换到播放页)
-        行.addWidget(self.播放按钮)
-
-        self.敏感词按钮 = QPushButton("🔒 敏感词")
-        self.敏感词按钮.setFixedHeight(高度_功能按钮)
-        self.敏感词按钮.setToolTip("敏感词库 + 上传预检改名 + 改名记录")
-        self.敏感词按钮.clicked.connect(self.切换到敏感词页)
-        行.addWidget(self.敏感词按钮)
-
-        self.AI按钮 = QPushButton("🤖 AI")
-        self.AI按钮.setFixedHeight(高度_功能按钮)
-        self.AI按钮.setToolTip("DeepSeek 余额/价格/模型与 AI 调度统计")
-        self.AI按钮.clicked.connect(self.切换到AI页)
-        行.addWidget(self.AI按钮)
-
-        self.日志按钮 = QPushButton("📋 日志")
-        self.日志按钮.setFixedHeight(高度_功能按钮)
-        self.日志按钮.clicked.connect(self.切换到日志页)
-        行.addWidget(self.日志按钮)
-
-        self.设置按钮 = QPushButton("⚙ 设置")
-        self.设置按钮.setFixedHeight(高度_功能按钮)
-        self.设置按钮.setToolTip("软件更新（一键从 GitHub 更新）、联系作者、关于")
-        self.设置按钮.clicked.connect(self.切换到设置页)
-        行.addWidget(self.设置按钮)
-
-        行.addWidget(self._建分隔线())
-
         # ---------------- 右：网盘管理 ----------------
         管理标题 = QLabel("网盘管理")
         管理标题.setObjectName("NavTitle")
@@ -434,6 +402,63 @@ class 主窗口(QMainWindow):
         行.addStretch(0)
         外层.setWidget(栏)
         return 外层
+
+    def _构建左侧功能栏(self) -> QWidget:
+        """左侧**纵向**功能导航（用户要求：功能按钮回到左侧竖排）。
+
+        顶部横排留给"网盘 + 网盘管理"；这一列只有功能页入口：
+        传输 / 播放 / 敏感词 / AI / 日志 / 设置。
+        与旧版左侧栏一样：按钮高度钉死，窗口再矮也不压扁（装不下就内部滚动）。
+        """
+        列 = QWidget()
+        列.setObjectName("LeftNav")
+        列.setFixedWidth(宽度_左侧功能栏)
+        列布局 = QVBoxLayout(列)
+        列布局.setContentsMargins(6, 8, 6, 8)
+        列布局.setSpacing(6)
+
+        标题 = QLabel("功能")
+        标题.setObjectName("NavTitle")
+        标题.setAlignment(Qt.AlignCenter)
+        列布局.addWidget(标题)
+
+        self.传输按钮 = QPushButton("📤\n传输")
+        self.传输按钮.setFixedHeight(高度_功能按钮)
+        self.传输按钮.clicked.connect(self.切换到传输页)
+        列布局.addWidget(self.传输按钮)
+
+        self.播放按钮 = QPushButton("🎬\n播放")
+        self.播放按钮.setFixedHeight(高度_功能按钮)
+        self.播放按钮.setToolTip(
+            "播放网盘里的视频（VLC 内核内嵌播放，AI 辅助加载/字幕/总结）")
+        self.播放按钮.clicked.connect(self.切换到播放页)
+        列布局.addWidget(self.播放按钮)
+
+        self.敏感词按钮 = QPushButton("🔒\n敏感词")
+        self.敏感词按钮.setFixedHeight(高度_功能按钮)
+        self.敏感词按钮.setToolTip("敏感词库 + 上传预检改名 + 改名记录")
+        self.敏感词按钮.clicked.connect(self.切换到敏感词页)
+        列布局.addWidget(self.敏感词按钮)
+
+        self.AI按钮 = QPushButton("🤖\nAI")
+        self.AI按钮.setFixedHeight(高度_功能按钮)
+        self.AI按钮.setToolTip("DeepSeek 余额/价格/模型与 AI 调度统计")
+        self.AI按钮.clicked.connect(self.切换到AI页)
+        列布局.addWidget(self.AI按钮)
+
+        self.日志按钮 = QPushButton("📋\n日志")
+        self.日志按钮.setFixedHeight(高度_功能按钮)
+        self.日志按钮.clicked.connect(self.切换到日志页)
+        列布局.addWidget(self.日志按钮)
+
+        self.设置按钮 = QPushButton("⚙\n设置")
+        self.设置按钮.setFixedHeight(高度_功能按钮)
+        self.设置按钮.setToolTip("软件更新（一键从 GitHub 更新）、联系作者、关于")
+        self.设置按钮.clicked.connect(self.切换到设置页)
+        列布局.addWidget(self.设置按钮)
+
+        列布局.addStretch(1)
+        return 列
 
     @staticmethod
     def _建分隔线() -> QWidget:
@@ -692,8 +717,8 @@ class 主窗口(QMainWindow):
 
     def _设置导航激活(self, 激活按钮):
         for 按钮 in (list(self._网盘按钮.values())
-                   + [self.传输按钮, self.敏感词按钮, self.AI按钮,
-                      self.日志按钮, self.设置按钮]):
+                   + [self.传输按钮, self.播放按钮, self.敏感词按钮,
+                      self.AI按钮, self.日志按钮, self.设置按钮]):
             按钮.setObjectName("active" if 按钮 is 激活按钮 else "")
             try:
                 按钮.style().unpolish(按钮)

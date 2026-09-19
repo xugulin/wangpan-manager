@@ -941,6 +941,40 @@ QScrollArea#NavScroll QScrollBar::sub-page:horizontal {{
     width: 0;
 }}
 
+/* ---------------- 左侧功能导航栏（传输/播放/敏感词/AI/日志/设置 竖排） ---------------- */
+QWidget#LeftNav {{
+    background-color: {c['导航背景']};
+    border-radius: 8px;
+}}
+QWidget#LeftNav QLabel#NavTitle {{
+    color: {c['导航文字']};
+    font-size: 12px;
+    font-weight: bold;
+    padding: 0 2px;
+}}
+QWidget#LeftNav QPushButton {{
+    background: transparent;
+    color: {c['导航文字']};
+    border: none;
+    font-size: 12px;
+    padding: 8px 4px;
+    min-height: {高度_功能按钮 - 16}px;
+    border-radius: 6px;
+    font-weight: bold;
+    text-align: center;
+}}
+QWidget#LeftNav QPushButton:hover {{
+    background-color: {c['导航悬停']};
+}}
+QWidget#LeftNav QPushButton:pressed {{
+    background-color: {c['选中背景']};
+    color: {c['选中文字']};
+}}
+QWidget#LeftNav QPushButton#active {{
+    background-color: {c['导航激活']};
+    color: {c['背景']};
+}}
+
 /* ---------------- 导航面板（旧版左侧竖排；保留以免旧控件没样式） ---------------- */
 QWidget#NavPanel {{
     background-color: {c['导航背景']};
