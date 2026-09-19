@@ -8,6 +8,9 @@
 #
 # 用法：bash 构建/在服务器上构建.sh [--只 linux|windows] [--口味 完整|精简]
 #
+# 默认口径（与本地一致）：**只打"不含模型"的包**（--口味 精简），
+# 包名不带口味后缀，例如 网盘管理-V1.0.1-Linux.zip。
+#
 # 变量名一律 ASCII（bash 不认中文变量名，会被当成命令执行）。
 # ============================================================================
 set -euo pipefail
@@ -24,7 +27,7 @@ HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$ROOT/.uvcache}"
 
 ONLY_PLATFORM="全部"
-ONLY_TASTE="全部"
+ONLY_TASTE="精简"        # 默认只打"不含模型"的包（口径见文件头）
 while [ $# -gt 0 ]; do
   case "$1" in
     --只) ONLY_PLATFORM="${2:-全部}"; shift 2 ;;
@@ -135,7 +138,8 @@ case "$ONLY_PLATFORM" in
   windows) build_windows ;;
   *) build_linux; build_windows ;;
 esac
-if [ "$ONLY_TASTE" != "精简" ]; then
+# 只有"完整版"才需要下语音模型权重；默认口径是精简版，这一步会跳过
+if [ "$ONLY_TASTE" = "完整" ] || [ "$ONLY_TASTE" = "全部" ]; then
   fetch_model
 fi
 

@@ -281,6 +281,8 @@ def 备好本地模型运行时() -> None:
 def main() -> int:
     解析 = argparse.ArgumentParser(description="打绿色版压缩包")
     解析.add_argument("--平台", choices=("linux", "windows", "全部"), default="全部")
+    解析.add_argument("--不精简", action="store_true",
+                      help="不精简运行环境（默认会删掉 .pyi/Qt开发工具/Qt翻译/用不到的Qt模块）")
     # 用户要求（长期口径）：**只发布不含模型的包**
     #   * "不含模型" = 不含 AI 语音识别模型（faster-whisper），首次用字幕时自动联网下载；
     #   * 想本地验证完整版才显式写 --口味 全部（或 --口味 完整）。
@@ -328,6 +330,15 @@ def main() -> int:
             说("  · 抹掉构建机的私有路径")
             抹了 = 去掉本机私有路径(顶层, 平台)
             说(f"    （改了 {抹了} 个文件）")
+            if not 参数.不精简:
+                说("  · 精简运行环境（去掉开发时才用的东西）")
+                try:
+                    from 精简运行环境 import 精简运行环境 as _精简
+                    _精简(顶层, 平台=平台, verbose=True)
+                except Exception as e:  # noqa: BLE001
+                    说(f"    ⚠️ 精简失败（不影响打包）：{e}")
+            else:
+                说("  · 按参数要求：跳过运行环境精简")
             说("  · 压缩")
             zip路径 = 打包(顶层, 发布目录 / f"{包名}.zip")
             shutil.rmtree(目标, ignore_errors=True)
