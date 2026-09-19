@@ -2351,12 +2351,17 @@ def main() -> int:
     检查(all(not str(c["name"]).startswith("b'") for c in _库条目),
          "库里读出来的 cookie 名字是干净字符串（不会出现 b'BDUSS'）")
     # 窗口能建起来 + 能捕获 cookie + 会提示还缺什么
-    _窗 = _内置窗口("baidu", None, 完成回调=lambda _c: None)
+    # 引擎层重构后：窗口持有的是"浏览器引擎"（默认 QtWebEngine 引擎），
+    # 这里同时验证"引擎已接上"与"假引擎可注入"（后者让登录流程能离线测）。
+    from v8_3.界面.浏览器引擎 import 假引擎 as _假引擎
+    _窗 = _内置窗口("baidu", None, 完成回调=lambda _c: None, 引擎=_假引擎())
     try:
         _窗.show()
         泵(0.3)
-        检查(hasattr(_窗, "状态标签") and hasattr(_窗, "_视图"),
-             "内置浏览器窗口建起来了（有视图与状态栏）")
+        检查(hasattr(_窗, "状态标签") and hasattr(_窗, "引擎"),
+             "内置浏览器窗口建起来了（引擎 + 状态栏）")
+        检查(_窗.引擎.名字.startswith("假引擎"),
+             f"引擎可注入（当前：{_窗.引擎.名字}）—— 登录流程能离线测")
         _窗._收字典({"name": "STOKEN", "value": "x" * 8,
                   "domain": ".pan.baidu.com", "httpOnly": True})
         _名 = [c["name"] for c in _窗._凭证]

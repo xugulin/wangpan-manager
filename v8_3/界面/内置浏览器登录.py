@@ -1,6 +1,16 @@
 # v8_3/界面/内置浏览器登录.py
 """内置浏览器登录窗口（方案 B）：在程序里登录，凭证**自动**回填。
 
+分层（2026-09-20 重构）
+======================
+本文件**只做界面与流程**，浏览器（渲染 + 执行 JS + 收发 cookie）交给
+:mod:`v8_3.界面.浏览器引擎` 里的**可插拔引擎**：
+
+* ``浏览器引擎.py``：接口 + 工厂 + **假引擎**（没有浏览器也能测登录流程）；
+* ``引擎_QtWebEngine.py``：现在的默认实现（自带 Chromium）；
+* 将来换 WebView2 / CDP / Obscura / 自研引擎 → 只加一个适配器文件，
+  **本文件与凭证层一行都不用改**。
+
 为什么要有它（真机实测结论，2026-09-19）
 ========================================
 百度**扫码登录**换来的 BDUSS 只能用于网盘 API，进不了**网页版** pan 域：
@@ -34,18 +44,14 @@ import os
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
 )
 
-#: 内置浏览器的 Chromium 开关（必须在建第一个 QWebEngineView **之前**设好）：
-#: * --disable-gpu：无 GPU/软件渲染环境下更稳（本机 QtWebEngine 会报
-#:   "Failed to create RHI for backend: OpenGL"，不影响用，但日志很吵）；
-#: * --disable-dev-shm-usage：/dev/shm 小的机器（容器/受限环境）不会崩。
-os.environ.setdefault(
-    "QTWEBENGINE_CHROMIUM_FLAGS",
-    "--disable-gpu --disable-dev-shm-usage --disable-software-rasterizer")
+from .浏览器引擎 import (
+    浏览器引擎, 假引擎, 建引擎, 规范cookie, 取cookie值, 拼cookie头,
+)
 
 #: 各网盘的入口地址与"必需 cookie"
 网盘入口 = {
@@ -56,27 +62,6 @@ os.environ.setdefault(
 }
 
 网盘名称 = {"baidu": "百度网盘", "quark": "夸克网盘", "guangya": "光鸭云盘"}
-
-
-def _文本(值) -> str:
-    """把 Qt 给的 cookie 字段统一成 str。
-
-    ⚠️ 实测踩坑（2026-09-19）：PySide6 的 ``QNetworkCookie.name()`` /
-    ``domain()`` / ``path()`` 返回的是 **bytes**（``b'BDUSS'``），
-    ``value()`` 也是 bytes。以前只对 value 做了 decode，于是：
-      * 窗口判"缺不缺凭证"永远判缺（名字是 b'BDUSS' 而不是 'BDUSS'）；
-      * 桥那边按名字找 BDUSS 也找不到 → 明明抓到了 45 条 cookie（含
-        BDUSS/STOKEN，用户已经登录成功）却报"还没拿到 BDUSS"。
-    这里统一成 str，bytes 用 utf-8 解码、失败再退回 latin-1。
-    """
-    if 值 is None:
-        return ""
-    if isinstance(值, (bytes, bytearray)):
-        try:
-            return bytes(值).decode("utf-8")
-        except Exception:
-            return bytes(值).decode("latin-1", "replace")
-    return str(值)
 
 
 def 内置浏览器目录() -> Path:
@@ -97,75 +82,15 @@ def 可用() -> tuple[bool, str]:
 
 
 def 读取当前离线cookie(需要: tuple[str, ...] = ()) -> list[dict]:
-    """直接从内置浏览器 profile 的 Cookies 库读 cookie（含 HttpOnly）。
+    """兼容入口：读内置浏览器 profile 的 Cookies 库。
 
-    为什么不用 Qt 的 `filterCookies`：它是按 **URL** 匹配的，
-    `.baidu.com` 这种"域 cookie"（BDUSS 就挂在它下面）在按
-    `https://www.baidu.com/` 过滤时**不一定**返回 —— 实测就漏掉了 BDUSS。
-    而 QtWebEngine 的 profile 是我们自己的目录，cookie 库是**明文**的
-    （Value 列直接可读，实测 value=192/enc=0），所以直接读库最稳：
-    不依赖事件循环、不依赖调试端口、不受域名匹配规则影响。
-
-    :param 需要: 只要这些名字的 cookie（空 = 全都要）
+    真实现在引擎里（:func:`引擎_QtWebEngine.读取cookie库`）—— 别的引擎不需要
+    这个能力（Obscura/WebView2 走自己的 API），所以它只是"QtWebEngine 引擎的
+    一个实现细节"外露的兼容壳。
     """
-    import shutil
-    import sqlite3
-    import tempfile
-
-    库 = 内置浏览器目录() / "storage" / "Cookies"
-    结果: list[dict] = []
-    临时 = ""
-    try:
-        if not 库.is_file():
-            return []
-        # 浏览器可能正占用库文件：拷贝一份再读（避免 database is locked）
-        try:
-            连接 = sqlite3.connect(f"file:{库}?mode=ro&immutable=1", uri=True)
-        except Exception:
-            临时 = tempfile.mktemp(suffix=".db")
-            shutil.copy2(库, 临时)
-            连接 = sqlite3.connect(临时)
-        try:
-            连接.row_factory = sqlite3.Row
-            if 需要:
-                占位 = ",".join("?" for _ in 需要)
-                行们 = 连接.execute(
-                    f"select host_key,name,value,path,is_httponly,is_secure "
-                    f"from cookies where name in ({占位})", tuple(需要))
-            else:
-                行们 = 连接.execute(
-                    "select host_key,name,value,path,is_httponly,is_secure "
-                    "from cookies")
-            for 行 in 行们:
-                值 = 行["value"]
-                if isinstance(值, (bytes, bytearray)):
-                    值 = bytes(值).decode("utf-8", "replace")
-                名字 = str(行["name"] or "")
-                # ⚠️ 清理历史脏数据：早期版本把 bytes 直接 str() 写进了库，
-                #    于是库里出现过字面量名字 "b'STOKEN'"。这里还原成 STOKEN。
-                if len(名字) > 4 and 名字.startswith("b'") and 名字.endswith("'"):
-                    名字 = 名字[2:-1]
-                elif len(名字) > 5 and 名字.startswith('b"') and 名字.endswith('"'):
-                    名字 = 名字[2:-1]
-                结果.append({
-                    "domain": str(行["host_key"] or ""),
-                    "name": 名字,
-                    "value": str(值 or ""),
-                    "path": str(行["path"] or "/"),
-                    "httpOnly": bool(行["is_httponly"]),
-                    "secure": bool(行["is_secure"]),
-                })
-        finally:
-            连接.close()
-    except Exception:
-        return 结果
-    finally:
-        if 临时:
-            try:
-                Path(临时).unlink(missing_ok=True)
-            except Exception:
-                pass
-    return 结果
+    from .引擎_QtWebEngine import 读取cookie库
+    return 读取cookie库(内置浏览器目录() / "storage" / "Cookies",
+                     tuple(需要 or ()))
 
 
 class 内置浏览器登录窗口(QDialog):
@@ -175,14 +100,17 @@ class 内置浏览器登录窗口(QDialog):
     检查间隔毫秒 = 1500
 
     def __init__(self, 网盘类型: str, 父=None,
-                 完成回调: Optional[Callable[[dict], None]] = None):
+                 完成回调: Optional[Callable[[dict], None]] = None,
+                 引擎: 浏览器引擎 | None = None):
+        """``引擎`` 可注入（测试时传 :class:`假引擎`，生产走 QtWebEngine）。"""
         super().__init__(父)
         self.网盘类型 = str(网盘类型 or "")
         self._完成回调 = 完成回调
         self._凭证: list[dict] = []
         self._已回调 = False
-        self._profile = None
-        self._视图 = None
+        # 浏览器交给可插拔引擎：本窗口只做"显示 + 流程 + 收凭证"
+        self.引擎: 浏览器引擎 = 引擎 if 引擎 is not None else 建引擎(
+            "qtwebengine", {"数据目录": str(内置浏览器目录())}, 父=self)
 
         名称 = 网盘名称.get(self.网盘类型, self.网盘类型)
         self.setWindowTitle(f"🌐 内置浏览器登录 · {名称}")
@@ -208,7 +136,7 @@ class 内置浏览器登录窗口(QDialog):
         去按钮.clicked.connect(self._跳转)
         工具行.addWidget(去按钮)
         刷新按钮 = QPushButton("🔄 刷新")
-        刷新按钮.clicked.connect(lambda: self._视图 and self._视图.reload())
+        刷新按钮.clicked.connect(self._刷新页面)
         工具行.addWidget(刷新按钮)
         布局.addLayout(工具行)
 
@@ -224,7 +152,7 @@ class 内置浏览器登录窗口(QDialog):
         底部 = QHBoxLayout()
         self.完成按钮 = QPushButton("✅ 我已登录完成（取走凭证）")
         self.完成按钮.setObjectName("PrimaryButton")
-        self.完成按钮.clicked.connect(lambda: self._回调(self._凭证, 手动=True))
+        self.完成按钮.clicked.connect(self._手动完成)
         底部.addWidget(self.完成按钮)
         底部.addStretch(1)
         取消按钮 = QPushButton("关闭")
@@ -240,99 +168,57 @@ class 内置浏览器登录窗口(QDialog):
     # ---------------- 视图 ----------------
 
     def _建视图(self, 布局) -> None:
+        """把引擎的视图放进对话框（引擎自己负责 profile/存储目录）。"""
+        能用, 原因 = self.引擎.可用()
+        if not 能用:
+            self.状态标签.setText(f"❌ {原因 or '内置浏览器不可用'}")
+            return
         try:
-            from PySide6.QtWebEngineCore import QWebEngineProfile
-            from PySide6.QtWebEngineWidgets import QWebEngineView
+            视图 = self.引擎.取视图()
         except Exception as e:  # noqa: BLE001
             self.状态标签.setText(f"❌ 内置浏览器不可用：{e}")
             return
-        目录 = 内置浏览器目录()
+        if 视图 is not None:
+            布局.addWidget(视图, 1)
         try:
-            # 持久化 profile：登录态留在项目里，下次打开还在
-            self._profile = QWebEngineProfile("v8_3_内置登录", self)
-            self._profile.setPersistentStoragePath(str(目录 / "storage"))
-            self._profile.setCachePath(str(目录 / "cache"))
-            self._profile.setHttpCacheType(QWebEngineProfile.DiskHttpCache)
-            self._profile.setPersistentCookiesPolicy(
-                QWebEngineProfile.ForcePersistentCookies)
-        except Exception:
-            self._profile = QWebEngineProfile.defaultProfile()
-        try:
-            self._profile.cookieStore().cookieAdded.connect(self._收cookie)
-            self._profile.cookieStore().loadAllCookies()
-        except Exception as e:  # noqa: BLE001
-            self.状态标签.setText(f"⚠️ cookie 监听失败：{e}")
-
-        self._视图 = QWebEngineView(self)
-        try:
-            from PySide6.QtWebEngineCore import QWebEnginePage
-            页面 = QWebEnginePage(self._profile, self._视图)
-            self._视图.setPage(页面)
+            self.引擎.挂加载回调(self._加载完)
         except Exception:
             pass
-        布局.addWidget(self._视图, 1)
-        self._视图.loadFinished.connect(self._加载完)
         入口, _ = 网盘入口.get(self.网盘类型, ("about:blank", ()))
-        self._视图.load(QUrl(入口))
+        self.引擎.打开(入口)
 
     def _加载完(self, 好: bool) -> None:
         if not self._已回调:
-            self.状态标签.setText(
-                f"{'✅ 页面已加载' if 好 else '⚠️ 页面加载失败'}："
-                f"{self._视图.url().toString()[:80]}　｜　"
-                "正在读取本机已有的登录态…")
-        # ⚠️ 关键：**已经登录过**的时候（profile 是持久化的），cookie 早就在库里，
-        #    `loadAllCookies()` 不会再发 cookieAdded —— 必须主动 filterCookies 捞一遍，
-        #    否则"打开窗口就是登录态"却永远收不到凭证。
-        self._捞全部cookie()
-        self._查凭证()
-
-    def _捞全部cookie(self) -> None:
-        """把当前 profile 里所有相关 cookie 主动捞出来（含 HttpOnly）。"""
-        if self._profile is None:
-            return
-        try:
-            from PySide6.QtCore import QUrl
-            网址们 = [
-                QUrl("https://pan.baidu.com/"),
-                QUrl("https://passport.baidu.com/"),
-                QUrl("https://pcs.baidu.com/"),
-                QUrl("https://pcsdata.baidu.com/"),
-                QUrl("https://www.baidu.com/"),
-                QUrl("https://pan.quark.cn/"),
-                QUrl("https://www.guangyapan.com/"),
-                QUrl("https://account.guangyapan.com/"),
-            ]
-
-            def _收(饼们) -> None:
-                for c in 饼们 or []:
-                    self._收cookie(c)
-                self._查凭证()
-
-            self._profile.cookieStore().filterCookies(网址们, _收)
-        except Exception as e:  # noqa: BLE001
+            地址 = ""
             try:
-                self.状态标签.setText(f"⚠️ 读取已有 cookie 失败：{e}")
+                地址 = str(self.引擎.页面地址() or "")[:80]
             except Exception:
                 pass
+            self.状态标签.setText(
+                f"{'✅ 页面已加载' if 好 else '⚠️ 页面加载失败'}：{地址}　｜　"
+                "正在读取本机已有的登录态…")
+        # ⚠️ 关键：**已经登录过**的时候（profile 是持久化的），cookie 早就在库里，
+        #    引擎不会再发"新增 cookie"事件 —— 必须主动捞一遍，
+        #    否则"打开窗口就是登录态"却永远收不到凭证（引擎内部已实现这一点）。
+        self._查凭证()
+
+    def _刷新页面(self) -> None:
+        try:
+            地址 = self.引擎.页面地址() or self.地址框.text().strip()
+            if 地址:
+                self.引擎.打开(地址)
+        except Exception:
+            pass
 
     def _跳转(self) -> None:
-        if self._视图 is not None:
-            self._视图.load(QUrl(self.地址框.text().strip()))
+        self.引擎.打开(self.地址框.text().strip())
 
     # ---------------- 凭证 ----------------
 
     def _收字典(self, 项: dict) -> None:
-        """把一条"已经是 dict"的 cookie 合并进凭证表（与 _收cookie 同一套去重）。"""
-        干净 = {
-            "domain": _文本(项.get("domain")),
-            "name": _文本(项.get("name")),
-            "value": _文本(项.get("value")),
-            "path": _文本(项.get("path")) or "/",
-            "httpOnly": bool(项.get("httpOnly")),
-            "secure": bool(项.get("secure")),
-        }
-        if not 干净["name"] or not 干净["value"]:
+        """把一条 cookie 合并进凭证表（归一化只在 浏览器引擎.规范cookie 一处）。"""
+        干净 = 规范cookie(项)
+        if not 干净.get("name") or not 干净.get("value"):
             return
         for i, 旧 in enumerate(self._凭证):
             if 旧["name"] == 干净["name"] and 旧["domain"] == 干净["domain"]:
@@ -341,37 +227,30 @@ class 内置浏览器登录窗口(QDialog):
         self._凭证.append(干净)
 
     def _收cookie(self, cookie) -> None:
-        try:
-            项 = {
-                "domain": _文本(cookie.domain()),
-                "name": _文本(cookie.name()),
-                "value": _文本(cookie.value()),
-                "httpOnly": bool(cookie.isHttpOnly()),
-                "secure": bool(cookie.isSecure()),
-                "path": _文本(cookie.path()) or "/",
-            }
-        except Exception:
-            return
-        # 统一走 _收字典：Qt 这条路有时给的是 bytes（b'STOKEN'），归一化只写一处
-        self._收字典(项)
+        """兼容旧调用（Qt 的 QNetworkCookie 之类）：归一化后并入。"""
+        self._收字典(规范cookie(cookie))
 
-    def _查凭证(self) -> None:
-        """看凭证够不够；够了就自动回调（用户不用手动点）。"""
-        if self._已回调 or self._视图 is None:
-            return
-        # 先直接读库（最可靠：BDUSS 挂在 .baidu.com 下，Qt 的按 URL 过滤会漏）
-        需要 = 网盘入口.get(self.网盘类型, ("", ()))[1]
-        for c in 读取当前离线cookie(tuple(需要) if 需要 else ()):
-            if c.get("name") and c.get("value"):
-                self._收字典(c)
+    def _收引擎cookie(self, 需要: tuple[str, ...] = ()) -> None:
+        """把引擎当前的 cookie 并进凭证表（取 cookie 的唯一入口）。"""
         try:
-            # 每次查之前让 store 把库里的都吐一遍（新建 profile 首次可能没有信号），
-            # 同时主动 filterCookies 一遍（已有登录态时这是唯一能拿到 cookie 的路）
-            self._profile.cookieStore().loadAllCookies()
+            for c in self.引擎.取cookie(tuple(需要) if 需要 else ()):
+                干净 = 规范cookie(c)
+                if 干净.get("name") and 干净.get("value"):
+                    self._收字典(干净)
         except Exception:
             pass
-        if len(self._凭证) < 8:
-            self._捞全部cookie()
+
+    def _查凭证(self) -> None:
+        """看凭证够不够；够了就自动回调（用户不用手动点）。
+
+        取 cookie 一律问**引擎**（引擎内部自己决定：QtWebEngine 直读 profile 库 +
+        filterCookies；Obscura 走 CDP；WebView2 走它的 API）。界面不认识任何
+        浏览器细节 —— 这就是"引擎可替换"的关键。
+        """
+        if self._已回调:
+            return
+        需要 = 网盘入口.get(self.网盘类型, ("", ()))[1]
+        self._收引擎cookie(tuple(需要))
         名字 = {str(c["name"]) for c in self._凭证}
         缺 = [x for x in 需要 if x not in 名字]
         if not 缺 and 需要:
@@ -387,6 +266,24 @@ class 内置浏览器登录窗口(QDialog):
         for c in self._凭证:
             组.append(f"{c.get('name')}@{c.get('domain')}")
         return "、".join(sorted(set(组)))[:400]
+
+    def _手动完成(self) -> None:
+        """点「我已登录完成」：**先现场取一次** cookie 再回调。
+
+        ⚠️ 以前直接回调 ``self._凭证``：若定时器（1.5 秒一轮）还没跑过，
+        点下去会"什么都没发生"（被单测抓到）。
+        """
+        需要 = 网盘入口.get(self.网盘类型, ("", ()))[1]
+        self._收引擎cookie(tuple(需要))
+        self._回调(self._凭证, 手动=True)
+
+    def closeEvent(self, 事件) -> None:
+        """关窗时把引擎也收掉（profile/视图/后台渲染进程）。"""
+        try:
+            self.引擎.关闭()
+        except Exception:
+            pass
+        super().closeEvent(事件)
 
     def _回调(self, 凭证: list[dict], 手动: bool = False) -> None:
         if self._已回调:
@@ -410,31 +307,9 @@ class 内置浏览器登录窗口(QDialog):
 
     # ---------------- 工具 ----------------
 
-    @staticmethod
-    def 取cookie值(凭证: list[dict], 名: str,
-                域名优先: tuple[str, ...] = ()) -> str:
-        """按域名优先级取某个 cookie 的值（同名 cookie 不同域值可能不同）。"""
-        候选 = [c for c in (凭证 or []) if _文本(c.get("name")) == 名]
-        for 域 in 域名优先:
-            命中 = [c for c in 候选 if _文本(c.get("domain")) == 域]
-            if 命中:
-                return _文本(命中[0].get("value"))
-        return _文本(候选[0].get("value")) if 候选 else ""
-
-    @staticmethod
-    def 拼cookie头(凭证: list[dict], 只要: tuple[str, ...] = ()) -> str:
-        """把 cookie 拼成 `Cookie:` 头（同名取第一个；给了白名单就只拼白名单）。"""
-        对 = []
-        见过 = set()
-        for c in (凭证 or []):
-            名 = _文本(c.get("name"))
-            if not 名 or 名 in 见过:
-                continue
-            if 只要 and 名 not in 只要:
-                continue
-            见过.add(名)
-            对.append(f"{名}={_文本(c.get('value'))}")
-        return "; ".join(对)
+    # 这两个工具直接复用 浏览器引擎 模块里的实现（归一化只写一处）
+    取cookie值 = staticmethod(取cookie值)
+    拼cookie头 = staticmethod(拼cookie头)
 
 
 def 拼cookie头(凭证: list[dict], 只要: tuple[str, ...] = ()) -> str:
