@@ -975,6 +975,26 @@ QWidget#LeftNav QPushButton#active {{
     color: {c['背景']};
 }}
 
+/* ---------------- AI 页内页签（AI状态 / AI设置 / 模型商店） ---------------- */
+QPushButton#AITab {{
+    background: transparent;
+    color: {c['文字']};
+    border: 1px solid {c['边框']};
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: bold;
+}}
+QPushButton#AITab:hover {{
+    background-color: {c['导航悬停']};
+    color: {c['导航文字']};
+}}
+QPushButton#AITab:checked {{
+    background-color: {c['强调']};
+    color: {c['背景']};
+    border: 1px solid {c['强调']};
+}}
+
 /* ---------------- 导航面板（旧版左侧竖排；保留以免旧控件没样式） ---------------- */
 QWidget#NavPanel {{
     background-color: {c['导航背景']};

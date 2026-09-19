@@ -108,7 +108,9 @@ class AI状态页面(QWidget):
         self.页面滚动区.setWidgetResizable(True)
         self.页面滚动区.setFrameShape(QScrollArea.NoFrame)
         self.页面滚动区.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)   # 窗口变窄时允许左右滑动
-        self.页面滚动区.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # ⚠️ 外层**不做纵向滚动**：三个页签各自有滚动区，外层再滚就成了"两层滚动条"
+        #    （实测：滚动到底看到的是内层被裁的位置，底部按钮永远露不出来）。
+        self.页面滚动区.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.页面滚动区.viewport().setAutoFillBackground(False)
         self.页面内容 = 不压缩内容()
         self.页面内容.setObjectName("PageScroll")
@@ -122,6 +124,24 @@ class AI状态页面(QWidget):
         标题 = QLabel("🤖 AI 智能助手")
         标题.setStyleSheet("font-size: 18px; font-weight: bold;")
         顶部.addWidget(标题)
+
+        # ---- 页面切换（用户要求：AI 页拆成「AI状态 / AI设置 / 模型商店」三页）----
+        顶部.addSpacing(12)
+        self.页签按钮: dict[str, QPushButton] = {}
+        for 键, 名 in (("状态", "📊 AI状态"),
+                     ("设置", "⚙ AI设置"),
+                     ("商店", "🛒 模型商店")):
+            钮 = QPushButton(名)
+            钮.setObjectName("AITab")
+            钮.setCheckable(True)
+            钮.setToolTip({
+                "状态": "预算与消耗、AI 状态、价格表",
+                "设置": "云端密钥、本地模型、运行详情与预算刷新",
+                "商店": "本地小模型市场：推荐指数排行 + 一键装/卸/升级",
+            }[键])
+            钮.clicked.connect(lambda _=False, k=键: self.切换AI页签(k))
+            顶部.addWidget(钮)
+            self.页签按钮[键] = 钮
         顶部.addStretch(1)
         self.价格来源标签 = QLabel("💰 价格：加载中…")
         self.价格来源标签.setStyleSheet(
@@ -152,39 +172,122 @@ class AI状态页面(QWidget):
             "border: 1px solid #90caf9;")
         布局.addWidget(self.提示横幅)
 
-        # ---- 云端密钥（V8_3 新增：在页面上直接填，不用再手改 配置.json）----
-        布局.addWidget(self._建密钥区())
+        # 三个页签各自的容器（同一时刻只显示一个）
+        from PySide6.QtWidgets import QStackedWidget as _QStackedWidget
+        self.AI页签堆叠 = _QStackedWidget()
 
-        # ---- 本地 DeepSeek 模型（V8_3 新增：免费、离线）----
-        布局.addWidget(self._建本地模型区())
+        def _包滚动(页: QWidget):
+            """给一个页签套滚动区：内容保持设计高度，装不下就自己滚。"""
+            滚动 = QScrollArea()
+            滚动.setObjectName("PageScroll")
+            滚动.setWidgetResizable(True)
+            滚动.setFrameShape(QScrollArea.NoFrame)
+            滚动.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            滚动.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            滚动.viewport().setAutoFillBackground(False)
+            滚动.setWidget(页)
+            return 滚动
 
-        # ---- 🛒 本地小模型市场：推荐指数排行 + 一键装/卸/升级 ----
-        布局.addWidget(self._建模型市场区())
-
+        # ---------------- 页①：AI 状态（预算与消耗 / AI 状态 / 价格表）----------------
+        状态页 = QWidget()
+        状态页布局 = QVBoxLayout(状态页)
+        状态页布局.setContentsMargins(0, 0, 0, 0)
+        状态页布局.setSpacing(10)
         三列 = QHBoxLayout()
         三列.setSpacing(12)
         三列.addWidget(self._建预算区())
         三列.addWidget(self._建状态区())
-
         右侧 = QVBoxLayout()
         右侧.addWidget(self._建价格区())
         右侧.addWidget(self._建详情区(), 1)
         右容器 = QWidget()
         右容器.setLayout(右侧)
         三列.addWidget(右容器, 1)
-        布局.addLayout(三列, 1)
-
+        状态页布局.addLayout(三列, 1)
         底部 = QHBoxLayout()
-        self.刷新余额按钮 = QPushButton("🔄 刷新余额并记账")
+        # 文案缩短：原来"🔄 刷新余额并记账"在状态页底部会被裁掉（自检量到超出视口）
+        self.刷新余额按钮 = QPushButton("🔄 刷新余额")
+        self.刷新余额按钮.setToolTip("拉一次余额并记进账本（账本在 数据/ 下）")
         self.刷新余额按钮.setObjectName("PrimaryButton")
         self.刷新余额按钮.clicked.connect(self._手动刷新余额)
         底部.addWidget(self.刷新余额按钮)
         self.调度摘要标签 = QLabel("")
         self.调度摘要标签.setWordWrap(True)
         底部.addWidget(self.调度摘要标签, 1)
-        布局.addLayout(底部)
+        状态页布局.addLayout(底部)
+        self.状态滚动区 = _包滚动(状态页)
+        self.AI页签堆叠.addWidget(self.状态滚动区)
 
+        # ---------------- 页②：AI 设置（云端密钥 / 本地模型 / 运行详情）----------------
+        设置页 = QWidget()
+        设置页布局 = QVBoxLayout(设置页)
+        设置页布局.setContentsMargins(0, 0, 0, 0)
+        设置页布局.setSpacing(10)
+        # ---- 云端密钥（在页面上直接填，不用再手改 配置.json）----
+        设置页布局.addWidget(self._建密钥区())
+        # ---- 本地 DeepSeek 模型（免费、离线）----
+        设置页布局.addWidget(self._建本地模型区())
+        # ---- 运行详情（调度统计/最近决策，换页也能看到）----
+        设置页布局.addWidget(self._建详情区(), 1)
+        self.设置滚动区 = _包滚动(设置页)
+        self.AI页签堆叠.addWidget(self.设置滚动区)
+
+        # ---------------- 页③：模型商店（本地小模型市场）----------------
+        商店页 = QWidget()
+        商店页布局 = QVBoxLayout(商店页)
+        商店页布局.setContentsMargins(0, 0, 0, 0)
+        商店页布局.setSpacing(10)
+        商店页布局.addWidget(self._建模型市场区(), 1)
+        self.商店滚动区 = _包滚动(商店页)
+        self.AI页签堆叠.addWidget(self.商店滚动区)
+
+        布局.addWidget(self.AI页签堆叠, 1)
+        # ⚠️ AI 页自己已经有一层滚动区，而页签内容普遍比窗口高（状态页三列 + 详情），
+        #    只靠外层会让页签容器被压扁、底部控件被裁掉。所以每个页签**各自再套
+        #    一层滚动区**：页签行为像"独立页面"，内容永远保持设计高度。
         self.页面滚动区.setWidget(self.页面内容)
+        # 默认停在「AI 状态」
+        self.当前AI页签 = ""
+        self.切换AI页签("状态")
+
+    # ==================== 页签切换 ====================
+
+    @property
+    def 当前页签滚动区(self):
+        """当前页签自己的滚动区（脚本/自检用来滚到某处验证）。"""
+        try:
+            return self.AI页签堆叠.currentWidget()
+        except Exception:
+            return None
+
+    def 切换AI页签(self, 键: str) -> None:
+        """在「AI状态 / AI设置 / 模型商店」之间切换。"""
+        顺序 = {"状态": 0, "设置": 1, "商店": 2}
+        if 键 not in 顺序:
+            return
+        self.当前AI页签 = 键
+        try:
+            self.AI页签堆叠.setCurrentIndex(顺序[键])
+        except Exception:
+            return
+        for 其他键, 钮 in getattr(self, "页签按钮", {}).items():
+            try:
+                钮.setChecked(其他键 == 键)
+            except Exception:
+                pass
+        # 切到状态页时顺手把"当前多少钱"重算一次（价格可能刚刷新过）
+        if 键 == "状态":
+            try:
+                self.刷新()
+            except Exception:
+                pass
+        # 切到商店页时确保目录已加载（首次进来自动读缓存/联网）
+        if 键 == "商店":
+            try:
+                if not getattr(self, "_市场条目", None):
+                    self._刷新市场目录(强制=False)
+            except Exception:
+                pass
 
     def _建预算区(self) -> QWidget:
         组 = QGroupBox("💰 预算与消耗")

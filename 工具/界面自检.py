@@ -795,26 +795,35 @@ def main() -> int:
     原AI尺寸 = 窗口.size()
     窗口.resize(QSize(窗口.width(), 620))
     泵(0.35)
-    内容 = AI页.页面内容
-    检查(内容.height() == 内容.sizeHint().height(),
-         f"AI 页内容保持设计高度（{内容.height()}px = sizeHint），没有被压扁")
-    滚动 = AI页.页面滚动区.verticalScrollBar()
-    检查(滚动.maximum() > 0 and 滚动.isVisible(),
-         f"装不下时出现纵向滚动条（可滚 {滚动.maximum()}px）")
+    # 现在 AI 页拆成三个页签，每页各自带滚动区；这里在**AI状态页**上验证滚动
+    AI页.切换AI页签("状态")
+    泵(0.3)
+    滚动区 = AI页.当前页签滚动区
+    检查(滚动区 is not None and hasattr(滚动区, "verticalScrollBar"),
+         "当前页签有自己的滚动区")
+    检查(AI页.页面滚动区.verticalScrollBarPolicy().name == "ScrollBarAlwaysOff",
+         "外层不再纵向滚动（否则会出两层滚动条、底部按钮永远露不出来）")
+    滚动 = 滚动区.verticalScrollBar()
+    检查(滚动.maximum() > 0,
+         f"AI状态页装不下时出现纵向滚动条（可滚 {滚动.maximum()}px）")
     检查(AI页.详情框.height() > 100,
          f"运行详情框不再被压成一条缝（{AI页.详情框.height()}px）")
+    高时范围 = 滚动.maximum()
     窗口.resize(QSize(窗口.width(), 1000))
     泵(0.35)
-    检查(内容.height() == 内容.sizeHint().height(),
-         "窗口拉高后内容高度同样不变（只是滚动条消失）")
+    滚动2 = AI页.当前页签滚动区.verticalScrollBar()
+    检查(滚动2.maximum() < 高时范围,
+         f"窗口拉高后滚动范围变小（{高时范围} → {滚动2.maximum()}），"
+         "内容始终保持设计高度")
     窗口.resize(QSize(窗口.width(), 620))
     泵(0.3)
+    滚动 = AI页.当前页签滚动区.verticalScrollBar()
     滚动.setValue(滚动.maximum())
     泵(0.2)
-    视口 = AI页.页面滚动区.viewport()
+    视口 = AI页.当前页签滚动区.viewport()
     位置 = AI页.刷新余额按钮.mapTo(视口, QPoint(0, 0))
     检查(0 <= 位置.y() and 位置.y() + AI页.刷新余额按钮.height() <= 视口.height() + 2,
-         f"滚到底部能看到「刷新余额并记账」（y={位置.y()}，视口高 {视口.height()}）")
+         f"滚到底部能看到「刷新余额」（y={位置.y()}，视口高 {视口.height()}）")
     滚动.setValue(0)
     窗口.resize(原AI尺寸)
     泵(0.2)
@@ -2139,6 +2148,47 @@ def main() -> int:
     段["厂家"].pop("bailian", None)
     段["当前"] = "deepseek"
     写回在线模型(窗口.配置, 段)
+
+    print("\n[28b] AI 页拆成三个页签（AI状态 / AI设置 / 模型商店）")
+    _AI页 = 窗口.AI页面()
+    if _AI页 is None:
+        窗口.切换到AI页(); 泵(0.5)
+        _AI页 = 窗口.AI页面()
+    检查(_AI页 is not None and hasattr(_AI页, "页签按钮"),
+         "AI 页有页签导航")
+    检查(list(getattr(_AI页, "页签按钮", {})) == ["状态", "设置", "商店"],
+         f"页签是 AI状态/AI设置/模型商店：{list(getattr(_AI页, '页签按钮', {}))}")
+    检查(all(("AI状态" in b.text() or "AI设置" in b.text() or "模型商店" in b.text())
+             for b in _AI页.页签按钮.values()),
+         "页签文字带图标与名称：" + "、".join(b.text() for b in _AI页.页签按钮.values()))
+    检查(_AI页.AI页签堆叠.count() == 3, "三个页签各有一页")
+    检查(all(type(_AI页.AI页签堆叠.widget(i)).__name__ == "QScrollArea"
+             for i in range(3)),
+         "每页各自带滚动区（内容高时滚动，不压扁控件）")
+    _索引 = {}
+    for _键 in ("设置", "商店", "状态"):
+        _AI页.切换AI页签(_键); 泵(0.35)
+        _索引[_键] = _AI页.AI页签堆叠.currentIndex()
+        _勾 = [k for k, b in _AI页.页签按钮.items() if b.isChecked()]
+        检查(_勾 == [_键], f"切到「{_键}」后只有它被选中（实际 {_勾}）")
+    检查(_索引 == {"状态": 0, "设置": 1, "商店": 2},
+         f"三个页签对应三个页面索引：{_索引}")
+    # 每页该有的东西
+    _AI页.切换AI页签("状态"); 泵(0.3)
+    for _名, _控件 in (("预算与消耗", getattr(_AI页, "预算余额标签", None)),
+                    ("AI 状态", getattr(_AI页, "时段标签", None)),
+                    ("价格表", getattr(_AI页, "价格表", None))):
+        检查(_控件 is not None and _控件.isVisible(),
+             f"AI状态页显示「{_名}」")
+    检查(not _AI页.密钥输入框.isVisible(), "AI状态页不显示密钥输入（那在设置页）")
+    _AI页.切换AI页签("设置"); 泵(0.3)
+    检查(_AI页.密钥输入框.isVisible() and _AI页.本地状态标签.isVisible(),
+         "AI设置页显示 云端密钥 + 本地模型")
+    _AI页.切换AI页签("商店"); 泵(0.3)
+    检查(_AI页.市场状态标签.isVisible() and _AI页.市场搜索框.isVisible(),
+         "模型商店页显示 市场目录 + 过滤框")
+    检查(not _AI页.密钥输入框.isVisible(), "模型商店页不显示密钥输入")
+    _AI页.切换AI页签("状态"); 泵(0.2)
 
     print("\n[29] 🛒 本地小模型市场（推荐指数 / 一键装·卸·更新 / 动态拉取）")
     from v8_3.AI import 模型市场
