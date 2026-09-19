@@ -2184,6 +2184,8 @@ def main() -> int:
     _AI页.切换AI页签("设置"); 泵(0.3)
     检查(_AI页.密钥输入框.isVisible() and _AI页.本地状态标签.isVisible(),
          "AI设置页显示 云端密钥 + 本地模型")
+    检查(not _AI页.详情框.isVisible(),
+         "AI设置页不再显示运行详情（用户要求去掉；它只在 AI状态页）")
     _AI页.切换AI页签("商店"); 泵(0.3)
     检查(_AI页.市场状态标签.isVisible() and _AI页.市场搜索框.isVisible(),
          "模型商店页显示 市场目录 + 过滤框")
