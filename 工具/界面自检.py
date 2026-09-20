@@ -2412,6 +2412,21 @@ def main() -> int:
             泵(0.05)
         检查(not _空抓到 and "未提交" in _空窗.状态标签.text(),
              "没取到 cookie 时不回调（状态：" + _空窗.状态标签.text()[:20] + "）")
+        # 两个播放窗口必须用**同一个**就绪判断（否则独立窗口那条路又会漏）
+        try:
+            from v8_3.界面.窗口就绪 import 窗口就绪 as _统一就绪
+            from v8_3.界面.播放页面 import 播放页面 as _播放页类
+            from v8_3.界面.播放器窗口 import 播放器窗口 as _播放器窗类
+            检查(hasattr(_播放页类, "_已映射") and hasattr(_播放器窗类, "_已映射"),
+                 "播放页与独立窗口都有 _已映射（统一走 窗口就绪）")
+            _假 = type("假", (), {"isVisible": lambda self: True,
+                              "winId": lambda self: 0,
+                              "windowHandle": lambda self: None})()
+            检查(bool(_统一就绪(_假, 重试上限=0)) is True,
+                 "窗口就绪：拿不到窗口号时不卡住（返回就绪）")
+        except Exception as _e:  # noqa: BLE001
+            检查(False, f"窗口就绪检查出错：{_e}")
+
         # X11"窗口真的在屏幕上"的判断（用户两次看到游离 VLC 窗口的根因）：
         # 不能信 Qt 的 isVisible/isExposed，要问 X 的 map_state
         try:

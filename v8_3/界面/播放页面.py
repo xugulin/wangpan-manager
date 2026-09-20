@@ -933,7 +933,20 @@ class 播放页面(QWidget):
             return 0
 
     def _已映射(self) -> bool:
-        """播放页的视频窗是否已经真的映射到屏幕（只有 X11 需要等）。"""
+        """播放页的视频窗是不是**真的在屏幕上**（交给 libvlc 之前必须为真）。
+
+        ⚠️ 踩过三次坑：只看 Qt 的 isVisible()/isExposed() 不够 —— 它说"可见"时
+        X 服务器可能还没映射窗口，libvlc 于是**自己开一个 "VLC media player"
+        顶层窗口**放画面。判定统一走 界面/窗口就绪.py（以 X 的 map_state 为准）。
+        """
+        try:
+            from .窗口就绪 import 窗口就绪 as _就绪
+            return bool(_就绪(self.视频, 重试上限=0))
+        except Exception:
+            return self._已映射_旧()
+
+    def _已映射_旧(self) -> bool:
+        """（兜底）老的 Qt 判断——只有公共判断抛异常时才会走到。"""
         try:
             from ..播放.显示环境 import 可嵌入窗口 as _可嵌
             from PySide6.QtGui import QGuiApplication as _App
@@ -941,8 +954,7 @@ class 播放页面(QWidget):
                 return True          # 离屏/无头平台没有嵌入这回事，别卡住起播
             if not self.视频.isVisible():
                 return False
-            # ⚠️ 关键：以 **X 服务器的映射状态**为准。Qt 说"可见"不等于窗口已经
-            #    映射好；libvlc 那一刻会自己开顶层窗口（用户实测的游离窗口）。
+            # 以 X 服务器的映射状态为准（拿不到就退回 Qt 的 isExposed）
             就绪 = False
             try:
                 from ..播放.游离窗口 import 窗口已映射 as _已映射X
@@ -1031,7 +1043,17 @@ class 播放页面(QWidget):
         self._起守护()
         # 窗口还没映射好就把句柄交给 libvlc，它会自己开窗口放（"视频和播放器分离"）
         if not self._已映射() and not getattr(self, "_本次独立窗口", False):
-            self.状态标签.setText("⏳ 等待视频窗口就绪…")
+            # 轮询等（90ms × 最多 28 次 ≈ 2.5 秒）：**窗口没真的上屏就不把句柄交给
+            # libvlc** —— 交给它，它找不到父窗口就会自己开一个 "VLC media player"
+            # 顶层窗口（用户实测三次的游离窗口就是这么来的）。
+            等次数 = int(getattr(self, "_等映射次数", 0)) + 1
+            self._等映射次数 = 等次数
+            self.状态标签.setText(f"⏳ 等待视频窗口就绪…（第 {等次数} 次）")
+            if 等次数 > 28:
+                self.状态标签.setText("❌ 视频窗口迟迟没上屏，先不起播（避免多出 VLC 窗口）")
+                self._AI写("[显示] 视频窗口 2.5 秒仍未映射，已中止起播（不是播放失败，"
+                         "请把窗口拉到前台后重新点 ▶）")
+                return
             QTimer.singleShot(90, self._起播二段)
             return
         # 句柄为 0 且是桌面平台时拦住：libvlc 会**自己开一个 VLC 窗口**放画面，

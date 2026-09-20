@@ -317,7 +317,15 @@ class 播放器窗口(QWidget):
             # ⚠️ 这里必须返回 True：调用方（播放页/自检）把 False 当"起播失败"，
             # 会把刚建好的窗口直接关掉（踩过）。_等待映射中 记录真实状态。
             self._等待映射中 = True
-            self.状态标签.setText("⏳ 等待窗口就绪…")
+            等次数 = int(getattr(self, "_等映射次数", 0)) + 1
+            self._等映射次数 = 等次数
+            self.状态标签.setText(f"⏳ 等待窗口就绪…（第 {等次数} 次）")
+            if 等次数 > 28:      # ≈ 2.5 秒还没上屏
+                self.状态标签.setText("❌ 窗口迟迟没上屏，先不起播"
+                                 "（避免多出 VLC 窗口）")
+                self._写日志("[显示] 独立窗口 2.5 秒仍未映射，已中止起播；"
+                          "把窗口拉到前台后重新点 ▶")
+                return True
             QTimer.singleShot(90, self.起播)
             return True
         句柄 = self._安全句柄()
@@ -586,12 +594,21 @@ class 播放器窗口(QWidget):
         return True
 
     def _已映射(self) -> bool:
-        """窗口是否已经真的映射到屏幕（X11 里这决定 libvlc 能不能嵌入）。
+        """独立窗口的视频区是不是**真的在屏幕上**（交给 libvlc 之前必须为真）。
 
-        ⚠️ 只有 X11/xcb 才需要等：离屏/无头平台没有"把窗口号交给 libvlc"这回事，
-        一律当作已就绪，否则会把起播卡死（离屏窗口永远不算 exposed）。
-        另外最多重试有限次，超了就照常起播（宁可试一把，也不能卡住不播）。
+        ⚠️ 踩过三次坑：原来只看 Qt 的 isExposed()，而它说"可见"时 X 服务器可能
+        还没映射窗口 —— libvlc 于是**自己开一个 "VLC media player" 顶层窗口**放画面
+        （用户实测三次，独立窗口这条路尤其容易中）。判定统一走 界面/窗口就绪.py
+        （以 X 的 map_state == IsViewable 为准）。
         """
+        try:
+            from .窗口就绪 import 窗口就绪 as _就绪
+            return bool(_就绪(self.视频, 重试上限=0))
+        except Exception:
+            return self._已映射_旧()
+
+    def _已映射_旧(self) -> bool:
+        """（兜底）老的 Qt 判断——只有公共判断抛异常时才会走到。"""
         try:
             if not 可嵌入窗口(QGuiApplication.platformName()):
                 return True
