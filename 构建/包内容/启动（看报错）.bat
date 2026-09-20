@@ -1,17 +1,37 @@
 @echo off
+rem ============================================================================
+rem  Wangpan Manager - verbose launcher (keeps the console open so errors show)
+rem  100% ASCII on purpose; see the plain launcher .bat for the explanation.
+rem ============================================================================
 chcp 65001 >nul
-rem 出问题时用这个启动：会保留一个黑窗口，把报错显示出来
-cd /d "%~dp0"
-set "PY=运行环境\venv\Scripts\python.exe"
-if not exist "%PY%" set "PY=运行环境\python\python.exe"
-if not exist "%PY%" (
-  echo 找不到自带的 Python：请确认压缩包已完整解压。
+setlocal EnableExtensions
+set "HERE=%~dp0"
+if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
+cd /d "%HERE%"
+
+set "RT=%HERE%\运行环境"
+set "PY="
+for %%F in ("%RT%\venv\Scripts\python.exe") do set "PY=%%~fF"
+if not defined PY for %%F in ("%RT%\python\python.exe") do set "PY=%%~fF"
+set "MAIN="
+for %%F in ("%HERE%\*.py") do if not defined MAIN set "MAIN=%%~fF"
+
+if not defined PY (
+  echo [X] Bundled Python not found. Extract the whole zip into a normal folder first.
   pause
   exit /b 1
 )
-echo 正在用 %PY% 启动，日志同时写入 数据\界面日志.txt …
-echo ------------------------------------------------------------
-"%PY%" "启动.py" %*
-echo ------------------------------------------------------------
-echo 程序已退出。把上面的报错截图发给作者：QQ 894597841
+if not defined MAIN (
+  echo [X] Startup script ^(*.py^) not found next to this file.
+  pause
+  exit /b 1
+)
+
+echo [i] interpreter : %PY%
+echo [i] script      : %MAIN%
+echo [i] the in-app log is written under the data folder next to this file.
+echo.
+"%PY%" "%MAIN%"
+echo.
+echo [i] program exited with code %ERRORLEVEL%
 pause
