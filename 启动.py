@@ -52,6 +52,39 @@ try:
 except Exception:
     pass
 
+
+def _X11线程安全准备() -> None:
+    """在**任何 X11 连接建立之前**调 ``XInitThreads()``（X11 会话专用）。
+
+    为什么要它：本进程里有**三拨人**同时在用 Xlib ——
+
+    * Qt 的 xcb 平台插件（界面线程）；
+    * 我们自己的 ctypes 直连 libX11（游离窗口巡检、窗口映射判断）；
+    * libvlc 的 vout/GLX 线程（它自己开线程画画面）。
+
+    Xlib 默认**不是线程安全**的：不先调 XInitThreads 就多线程用，轻则偶发错乱，
+    重则卡在 Xlib 内部的锁上 —— 表现正是"界面忽然彻底卡死、日志也不动了"。
+    这是 Xlib 的硬性要求（Qt + VLC 嵌入式播放器的标准做法），
+    必须赶在建立连接之前调用；设 ``V8_3_跳过XInitThreads=1`` 可关掉。
+    """
+    if os.environ.get("V8_3_跳过XInitThreads"):
+        return
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return
+    try:
+        import ctypes
+        for 名字 in ("libX11.so.6", "libX11.so"):
+            try:
+                ctypes.CDLL(名字).XInitThreads()
+                return
+            except Exception:  # noqa: BLE001 - 换个名字再试
+                continue
+    except Exception:  # noqa: BLE001 - 没有 X11 就算了，不影响启动
+        pass
+
+
+_X11线程安全准备()
+
 # V8_3：libvlc 只能往 X11 窗口画 —— Wayland 会话里必须切到 XWayland(xcb)，
 # 否则把 wl_surface 的窗口号交给 set_xwindow 会**直接段错误闪退**（用户实测）。
 # 这一句必须早于 QApplication 创建，环境变量才对 Qt 插件选择生效。

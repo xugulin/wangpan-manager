@@ -539,7 +539,7 @@ class 播放会话:
                 except Exception:
                     pass
             self.播放器.绑定窗口(窗口句柄)
-        选项 = self.设置.libvlc选项()
+        选项 = self._去掉自开窗口的输出模块(self.设置.libvlc选项(), 窗口句柄)
         self._日志(f"[播放] 起播（缓存 {self.设置.网络缓存毫秒}ms，"
                  f"硬解 {self.设置.硬解}）：{len(选项)} 个选项")
         # 硬解到底能不能用，必须如实告诉用户（不然界面显示 vaapi、实际在软解）
@@ -553,36 +553,112 @@ class 播放会话:
         if 成功:
             self.开始时间 = time.time()
             self.播放器.设置音量(max(0, self.播放器.取音量() or 100))
-            if str(self.设置.视频输出 or "") == "gl":
-                threading.Thread(target=self._GL兜底检查, name="GL兜底",
+            if int(窗口句柄 or 0) and vlc可用():
+                threading.Thread(target=self._画面自检, name="画面自检",
                                  daemon=True).start()
         return 成功
 
-    def _GL兜底检查(self) -> None:
-        """用了 ``:vout=gl`` 却在几秒内没有画面 → 换回默认 vout 重载。
+    #: 嵌入播放时**不允许**用的视频输出模块。
+    #: 它们不往"别人的窗口"里画，而是自己建一个顶层窗口 —— 用户看到的就是
+    #: 屏幕上多出来一个标题为 `VLC media player` 的窗口，而本程序那块区域只剩
+    #: VLC 的空画面（VLC logo）。GL 输出要自己建 GLX/EGL 窗口，实测就是这个行为。
+    自开窗口输出 = ("gl", "glx", "egl", "egl_x11")
 
-        为什么要兜底：GL/EGL 不是每台机器都能起来（驱动、XWayland、远程桌面
-        都可能失败）。失败时如果不管，用户看到的就是"有声没画"。
+    def _去掉自开窗口的输出模块(self, 选项: list[str],
+                          窗口句柄: int) -> list[str]:
+        """把画面**嵌进我们窗口**时，剔掉"会自己开窗口"的 vout。
+
+        4K/60fps 这类吃力片源原来会走 ``:vout=gl``（想省 CPU），可 GL 输出压根
+        不画进我们的窗口 —— 画面跑到 libvlc 自己开的顶层窗口里去了。宁可让它用
+        默认的 x11 输出（一定嵌得进来），也不要"多一个窗口"。
         """
-        for _ in range(12):                 # 最多等 ~3 秒
-            time.sleep(0.25)
+        if not int(窗口句柄 or 0):
+            return 选项
+        坏的 = {f":vout={名}" for 名 in self.自开窗口输出}
+        去掉 = [x for x in 选项 if str(x).strip().lower() in 坏的]
+        if not 去掉:
+            return 选项
+        self._日志("[播放] 嵌入播放不用 " + "、".join(去掉)
+                 + "：这类输出会自己开一个 VLC 窗口放画面，不画进本程序；"
+                 "已改用默认视频输出")
+        return [x for x in 选项 if str(x).strip().lower() not in 坏的]
+
+    def _画面自检(self) -> None:
+        """起播后盯 8 秒：画面要是跑到 libvlc 自己开的窗口里，就换回能嵌入的输出。
+
+        为什么需要它（三层坑，都是读代码/实测确认的）：
+
+        ① 吃力片源会走 ``:vout=gl``，而 GL 输出**不画进别人的窗口** ——
+           libvlc 自己开一个顶层窗口放画面（用户看到"又多了一个 VLC media player"）；
+        ② 原来判定"有没有画面"用的是 ``has_vout`` —— VLC 自己那个窗口也算 vout，
+           于是永远判定"有画面"，兜底**根本不触发**（修了三次还有，就是这里）；
+        ③ 就算触发了，旧的重载会把 ``视频输出=""`` 当"没给"过滤掉，等于没改。
+
+        现在：以"有没有游离窗口"为准，真的把输出换回默认；只回退一次，
+        再出现就如实告诉用户（**绝不去销毁 libvlc 的窗口** —— 那会把 VLC 弄僵）。
+        """
+        try:
+            from .游离窗口 import 找游离窗口, 窗口尺寸, 可用 as X可用
+        except Exception:  # noqa: BLE001
+            return
+        if not X可用():
+            return
+        回退过 = False
+        for _ in range(16):                     # 0.5s × 16 = 8 秒
+            time.sleep(0.5)
+            if self.播放器 is None:
+                return
             try:
-                if self.播放器 is None:
-                    return
-                if self.播放器.有画面():
-                    return
-                if self.播放器.时长秒() > 0 and self.播放器.进度秒() > 2.0:
-                    break                       # 已经在出帧但 has_vout 报假，别误判
+                找到 = 找游离窗口(排除窗口号=(int(getattr(self.播放器, "窗口句柄", 0) or 0),))
             except Exception:  # noqa: BLE001
                 return
-        位置 = 0.0
+            if not 找到:
+                回退过 = False                  # 画面回来了：下一级留着下次真出事再用
+                continue
+            标题 = "、".join(名 for _号, 名 in 找到[:2])
+            尺寸 = "、".join(f"{宽}x{高}" for 宽, 高 in
+                          (窗口尺寸(号) for 号, _ in 找到[:2]))
+            if self.安全回退画面(标题, 尺寸):
+                回退过 = True
+                time.sleep(1.5)                 # 刚重载完，别马上又判一次
+                continue
+            self._日志(f"[显示] ⚠️ 画面仍在 libvlc 自己的窗口里（{标题}｜{尺寸}），"
+                     f"回退阶梯已走完 —— 请点「独立窗口」或换片源；"
+                     f"本程序不会再动那个窗口（销毁它会把 VLC 弄僵、界面跟着卡死）")
+            return
+
+    #: 画面跑到 libvlc 自己窗口里时的**回退阶梯**（一级一级试，每级重载一次）：
+    #: ① 去掉"会自己开窗口"的视频输出（gl 这类 GLX/EGL 输出）；
+    #: ② 关掉 GPU 解码（vaapi/vdpau 这些也要自己建窗口拿 GPU 帧）。
+    #: 两级都不行就如实告诉用户，不再折腾 —— 反复重载比"画面在外面"更让人难受。
+    画面回退阶梯: tuple[dict, ...] = (
+        {"视频输出": "", "理由": "已改回默认视频输出"},
+        {"硬解": "none", "理由": "已改用软件解码（GPU 解码路径也会自己开窗口）"},
+    )
+
+    def 安全回退画面(self, 标题: str = "", 尺寸: str = "") -> bool:
+        """画面跑到 libvlc 自己开的窗口里时，按阶梯**换配置重载**。
+
+        幂等但**不是一次**：阶梯有几级就最多回退几次（默认两级）。
+        :return: 这次是否真的发起了回退（False = 阶梯走完/没播放器）。
+        """
+        if self.播放器 is None:
+            return False
+        级 = int(getattr(self, "_画面回退级", 0))
+        if 级 >= len(self.画面回退阶梯):
+            return False
+        self._画面回退级 = 级 + 1
+        参数 = dict(self.画面回退阶梯[级])
+        参数["来源"] = "规则"
+        尾巴 = f"（{标题}｜{尺寸}）" if 标题 else ""
+        self._日志(f"[显示] ⚠️ 发现画面在 libvlc 自己开的窗口里{尾巴}，"
+                 f"{参数.get('理由')}并重载（第 {级 + 1}/{len(self.画面回退阶梯)} 级，"
+                 f"从当前位置继续）")
         try:
-            位置 = float(self.播放器.进度秒()) if self.播放器 else 0.0
-        except Exception:  # noqa: BLE001
-            位置 = 0.0
-        self._日志("[播放] ⚠️ vout=gl 起播后一直没有画面，回退默认视频输出重载")
-        self.应用新参数({"视频输出": "", "理由": "vout=gl 无画面，已回退默认 vout",
-                    "来源": "规则"}, 自动重载=True)
+            return bool(self.应用新参数(参数, 自动重载=True))
+        except Exception as e:  # noqa: BLE001
+            self._日志(f"[显示] 回退失败：{e}")
+            return False
 
     # ---------------- ③ 控制 ----------------
 
@@ -838,7 +914,11 @@ class 播放会话:
                 新参数["网络缓存毫秒"] = 下限
         位置 = self.播放器.进度秒() if self.播放器 else 0.0
         旧 = self.设置.to_dict()
-        合并 = {**旧, **{k: v for k, v in 新参数.items() if v not in (None, "")}}
+        # ⚠️ 只过滤 None，**不能过滤空串**：空串是有意义的值（例如 视频输出=""
+        #    表示"回到默认输出"）。以前这里把 "" 当"没给"丢掉，于是
+        #    「vout=gl 出问题 → 重载时把视频输出清空」实际上根本没清，
+        #    重载完还是 gl —— 兜底等于没兜（读代码才发现的）。
+        合并 = {**旧, **{k: v for k, v in 新参数.items() if v is not None}}
         try:
             self.设置 = 播放设置(
                 网络缓存毫秒=int(合并.get("网络缓存毫秒") or 8000),

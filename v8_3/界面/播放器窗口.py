@@ -636,13 +636,33 @@ class 播放器窗口(QWidget):
                 self,
                 取自己窗口号们=lambda: [int(self.winId()),
                                  int(self.视频.winId())],
-                自愈回调=self._自愈画面,
+                发现回调=self._发现游离窗口,
                 日志=self._写日志,
                 间隔毫秒=3000, 巡检次数=0)      # 0 = 无限
         self._守护.开始(无限=True)
 
+    def _发现游离窗口(self, 找到=None) -> bool:
+        """巡检发现画面跑到 libvlc 自己的窗口里 → 交给会话做**安全回退**。
+
+        ⚠️ 不再走 _自愈画面 那套"停→绑→重播"，更不销毁 libvlc 的窗口：
+        那两条路要么修不好（重播还是同一个输出模块），要么把 VLC 弄僵导致卡死。
+        """
+        if self.会话 is None:
+            return False
+        标题 = "、".join(str(名) for _号, 名 in list(找到 or [])[:2])
+        try:
+            return bool(self.会话.安全回退画面(标题=标题))
+        except Exception as e:  # noqa: BLE001
+            self._写日志(f"[显示] 安全回退失败：{e}")
+            return False
+
     def _自愈画面(self) -> None:
-        """把画面收回本窗口：绑句柄 + 重开媒体 + 跳回原位置（同一个播放器）。"""
+        """把画面收回本窗口：绑句柄 + 重开媒体 + 跳回原位置（同一个播放器）。
+
+        ⚠️ 保留只为兼容旧调用；自动巡检**不再用它**（换成 :meth:`_发现游离窗口`
+        的安全回退）——"停→绑→重播"在画面跑到 VLC 自己窗口时修不好，
+        反复重播还会让用户看到画面反复重来。
+        """
         if self.会话 is None or self.会话.播放器 is None:
             return
         位置 = 0.0

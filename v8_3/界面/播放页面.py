@@ -45,6 +45,12 @@ from .播放清单 import 播放清单, 播放项
 from .vlc风格 import 构建菜单栏, 构建工具栏
 
 
+
+def 项目根目录() -> Path:
+    """项目根（v8_3/ 的上一级）——所有项目内路径都从这里算，不写死绝对路径。"""
+    return Path(__file__).resolve().parents[2]
+
+
 class 播放页面(QWidget):
     """播放页：一个播放会话 + 一套控件 + 一块 AI 面板。"""
 
@@ -688,12 +694,22 @@ class 播放页面(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
+    #: 这些前缀的诊断行**同时**写进主日志（数据/界面日志.txt）。
+    #: 为什么：以前 [播放]/[显示] 只进 AI 面板，用户报"多出 VLC 窗口/界面卡死"时，
+    #: 主日志里一行证据都没有，只能靠猜 —— 排查成本极高。
+    落盘前缀 = ("[播放]", "[显示]", "[画面]", "[卡死]")
+
     def _写日志(self, 文本: str) -> None:
         """真正的控件更新（只在界面线程执行）。"""
         try:
             self.AI输出.appendPlainText(f"[{datetime.now():%H:%M:%S}] {文本}")
             滚动 = self.AI输出.verticalScrollBar()
             滚动.setValue(滚动.maximum())
+        except Exception:
+            pass
+        try:
+            if str(文本).lstrip().startswith(self.落盘前缀):
+                self.主窗口.追加日志(str(文本))
         except Exception:
             pass
 
@@ -977,17 +993,106 @@ class 播放页面(QWidget):
             return True
 
     def _起守护(self) -> None:
-        """起"游离窗口"巡检：libvlc 要是自己开窗口放视频，就自动收回到页面里。"""
+        """起"游离窗口"巡检：libvlc 要是自己开窗口放视频，就报告 + 安全回退。
+
+        ⚠️ 只做**安全**动作（改回默认输出并重载），绝不发 WM_DELETE / XDestroyWindow：
+        那个窗口是 libvlc 正在渲染的画布，从外面销毁会把 VLC 的 vout 线程弄僵，
+        之后任何停止/释放都会一直等它 —— 界面就彻底卡死了。
+        """
         if getattr(self, "_守护", None) is None:
             from .游离窗口守护 import 游离窗口守护
             self._守护 = 游离窗口守护(
                 self,
                 取自己窗口号们=lambda: [int(self.winId()),
                                  int(self.视频.winId())],
-                自愈回调=self._自愈画面,
+                发现回调=self._发现游离窗口,
                 日志=self._AI写,
                 间隔毫秒=3000, 巡检次数=0)      # 0 = 无限，播放期间一直盯着
         self._守护.开始(无限=True)
+
+    #: 播放期间界面线程多久没转就算"卡死"（毫秒）。
+    #: 日志是**队列式**的（界面线程不转就不落盘），所以卡死时主日志会突然断掉 ——
+    #: 必须由旁路线程直接把现场写文件，否则事后什么都查不到。
+    卡死阈值毫秒 = 5000
+
+    def _起卡死看门狗(self) -> None:
+        """播放期间盯界面线程：真卡死就把**所有线程的栈**写进 数据/卡顿诊断.log。
+
+        为什么值得加：用户报"关一下播放，界面彻底卡死"这类问题时，事后只能靠现场；
+        这个看门狗用 faulthandler 把每个线程卡在哪一行原样记下来，下次复发直接定位。
+        """
+        if getattr(self, "_卡死线程", None) is not None:
+            return
+        import faulthandler
+        import threading
+        import time as _t
+
+        self._卡死心跳 = _t.time()
+        self._卡死停 = False
+        心跳计时 = QTimer(self)
+        心跳计时.setInterval(300)
+        心跳计时.timeout.connect(lambda: setattr(self, "_卡死心跳", _t.time()))
+        心跳计时.start()
+        self._卡死计时器 = 心跳计时
+
+        def 看门狗() -> None:
+            报过 = False
+            while not getattr(self, "_卡死停", False):
+                _t.sleep(1.0)
+                停 = _t.time() - getattr(self, "_卡死心跳", _t.time())
+                if 停 * 1000 < self.卡死阈值毫秒:
+                    报过 = False
+                    continue
+                if 报过:
+                    continue
+                报过 = True
+                try:
+                    路径 = Path(self.主窗口.配置.get("数据目录") or "") \
+                        if isinstance(self.主窗口.配置, dict) else Path("")
+                    路径 = 路径 / "卡顿诊断.log" if str(路径) else \
+                        (项目根目录() / "数据" / "卡顿诊断.log")
+                    路径.parent.mkdir(parents=True, exist_ok=True)
+                    现场 = ""
+                    try:
+                        现场 = (f"播放状态={self.会话.播放器.状态 if self.会话 and self.会话.播放器 else '-'}"
+                              f"｜进度={self.会话.播放器.进度秒() if self.会话 and self.会话.播放器 else '-'}"
+                              f"｜窗口句柄={self._安全句柄()}")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    with open(路径, "a", encoding="utf-8") as f:
+                        f.write(f"\n===== [{datetime.now():%H:%M:%S}] 界面线程卡死 "
+                                f"{停:.1f} 秒（播放中）{现场} =====\n")
+                        faulthandler.dump_traceback(file=f, all_threads=True)
+                        f.write("===== 卡死现场结束 =====\n")
+                except Exception:  # noqa: BLE001 - 看门狗自己绝不能把程序搞崩
+                    pass
+
+        线程 = threading.Thread(target=看门狗, name="卡死看门狗", daemon=True)
+        self._卡死线程 = 线程
+        线程.start()
+
+    def _停卡死看门狗(self) -> None:
+        self._卡死停 = True
+        self._卡死线程 = None
+        try:
+            if getattr(self, "_卡死计时器", None) is not None:
+                self._卡死计时器.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _发现游离窗口(self, 找到=None) -> bool:
+        """巡检发现画面跑到 libvlc 自己的窗口里 → 交给会话做安全回退。
+
+        :return: True = 已经处理（回退过一次），False = 处理不了，让守护如实报日志。
+        """
+        标题 = "、".join(str(名) for _号, 名 in list(找到 or [])[:2])
+        if self.会话 is None:
+            return False
+        try:
+            return bool(self.会话.安全回退画面(标题=标题))
+        except Exception as e:  # noqa: BLE001
+            self._AI写(f"[显示] 安全回退失败：{e}")
+            return False
 
     def _自愈画面(self) -> None:
         """把画面收回播放页（同一个播放器：**先停住** → 绑句柄 → 重开媒体 → 跳回位置）。
@@ -1041,6 +1146,7 @@ class 播放页面(QWidget):
         # 巡检要**在起播前**就开始：VLC 恰恰是在 set_xwindow 那一刻自己开窗口的，
         # 等起播成功再开巡检，头几秒的"分离"就漏过去了（用户实测的现象）
         self._起守护()
+        self._起卡死看门狗()
         # 窗口还没映射好就把句柄交给 libvlc，它会自己开窗口放（"视频和播放器分离"）
         if not self._已映射() and not getattr(self, "_本次独立窗口", False):
             # 轮询等（90ms × 最多 28 次 ≈ 2.5 秒）：**窗口没真的上屏就不把句柄交给
@@ -1182,6 +1288,7 @@ class 播放页面(QWidget):
             return
         self.会话.关闭()
         self.定时器.stop()
+        self._停卡死看门狗()
         if getattr(self, "_守护", None) is not None:
             self._守护.停止()
         self.进度条.setValue(0)
@@ -1729,6 +1836,7 @@ class 播放页面(QWidget):
 
     def 关闭(self) -> None:
         self.定时器.stop()
+        self._停卡死看门狗()
         if getattr(self, "_守护", None) is not None:
             self._守护.停止()
         self._关闭独立窗口()

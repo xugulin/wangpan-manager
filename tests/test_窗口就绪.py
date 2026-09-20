@@ -7,7 +7,10 @@ from __future__ import annotations
 import os
 import unittest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 没有显示环境时**强制**离屏：本机环境里 QT_QPA_PLATFORM="wayland;xcb"，
+# setdefault 改不动它，Qt 会依次试 wayland/xcb 然后直接 abort（实测 core dump）。
+if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from PySide6.QtWidgets import QApplication, QWidget    # noqa: E402
 

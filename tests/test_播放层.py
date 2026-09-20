@@ -785,3 +785,101 @@ class 缓存下限保护测试(unittest.TestCase):
         会话.播放器 = None
         # 没有播放器时状态快照是"未开始"，不该乱建议
         self.assertIsNone(会话.规则诊断())
+
+
+class _假播放器:
+    """只为"有播放器对象"而存在（安全回退只判断 None，不真调 VLC）。"""
+
+    窗口句柄 = 0
+
+    def 进度秒(self) -> float:
+        return 0.0
+
+
+class 嵌入播放输出测试(unittest.TestCase):
+    """画面嵌进我们窗口时，不许用"会自己开窗口"的视频输出。
+
+    用户实测：播 4K/60fps（吃力片源 → 规则给 ``:vout=gl``）时，屏幕上多出来一个
+    标题为 ``VLC media player`` 的顶层窗口在放同一个视频 —— GL 输出不画进别人的窗口，
+    libvlc 就自己开了一个。这里的几条就是防止它再回来。
+    """
+
+    def _会话(self):
+        from v8_3.播放.播放核心 import (播放会话, 媒体信息, 探测结果, 规则参数)
+        会话 = 播放会话(取适配器=lambda *_: None, 日志回调=None,
+                    探测直链开关=False, 探测媒体开关=False)
+        会话.媒体 = 媒体信息(宽=3840, 高=2160, 档位="4K",
+                        视频码率bps=12_700_000, 帧率=60.0)
+        会话.探测 = 探测结果(成功=True, 实测带宽bps=13_000_000)
+        会话.设置 = 规则参数(会话.媒体, 会话.探测, ["vaapi"])
+        return 会话
+
+    def test_吃力片源的规则确实会给gl(self):
+        """先把前提钉住：4K60 的规则本来就选 gl（所以必须由起播那边拦掉）。"""
+        self.assertEqual(self._会话().设置.视频输出, "gl")
+
+    def test_嵌入时剔掉gl且不动其它选项(self):
+        会话 = self._会话()
+        选项 = 会话._去掉自开窗口的输出模块(
+            [":network-caching=8000", ":vout=gl", ":avcodec-hw=vaapi"], 12345)
+        self.assertNotIn(":vout=gl", 选项, "嵌入播放不能再用 gl 输出")
+        self.assertIn(":network-caching=8000", 选项)
+        self.assertIn(":avcodec-hw=vaapi", 选项, "硬解等其它选项不许被牵连")
+
+    def test_不嵌入时gl留着(self):
+        会话 = self._会话()
+        选项 = 会话._去掉自开窗口的输出模块([":vout=gl"], 0)
+        self.assertIn(":vout=gl", 选项, "没有嵌入窗口时 gl 是可以用的")
+
+    def test_应用新参数能把视频输出清空(self):
+        """回归：以前重载时 ``视频输出=""`` 被当"没给"过滤掉，等于没改回默认输出。"""
+        会话 = self._会话()
+        会话.应用新参数({"视频输出": ""}, 自动重载=False)
+        self.assertEqual(会话.设置.视频输出, "",
+                         "清空视频输出必须真的生效（否则兜底重载还是 gl）")
+
+    def test_安全回退按阶梯走且不无限重载(self):
+        """回退是**阶梯**（先去 gl 输出 → 再关 GPU 解码），走完就停，不无限重载。"""
+        会话 = self._会话()
+        会话.播放器 = _假播放器()
+        次数: list = []
+        会话.应用新参数 = lambda *a, **k: (次数.append(a[0]), True)[1]
+        self.assertTrue(会话.安全回退画面("VLC media player"))     # 第 1 级
+        self.assertTrue(会话.安全回退画面("VLC media player"))     # 第 2 级
+        self.assertFalse(会话.安全回退画面("VLC media player"))    # 阶梯走完
+        self.assertEqual(len(次数), len(会话.画面回退阶梯))
+        self.assertEqual(次数[0].get("视频输出"), "")
+        self.assertEqual(次数[1].get("硬解"), "none")
+
+    def test_没有播放器时不回退(self):
+        会话 = self._会话()
+        会话.播放器 = None
+        self.assertFalse(会话.安全回退画面())
+
+
+class 守护不再破坏性处理测试(unittest.TestCase):
+    """游离窗口守护**不许**再销毁 libvlc 的窗口。
+
+    那个窗口是 libvlc 正在渲染的画布：从外面 XDestroyWindow 掉，VLC 的 vout 线程
+    就废了，之后任何 停止/释放 都要一直等它 —— 用户看到的就是"关一下播放，界面彻底卡死"。
+    """
+
+    def test_守护里没有任何销毁动作(self):
+        from v8_3.界面 import 游离窗口守护 as 模块
+        源码 = Path(模块.__file__).read_text(encoding="utf-8")
+        # 只查"真的调用了"这些破坏性函数（文档里提名字是允许的）
+        for 禁用 in ("游离窗口.销毁窗口", "游离窗口.清干净游离窗口",
+                   "游离窗口.请关闭窗口", "XDestroyWindow("):
+            self.assertNotIn(禁用, 源码, f"守护里不该再调用破坏性动作：{禁用}")
+        self.assertFalse(hasattr(模块.游离窗口守护, "_最后销毁"))
+        self.assertFalse(hasattr(模块.游离窗口守护, "_请它关闭"))
+
+    def test_发现后会交给宿主处理(self):
+        from v8_3.界面.游离窗口守护 import 游离窗口守护
+        收到: list = []
+        守护 = 游离窗口守护(
+            None, 取自己窗口号们=lambda: [1, 2],
+            发现回调=lambda 找到=None: (收到.append(找到), True)[1],
+            日志=lambda *_: None)
+        守护._交给宿主([(99, "VLC media player")])
+        self.assertEqual(len(收到), 1, "发现游离窗口要交给宿主的处理函数")
