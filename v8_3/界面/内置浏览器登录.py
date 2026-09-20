@@ -97,7 +97,8 @@ class 内置浏览器登录窗口(QDialog):
     """在程序里打开网盘网页登录，登录完成后把凭证交给调用方。"""
 
     #: 多久查一次"凭证够不够了"（毫秒）
-    检查间隔毫秒 = 1500
+    #: 轮询间隔：既看『凭证齐没齐』，也充当『等 Chromium 落盘』的非阻塞重试
+    检查间隔毫秒 = 1200
 
     def __init__(self, 网盘类型: str, 父=None,
                  完成回调: Optional[Callable[[dict], None]] = None,
@@ -174,6 +175,11 @@ class 内置浏览器登录窗口(QDialog):
         self._计时.setInterval(int(self.检查间隔毫秒))
         self._计时.timeout.connect(self._查凭证)
         self._计时.start()
+        # 自动收割的第二条腿：网络层一有新 cookie 就立刻查（比等轮询快一拍）
+        try:
+            self.引擎.挂cookie回调(self._新cookie到了)
+        except Exception:
+            pass
 
     # ---------------- 视图 ----------------
 
@@ -343,6 +349,15 @@ class 内置浏览器登录窗口(QDialog):
                     self._收字典(干净)
         except Exception:
             pass
+
+    def _新cookie到了(self) -> None:
+        """引擎通知『收到新 cookie』：让出事件循环后再查（sqlite 落盘要一点时间）。
+
+        直接在信号回调里读常常读到空 —— 用 QTimer.singleShot 延后 400ms。
+        """
+        if self._已回调:
+            return
+        QTimer.singleShot(400, self._查凭证)
 
     def _查凭证(self) -> None:
         """看凭证够不够；够了就自动回调（用户不用手动点）。

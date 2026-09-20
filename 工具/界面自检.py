@@ -2408,6 +2408,23 @@ def main() -> int:
             泵(0.05)
         检查(not _空抓到 and "未提交" in _空窗.状态标签.text(),
              "没取到 cookie 时不回调（状态：" + _空窗.状态标签.text()[:20] + "）")
+        # 自动收割：引擎报"收到新 cookie"→ 窗口延后一拍去查（不用等 1.2 秒轮询）
+        _收引擎 = _假引擎2()
+        _收割抓到: list = []
+        _收窗 = _内置窗口("baidu", None,
+                       完成回调=lambda c: _收割抓到.extend(c or []),
+                       引擎=_收引擎)
+        _收窗.show()
+        _收引擎.预置cookie([
+            {"name": "BDUSS", "value": "B" * 32, "domain": ".baidu.com"},
+            {"name": "STOKEN", "value": "S" * 32, "domain": ".pan.baidu.com"}])
+        _收窗._新cookie到了()          # 模拟引擎的 cookieAdded 通知
+        for _ in range(30):
+            泵(0.05)
+        检查(bool(_收割抓到),
+             "自动收割：引擎报『收到新 cookie』后窗口立刻收割（"
+             + str(len(_收割抓到)) + " 条）")
+        _收窗.close()
         _窗._收字典({"name": "STOKEN", "value": "x" * 8,
                   "domain": ".pan.baidu.com", "httpOnly": True})
         _名 = [c["name"] for c in _窗._凭证]

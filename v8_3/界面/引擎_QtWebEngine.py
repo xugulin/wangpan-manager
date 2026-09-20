@@ -151,6 +151,12 @@ class QtWebEngine引擎(浏览器引擎):
             self._profile = QWebEngineProfile.defaultProfile()
         try:
             self._profile.cookieStore().loadAllCookies()
+            # 网络层收到新 cookie 的信号：登录成功那一刻就通知窗口收割
+            # （不必等轮询；注意历史 cookie 不会触发该信号，所以轮询仍要留着）
+            try:
+                self._profile.cookieStore().cookieAdded.connect(self._有新cookie)
+            except Exception:
+                pass
         except Exception:
             pass
         self._视图 = QWebEngineView(self.父)
@@ -277,11 +283,28 @@ class QtWebEngine引擎(浏览器引擎):
 
     # ---------------- 凭证 ----------------
 
+    def 挂cookie回调(self, 回调) -> None:
+        """注册『网络层收到新 cookie』的回调（登录成功那一刻立刻收割）。"""
+        self._cookie回调 = 回调
+
+    def _有新cookie(self, _饼=None) -> None:
+        """转发 cookieStore.cookieAdded。
+
+        注意：只有**新收到**的 cookie 才发信号；已在库里（持久化 profile 重开）
+        的历史 cookie 不会触发 —— 所以窗口那边的定时轮询仍要保留（两条腿才稳）。
+        """
+        回调 = getattr(self, "_cookie回调", None)
+        if callable(回调):
+            try:
+                回调()
+            except Exception:
+                pass
+
     #: 直读 cookie 库失败时重试几次、每次间隔多少秒
     #: （用户刚在内置浏览器里点完"登录"，Chromium 把 cookie 写进 sqlite 需要一点时间；
     #   实测踩过：窗口一关就报"已捕获 0 条 cookie"，其实几秒后 cookie 就在库里了）
-    取cookie重试 = 4
-    取cookie间隔秒 = 0.7
+    取cookie重试 = 1
+    取cookie间隔秒 = 0.0
 
     def 取cookie(self, 只要名字: tuple[str, ...] = (),
               域们: tuple[str, ...] = ()) -> list[dict]:

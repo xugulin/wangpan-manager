@@ -88,7 +88,7 @@ class 百度节流测试(unittest.TestCase):
                 if 登录态回令牌:
                     return httpx.Response(200, json={
                         "errno": 0,
-                        "login_info": {"uk": 455281002, "username": "u",
+                        "login_info": {"uk": 1234567890, "username": "u",
                                        "bdstoken": self.登录态给令牌},
                     })
                 return httpx.Response(200, json={
@@ -196,7 +196,7 @@ class 百度节流测试(unittest.TestCase):
         self.assertEqual(令牌, self.登录态给令牌)
         self.assertEqual(self.仓库.获取bdstoken(), self.登录态给令牌,
                          "拿到的 bdstoken 要落进会话仓库（写接口要用）")
-        self.assertEqual(str(self.仓库.获取uk()), "455281002")
+        self.assertEqual(str(self.仓库.获取uk()), "1234567890")
 
     def test_登录态也失效时报错而不是假装成功(self):
         服务 = self._装网络(登录态回令牌=False)

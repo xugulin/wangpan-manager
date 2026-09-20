@@ -6,7 +6,7 @@
 三个端点均来自真机实测（见 PLAN.md §6.5）：
 
   1. GET /api/gettemplatevariable?fields=["bdstoken","token","uk","isdocuser","servertime"]
-     → { errno:0, result:{ bdstoken:"<32hex>", token:"<32hex>", uk:455281002,
+     → { errno:0, result:{ bdstoken:"<32hex>", token:"<32hex>", uk:1234567890,
                            isdocuser:1, servertime:1789325407 } }
      **这是会话引导入口** —— 登录后第一件事就是取 bdstoken + uk。
 

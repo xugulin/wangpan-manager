@@ -264,7 +264,7 @@
 | `isdir` | 0 / 1 | **是否目录**（1=目录）。目录的 size=0、category=6 |
 | `category` | 1/3/4/5/6 | 文件分类，见下方对照表 |
 | `real_category` | `''` `png` `rar` `pptx/xlsx/docx/zip` … | **真实类型字符串**，比 `category` 更细（11 种取值）。目录恒为 `''` |
-| `oper_id` | `0` / `455281002` | **最后操作者的 uk**。`455281002` 正是本人 uk（181 条恰为我刚上传的文件）；`0` = 无操作记录 |
+| `oper_id` | `0` / `1234567890` | **最后操作者的 uk**。`1234567890` 正是本人 uk（181 条恰为我刚上传的文件）；`0` = 无操作记录 |
 | `owner_id` | `0` / 各 uk | **文件所有者 uk**。`0` = 自己 |
 | `owner_type` | 0 / 1 | **0 = 自己拥有**（配 `owner_id=0`，224 条）；**1 = 他人拥有**（配 `owner_id=<对方 uk>`，182 条，来自分享转存） |
 | `share` | 0 / 1 | 是否已处于分享中（406 条中 3 条为 1） |
@@ -331,7 +331,7 @@
   "bduss_bfess": "<redacted>", // BDUSS 的 BFE 边缘节点变体（可选冗余，实测可互换）
   "stoken":  "<redacted>",     // ⚠️ 实测为「所有业务请求」的硬性必需项，非仅分享场景
   "bdstoken": "<32位hex>",     // CSRF，会随会话变化，需定期重取
-  "uk":      455281002,        // 用户 ID
+  "uk":      1234567890,        // 用户 ID
   "baiduid": "<redacted>",     // 设备标识（非必需，服务端会自动下发）
   "更新时间": 1789325407
 }
@@ -966,7 +966,7 @@ GET /share/list?shorturl=<短码>&page=1&num=20&root=1&web=1&app_id=250528&chann
 
 ```
 GET /api/gettemplatevariable?fields=["bdstoken","token","uk","isdocuser","servertime"]&...
-→ { errno:0, result:{ bdstoken:"<32hex>", token:"<32hex>", uk:455281002,
+→ { errno:0, result:{ bdstoken:"<32hex>", token:"<32hex>", uk:1234567890,
                       isdocuser:1, servertime:1789325407 } }
 
 GET /api/user/getinfo?need_boardinfo=1&user_list=[<uk>]&...
@@ -1020,7 +1020,7 @@ GET /api/download?fidlist=[1091211382042161]&type=dlink&vip=2&sign=<56字符>&ti
 
 ② 一级跳转（d.pcs.baidu.com）
 GET https://d.pcs.baidu.com/file/<md5>
-    ?fid=455281002-250528-1091211382042161&rt=pr&sign=<70字符>&expires=8h
+    ?fid=1234567890-250528-1091211382042161&rt=pr&sign=<70字符>&expires=8h
     &chkv=1&chkbd=1&chkpc=&dp-logid=...&dstime=...&r=...&vip=2&response-cache-control=private
 → HTTP 302  Location: https://bdbl-cm01.baidupcs.com/file/<md5>?bkt=...&...
 
@@ -1028,11 +1028,11 @@ GET https://d.pcs.baidu.com/file/<md5>
 GET https://bdbl-cm01.baidupcs.com/file/<md5>
     ?bkt=en-2bd419aa17f4904f971a37d47730b9167d0a5&fid=...&time=...&sign=<82字符>
     &to=401&size=46915493&sta_dx=46915493&sta_cs=0&sta_ft=zip&...
-    &vuk=455281002&pkey=en-...&expires=8h&fin=...&fn=...&by=themis&ccn=CN
+    &vuk=1234567890&pkey=en-...&expires=8h&fin=...&fn=...&by=themis&ccn=CN
 → HTTP 200（文件字节流，实测 size=46915493 ≈ 46.9 MB）
 ```
 
-> 注意 ② 的 `fid` 格式是 `uk-appid-fs_id` 三段拼接（`455281002-250528-1091211382042161`）。
+> 注意 ② 的 `fid` 格式是 `uk-appid-fs_id` 三段拼接（`1234567890-250528-1091211382042161`）。
 
 **✅ 首选路线（免签名，Phase 5 直接可用）**
 
@@ -1131,7 +1131,7 @@ GET https://bdbl-cm01.baidupcs.com/file/<md5>
 | `logid` = base64(`<14位>.<17位>`) | ✅ |
 | 会话仓库解析 `cookies.txt` → 命中 5 个（BAIDUID/BFESS/BDUSS/BFESS/STOKEN） | ✅ |
 | 剔除 BAIDUID 后仍有效（符合 §4.6） | ✅ |
-| `GET /api/gettemplatevariable` → `uk=455281002`、`bdstoken` 形态 hex32 | ✅ |
+| `GET /api/gettemplatevariable` → `uk=1234567890`、`bdstoken` 形态 hex32 | ✅ |
 | bdstoken/uk 自动回写会话仓库 | ✅ |
 | `GET /api/loginStatus` → `login_info` 8 个键 | ✅ |
 | `GET /api/user/getinfo` → `uname=x894**841`、`vip_level=6`、`vip_type=2` | ✅ |
