@@ -3,7 +3,7 @@
 移植 网盘管理_V8 / UI层/AI页面.py 的界面与信息（预算、时段、模型、价格表、
 调度器统计），改成跟 V8_3 的 :class:`~v8_3.AI.运行时.AI运行时` 打交道：
 
-* 顶部：价格来源 + 刷新价格；
+* 顶部：刷新价格；
 * 横幅：当前模型在"当前时段"的价格与便宜/中等/昂贵评价；
 * 🔑 密钥：页面上直接粘贴 / 保存 / 测试 / 清除 DeepSeek 云端密钥；
 * 🏠 本地模型：ollama 本地模型的开关、模型选择、检测/测速/启动/拉取；
@@ -143,11 +143,9 @@ class AI状态页面(QWidget):
             顶部.addWidget(钮)
             self.页签按钮[键] = 钮
         顶部.addStretch(1)
-        self.价格来源标签 = QLabel("💰 价格：加载中…")
-        self.价格来源标签.setStyleSheet(
-            "font-size: 12px; padding: 4px 10px; border-radius: 4px;"
-            "background: #34495e; color: #ecf0f1;")
-        顶部.addWidget(self.价格来源标签)
+        # 顶部原来还有一个"价格来源"小标签（`💰 📦 builtin | 内置兜底 | 3 个模型`），
+        # 按用户要求去掉了：这类内部信息（抓取来源、抓取时间、模型数）摆在页面顶部
+        # 既占地方又只有维护者看得懂。价格本身仍然照常显示在下面的价格表里。
         self.刷新价格按钮 = QPushButton("🔄 刷新价格")
         self.刷新价格按钮.clicked.connect(self._手动刷新价格)
         顶部.addWidget(self.刷新价格按钮)
@@ -392,11 +390,11 @@ class AI状态页面(QWidget):
         self.市场刷新按钮.clicked.connect(lambda: self._刷新市场目录(强制=True))
         工具行.addWidget(self.市场刷新按钮)
 
-        self.运行时按钮 = QPushButton("⬇️ 装运行时")
-        self.运行时按钮.setToolTip(
-            "下载官方便携版 ollama 到 **项目内** 运行环境/本地模型（不装系统、不要 sudo）。\n"
-            "约 2 GB；装好后就能在下面一键装模型。")
-        self.运行时按钮.clicked.connect(self._装运行时)
+        self.运行时按钮 = QPushButton("⬆️ 更新内置ollama")
+        # 详细提示（含当前内置版本）在 _刷新内置ollama提示() 里动态写，
+        # 这里只给一句兜底，免得市场还没加载完时按钮是"哑"的。
+        self.运行时按钮.setToolTip("包里已内置官方便携版 ollama 基座（CPU/Vulkan 后端）；点这里更新到官方最新版")
+        self.运行时按钮.clicked.connect(self._更新内置ollama)
         工具行.addWidget(self.运行时按钮)
 
         self.市场全部按钮 = QPushButton("📜 显示全部")
@@ -565,9 +563,35 @@ class AI状态页面(QWidget):
         self._市场已装 = dict(已装 or {})
         市场.合并已装状态(self._市场条目, self._市场已装)
         self._重绘市场卡片()
+        self._刷新内置ollama提示()
         if 注明:
             self.市场状态标签.setText(
                 f"📦 {len(self._市场条目)} 个模型 {注明}")
+
+    def _刷新内置ollama提示(self) -> None:
+        """把「内置 ollama 基座」的现状写进那个按钮的提示里。
+
+        故意不加新控件：AI 页已经很满，而用户看这个按钮时才知道要更新，
+        版本号放提示里最合适（也顺带把"路径是项目相对的"这件事显出来）。
+        """
+        头顶 = ("包里**已经内置**官方便携版 ollama 基座（只有运行时，不含任何模型权重）：\n"
+              "开箱即用，不需要自己装、不需要管理员权限，装模型之前也不用先联网。\n"
+              "只带 **CPU / Vulkan** 推理后端（CUDA 那两份合计 2 GB，带上包就翻倍，所以裁掉了）。\n")
+        尾巴 = ("\n这个按钮把它更新到官方最新版：下载 → 自检能跑 → 才替换，\n"
+              "全程都在项目内 运行环境/本地模型；中途失败或新版跑不起来会保留现在这份，\n"
+              "不会把能用的基座弄坏。\n"
+              "想连 CUDA 后端一起要（N 卡加速）：设环境变量 "
+              "V8_3_本地模型_带GPU后端=1 再点这个按钮。")
+        try:
+            from ..AI.本地模型 import 内置运行时说明, 内置运行时就位
+            说明 = 内置运行时说明()
+            缺 = not 内置运行时就位()
+        except Exception as e:  # noqa: BLE001
+            说明, 缺 = f"状态未知：{e}", False
+        现状 = f"\n当前：{说明}"
+        if 缺:
+            现状 += "\n⚠️ 基座缺失/被删了：点这个按钮补一份官方基座。"
+        self.运行时按钮.setToolTip(头顶 + 现状 + 尾巴)
 
     def _重绘市场卡片(self) -> None:
         市场 = self._市场模块()
@@ -811,12 +835,20 @@ class AI状态页面(QWidget):
         条目们 = 市场.排序并打分(list(self._市场条目), 权重)
         self._填市场(条目们, 注明="（已按新权重重排）")
 
-    def _装运行时(self) -> None:
-        """下载官方便携版 ollama 到项目内（不装系统、不需要 sudo）。"""
-        from ..AI.本地模型 import 下载便携运行时, 项目内可执行文件
-        if 项目内可执行文件().is_file():
-            QMessageBox.information(
-                self, "已就绪", f"项目内已有便携运行时：\n{项目内可执行文件()}")
+    def _更新内置ollama(self) -> None:
+        """把**内置**的便携版 ollama 基座更新到官方最新（不装系统、不需要 sudo）。"""
+        from ..AI.本地模型 import (下载便携运行时, 内置运行时版本,
+                                  相对项目路径, 项目内可执行文件)
+        可执行 = 项目内可执行文件()
+        旧版本 = 内置运行时版本()
+        现状 = f"v{旧版本}" if 旧版本 else ("未就位" if not 可执行.is_file() else "版本未知")
+        确认 = QMessageBox.question(
+            self, "更新内置 ollama",
+            f"当前内置：{现状}\n位置：{相对项目路径(可执行)}（项目内，随包发布，不含模型权重）\n\n"
+            "现在从官方下载最新的便携版并替换？\n"
+            "（压缩包约 1.4 GB；下载完先自检能跑、再裁掉 GPU 后端，\n"
+            "最终只占约 100 MB。更新期间现在这份仍可用，失败了也不会被弄坏。）")
+        if 确认 != QMessageBox.Yes:
             return
         状态 = {"文本": "开始下载…"}
 
@@ -825,18 +857,19 @@ class AI状态页面(QWidget):
                 状态["文本"] = f"下载中 {已下 / 1048576:.0f} / {总 / 1048576:.0f} MB"
 
         def 干():
-            return 下载便携运行时(进度回调=进度)
+            return 下载便携运行时(进度回调=进度, 强制=True)
 
         线程 = 任务线程(干, 父=self)
         线程.成功.connect(self._运行时完成)
-        线程.失败.connect(lambda e: self.市场状态标签.setText(f"❌ 下载运行时失败：{e}"))
+        线程.失败.connect(lambda e: self.市场状态标签.setText(f"❌ 更新内置 ollama 失败：{e}"))
         self._登记线程(线程)
-        self.市场状态标签.setText("⬇️ 正在下载便携版 ollama（约 2 GB，存到项目内）…")
+        self.市场状态标签.setText("⬆️ 正在更新内置 ollama（下载官方基座，约 1.4 GB）…")
         计时 = QTimer(self)
         计时.setInterval(800)
 
         def 滴答():
-            self.市场状态标签.setText(f"⬇️ {状态['文本']}（存到 运行环境/本地模型）")
+            self.市场状态标签.setText(
+                f"⬆️ {状态['文本']}（下载完会自检，再替换 运行环境/本地模型）")
 
         计时.timeout.connect(滴答)
         计时.start()
@@ -847,6 +880,7 @@ class AI状态页面(QWidget):
     def _运行时完成(self, 结果) -> None:
         好, 消息 = 结果 if isinstance(结果, (tuple, list)) else (False, str(结果))
         self.市场状态标签.setText(("✅ " if 好 else "❌ ") + str(消息))
+        self._刷新内置ollama提示()
         if 好:
             self.刷新本地模型(重新检测=True)
 
@@ -919,7 +953,7 @@ class AI状态页面(QWidget):
             self._刷新市场目录(强制=False)   # 刷新"本机已装"状态
             if not 好 and "没找到 ollama" in str(消息):
                 self.市场状态标签.setText(
-                    "❌ 还没装 ollama 运行时：点上面的「⬇️ 装运行时」")
+                    "❌ 内置 ollama 运行时不可用：点上面的「⬆️ 更新内置ollama」补一份官方基座")
 
         def 失败(错误):
             计时.stop()
@@ -1534,7 +1568,7 @@ class AI状态页面(QWidget):
         finally:
             框.blockSignals(False)
 
-        # 测速 / 启动服务：没有模型时不可用（启动服务仍要求"已装运行时"）
+        # 测速 / 启动服务：没有模型时不可用（启动服务仍要求"基座就位"，基座是内置的）
         usable = bool(已装)
         for 钮, 名字 in ((getattr(self, "测速按钮", None), "测速"),
                       (getattr(self, "启动服务按钮", None), "启动服务")):
@@ -1717,7 +1751,7 @@ class AI状态页面(QWidget):
                   忙碌文本=f"📥 正在拉取 {模型}…（可能要几分钟，日志页有进度）")
 
     def _一键装本地模型(self) -> None:
-        """一键装好离线模型：检测 → 下载便携运行时 → 启动 → 拉模型 → 打开开关。
+        """一键装好离线模型：检测 → 内置基座缺失就补 → 启动 → 拉模型 → 打开开关。
 
         整个过程（可能几十分钟的下载）都在后台线程里，界面全程可响应，
         进度实时写在状态标签上。
@@ -1729,9 +1763,9 @@ class AI状态页面(QWidget):
                 self, "一键装好离线模型",
                 "将自动完成：\n"
                 "  ① 检测本机推理服务\n"
-                "  ② 没有就把便携版 ollama 下到项目目录（不装系统、不需要管理员）\n"
+                "  ② 用包里**内置**的 ollama 基座（缺失/损坏才补一份官方基座）\n"
                 "  ③ 启动服务 ④ 拉取一个小模型（约 1 GB）⑤ 打开本地模型开关\n\n"
-                "下载量可能 1～2 GB，网络不好时会比较慢。现在开始？"
+                "基座已经内置，所以只下载模型权重（约 1 GB，网络不好时会比较慢）。现在开始？"
         ) != QMessageBox.Yes:
             return
 
@@ -1908,24 +1942,6 @@ class AI状态页面(QWidget):
             self.刷新价格按钮.setText("🔄 刷新价格")
         self._刷新价格区()
         self._刷新横幅()
-
-    def _刷新价格来源标签(self):
-        抓取器 = self._抓取器()
-        if 抓取器 is None:
-            self.价格来源标签.setText("💰 未接入价格抓取器")
-            return
-        try:
-            信息 = 抓取器.获取元信息() or {}
-            来源 = 信息.get("来源", "unknown")
-            时间戳 = float(信息.get("时间戳") or 0)
-            过期 = time.time() - 时间戳 if 时间戳 else 0
-            图标 = {"web": "🌐", "builtin": "📦"}.get(来源, "❓")
-            状态 = f"（已过期 {过期/3600:.1f}h）" if 过期 > self._价格过期阈值 else ""
-            self.价格来源标签.setText(
-                f"💰 {图标} {来源} | {信息.get('抓取时间', '?')} | "
-                f"{信息.get('模型数', 0)} 个模型 {状态}")
-        except Exception as e:  # noqa: BLE001
-            self.价格来源标签.setText(f"💰 状态未知：{e}")
 
     def _刷新价格表(self):
         抓取器 = self._抓取器()
@@ -2157,7 +2173,6 @@ class AI状态页面(QWidget):
             self.刷新本地模型()
         except Exception as e:  # noqa: BLE001
             self.本地状态标签.setText(f"🏠 本地模型刷新失败：{e}")
-        self._刷新价格来源标签()
         self._刷新价格表()
         self._刷新横幅()
         self._刷新状态UI()

@@ -16,10 +16,13 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 import sys
 
 项目根 = Path(__file__).resolve().parents[1]
@@ -305,6 +308,304 @@ class 助手集成测试(unittest.TestCase):
         self.assertTrue(摘要.get("可用"))
         self.assertTrue(摘要.get("启用"))
         self.assertIn("本地模型", 运行时.获取本地模型一行())
+
+
+class _假应答:
+    """假应答：给 Range 就按片给（206），不给就整份给（200）。"""
+
+    def __init__(self, 载荷: bytes, 支持分片: bool, 范围: str):
+        self.载荷, self.范围 = 载荷, 范围
+        if 支持分片 and 范围:
+            片段 = 范围.replace("bytes=", "").split("-")
+            起 = int(片段[0])
+            止 = int(片段[1]) if len(片段) > 1 and 片段[1] else len(载荷) - 1
+            self._数据 = 载荷[起:止 + 1]
+            self.status_code = 206
+            self.headers = {"content-range": f"bytes {起}-{止}/{len(载荷)}"}
+        else:
+            self._数据 = 载荷
+            self.status_code = 200
+            self.headers = {"content-length": str(len(载荷))}
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def iter_bytes(self, 块长: int):
+        for 起 in range(0, len(self._数据), 块长):
+            yield self._数据[起:起 + 块长]
+
+
+class _假流:
+    def __init__(self, 应答: _假应答):
+        self._应答 = 应答
+
+    def __enter__(self) -> _假应答:
+        return self._应答
+
+    def __exit__(self, *_: object) -> bool:
+        return False
+
+
+class _假httpx:
+    """只实现用到的 ``stream``。
+
+    ``支持分片=True`` 时按 ``Range`` 切片（模拟 GitHub）；
+    否则一律返回整份 200（模拟不认 Range 的服务端，代码必须退回单连接）。
+    """
+
+    Timeout = staticmethod(lambda *a, **k: None)
+
+    def __init__(self, 载荷: bytes, 支持分片: bool = False):
+        self._载荷, self._支持分片 = 载荷, 支持分片
+
+    def stream(self, *a, **k):
+        return _假流(_假应答(self._载荷, self._支持分片, (k.get("headers") or {}).get("Range", "")))
+
+
+def _造官方式包(版本文本: str, 压缩: str = "zst") -> bytes:
+    """造一个"官方形状"的包：``bin/ollama``（会应答 ``--version``）+ ``lib/ollama/``。
+
+    ``压缩="zst"`` = 现在官方的 ``.tar.zst``；``"gz"`` = 老的 ``.tgz``。
+    """
+    import io
+    import tarfile
+
+    缓存 = io.BytesIO()
+    with tarfile.open(fileobj=缓存, mode="w") as 包:
+        def 加(名: str, 内容: str, 模式: int) -> None:
+            数据 = 内容.encode("utf-8")
+            信息 = tarfile.TarInfo(名)
+            信息.size, 信息.mode = len(数据), 模式
+            包.addfile(信息, io.BytesIO(数据))
+
+        加("bin/ollama", f'#!/bin/sh\necho "ollama version is {版本文本}"\n', 0o755)
+        加("lib/ollama/占位.txt", "x", 0o644)
+        加("lib/ollama/cuda_v12/大.bin", "y" * 2048, 0o644)
+    裸 = 缓存.getvalue()
+    if 压缩 == "gz":
+        import gzip
+        return gzip.compress(裸)
+    from compression import zstd
+    return zstd.compress(裸)
+
+
+@unittest.skipIf(os.name == "nt", "假基座是 sh 脚本，Windows 上跑不了")
+class 内置ollama基座测试(unittest.TestCase):
+    """内置（随包发布）的 ollama 基座：不写死路径 + 更新"全有或全无"。
+
+    全部离线：归档自己造、网流用假的，不碰真 ollama、不发外部请求。
+    """
+
+    def _搭一个项目(self, 已有版本: str | None):
+        """临时项目目录；``已有版本`` 给定时先放一份"旧基座"进去。"""
+        临时 = tempfile.TemporaryDirectory()
+        根 = Path(临时.name)
+        (根 / "运行环境").mkdir(parents=True, exist_ok=True)
+        if 已有版本 is not None:
+            旧可执行 = 根 / "运行环境" / "本地模型" / "bin" / "ollama"
+            旧可执行.parent.mkdir(parents=True, exist_ok=True)
+            旧可执行.write_text(
+                f'#!/bin/sh\necho "ollama version is {已有版本}"\n', encoding="utf-8")
+            旧可执行.chmod(0o755)
+        return 临时, 根
+
+    def _跑更新(self, 根: Path, 包数据: bytes):
+        from v8_3.AI import 本地模型 as 模块
+        for 补 in (mock.patch.object(模块, "项目便携目录",
+                                   lambda: 根 / "运行环境" / "本地模型"),
+                   mock.patch.object(模块, "httpx", _假httpx(包数据)),
+                   mock.patch.object(模块, "便携版下载地址",
+                                   lambda: "https://例子.invalid/ollama-linux-amd64.tar.zst")):
+            补.start()
+            self.addCleanup(补.stop)
+        return 模块, 模块.下载便携运行时(强制=True), 模块.项目内可执行文件()
+
+    def test_安装根识别三种官方形状(self):
+        """Linux 是 bin/ollama、Windows 是 ollama.exe、也可能多套一层目录。"""
+        from v8_3.AI.本地模型 import _找安装根
+        with tempfile.TemporaryDirectory() as t:
+            根 = Path(t)
+            (根 / "bin").mkdir()
+            (根 / "bin" / "ollama").write_text("x", encoding="utf-8")
+            (根 / "lib" / "ollama").mkdir(parents=True)
+            self.assertEqual(_找安装根(根, "ollama"), 根)
+        with tempfile.TemporaryDirectory() as t:
+            根 = Path(t)
+            (根 / "ollama.exe").write_text("x", encoding="utf-8")
+            (根 / "lib" / "ollama").mkdir(parents=True)
+            self.assertEqual(_找安装根(根, "ollama.exe"), 根)
+        with tempfile.TemporaryDirectory() as t:
+            根 = Path(t)
+            内 = 根 / "ollama-linux-amd64"
+            (内 / "bin").mkdir(parents=True)
+            (内 / "bin" / "ollama").write_text("x", encoding="utf-8")
+            self.assertEqual(_找安装根(根, "ollama"), 内)
+
+    def test_路径全是项目相对的(self):
+        """界面/日志里出现的是项目相对路径，证明没有写死绝对路径。"""
+        from v8_3.AI.本地模型 import 项目根目录, 相对项目路径
+        在项目内 = 项目根目录() / "运行环境" / "本地模型" / "bin" / "ollama"
+        self.assertEqual(相对项目路径(在项目内), "运行环境/本地模型/bin/ollama")
+        self.assertEqual(相对项目路径("/etc/hosts"), "/etc/hosts")   # 项目外原样
+
+    def test_从零装上并报告版本(self):
+        临时, 根 = self._搭一个项目(已有版本=None)
+        self.addCleanup(临时.cleanup)
+        模块, (好, 消息), 可执行 = self._跑更新(根, _造官方式包("9.9.9"))
+        self.assertTrue(好, 消息)
+        self.assertIn("9.9.9", 消息)
+        self.assertTrue(可执行.is_file())
+        self.assertIn("9.9.9", 模块._跑版本(可执行))          # 真能跑起来
+        # lib/ 必须留在可执行文件旁边：ollama 靠相对位置找推理后端
+        self.assertTrue((根 / "运行环境" / "本地模型" / "lib" / "ollama").is_dir())
+
+    def test_更新会换成新版本并报出前后版本(self):
+        临时, 根 = self._搭一个项目(已有版本="0.1.0")
+        self.addCleanup(临时.cleanup)
+        模块, (好, 消息), 可执行 = self._跑更新(根, _造官方式包("9.9.9"))
+        self.assertTrue(好, 消息)
+        self.assertIn("0.1.0", 消息)
+        self.assertIn("9.9.9", 消息)
+        self.assertIn("9.9.9", 模块._跑版本(可执行))
+
+    def test_新版跑不起来时保留旧的(self):
+        """自检不过就回滚 —— 更新失败绝不能把能用的基座弄坏。"""
+        临时, 根 = self._搭一个项目(已有版本="0.1.0")
+        self.addCleanup(临时.cleanup)
+        模块, (好, 消息), 可执行 = self._跑更新(根, _造官方式包("坏"))
+        self.assertFalse(好, 消息)
+        self.assertIn("保留", 消息)
+        self.assertIn("0.1.0", 模块._跑版本(可执行))          # 旧基座还在
+        self.assertFalse((根 / "运行环境" / "本地模型.下载中").exists())
+        self.assertFalse((根 / "运行环境" / "本地模型.旧").exists())
+
+    def test_就位后默认不重新下载(self):
+        """幂等：已经内置好时，不强制就不该再去联网。"""
+        from v8_3.AI import 本地模型 as 模块
+        临时, 根 = self._搭一个项目(已有版本="0.1.0")
+        self.addCleanup(临时.cleanup)
+        补 = mock.patch.object(模块, "项目便携目录",
+                              lambda: 根 / "运行环境" / "本地模型")
+        补.start()
+        self.addCleanup(补.stop)
+        with mock.patch.object(模块, "httpx", None):
+            好, 消息 = 模块.下载便携运行时()                # 不强制 → 直接返回
+        self.assertTrue(好, 消息)
+        self.assertIn("已就位", 消息)
+
+    def test_分片下载拼回原样并清理分片(self):
+        """Range 并发下载：拼出来必须和原始数据一模一样，临时分片要清干净。"""
+        from v8_3.AI import 本地模型 as 模块
+        载荷 = bytes(range(256)) * (300 * 1024)        # ~77 MB，够触发分片
+        with tempfile.TemporaryDirectory() as t:
+            目标 = Path(t) / "pkg.bin"
+            进度: list = []
+            with mock.patch.object(模块, "httpx", _假httpx(载荷, 支持分片=True)):
+                模块._下到文件("https://例子.invalid/x", 目标,
+                            lambda 已, 总: 进度.append((已, 总)))
+            self.assertEqual(目标.read_bytes(), 载荷)
+            self.assertEqual(进度[-1][1], len(载荷))     # 总量报对了
+            self.assertEqual(进度[-1][0], len(载荷))     # 下满了
+            self.assertEqual([p.name for p in Path(t).iterdir()], ["pkg.bin"])
+
+    def test_不支持Range就退回单连接(self):
+        """服务端不认 Range（返回 200）时，不能硬上分片，要走单连接。"""
+        from v8_3.AI import 本地模型 as 模块
+        载荷 = b"z" * (40 * 1024 * 1024)
+        with tempfile.TemporaryDirectory() as t:
+            目标 = Path(t) / "pkg.bin"
+            with mock.patch.object(模块, "httpx", _假httpx(载荷)):
+                模块._下到文件("https://例子.invalid/x", 目标)
+            self.assertEqual(目标.read_bytes(), 载荷)
+            self.assertEqual([p.name for p in Path(t).iterdir()], ["pkg.bin"])
+
+    def test_版本解析优先取客户端(self):
+        """本机跑着别的 ollama 时输出两行：先服务端版本、再客户端版本 —— 要后者。"""
+        from v8_3.AI.本地模型 import _跑版本
+        with tempfile.TemporaryDirectory() as t:
+            假 = Path(t) / "ollama"
+            假.write_text('#!/bin/sh\necho "ollama version is 0.34.1"\n'
+                         'echo "Warning: client version is 0.34.2"\n', encoding="utf-8")
+            假.chmod(0o755)
+            self.assertEqual(_跑版本(假), "0.34.2")
+        with tempfile.TemporaryDirectory() as t:
+            假 = Path(t) / "ollama"
+            假.write_text('#!/bin/sh\necho "ollama version is 9.9.9"\n', encoding="utf-8")
+            假.chmod(0o755)
+            self.assertEqual(_跑版本(假), "9.9.9")
+
+    def test_老的tgz包也认得出来(self):
+        """按文件头判断格式：内容是 gzip 的旧包，哪怕地址写着 .tar.zst 也能解。"""
+        临时, 根 = self._搭一个项目(已有版本=None)
+        self.addCleanup(临时.cleanup)
+        模块, (好, 消息), 可执行 = self._跑更新(根, _造官方式包("9.9.9", 压缩="gz"))
+        self.assertTrue(好, 消息)
+        self.assertIn("9.9.9", 模块._跑版本(可执行))
+
+    def test_更新后会裁掉GPU后端(self):
+        """更新路径也要保证"小包"：下完自动裁 CUDA。"""
+        临时, 根 = self._搭一个项目(已有版本="0.1.0")
+        self.addCleanup(临时.cleanup)
+        模块, (好, 消息), _ = self._跑更新(根, _造官方式包("9.9.9"))
+        self.assertTrue(好, 消息)
+        self.assertIn("裁掉 GPU 后端", 消息)
+        self.assertFalse((根 / "运行环境" / "本地模型" / "lib" / "ollama"
+                          / "cuda_v12").exists())
+
+    def test_裁掉GPU后端只留CPU与vulkan(self):
+        """官方整包 2.1 GB 里 CUDA 占 ~2 GB；发布包只留 CPU/Vulkan（GitHub 单资源 2 GiB）。"""
+        from v8_3.AI import 本地模型 as 模块
+        临时, 根 = self._搭一个项目(已有版本="0.1.0")
+        self.addCleanup(临时.cleanup)
+        库 = 根 / "运行环境" / "本地模型" / "lib" / "ollama"
+        (库 / "vulkan").mkdir(parents=True)
+        (库 / "vulkan" / "v.bin").write_bytes(b"x" * 100)
+        for 名 in ("cuda_v12", "cuda_v13", "rocm"):
+            (库 / 名).mkdir()
+            (库 / 名 / "大.bin").write_bytes(b"y" * 1000)
+        for 补 in (mock.patch.object(模块, "项目便携目录",
+                                   lambda: 根 / "运行环境" / "本地模型"),
+                   mock.patch.object(模块, "带GPU后端", False)):
+            补.start()
+            self.addCleanup(补.stop)
+        省了, 裁了 = 模块.精简推理后端()
+        self.assertEqual(sorted(裁了), ["cuda_v12", "cuda_v13", "rocm"])
+        self.assertEqual(省了, 3000)
+        self.assertTrue((库 / "vulkan").is_dir())            # vulkan 要留着
+        self.assertFalse((库 / "cuda_v12").exists())
+        self.assertEqual(模块.精简推理后端(), (0, []))         # 幂等
+
+    def test_带GPU后端时不动它(self):
+        """设了 V8_3_本地模型_带GPU后端=1 就别裁（想用 N 卡加速的人自己选）。"""
+        from v8_3.AI import 本地模型 as 模块
+        临时, 根 = self._搭一个项目(已有版本="0.1.0")
+        self.addCleanup(临时.cleanup)
+        库 = 根 / "运行环境" / "本地模型" / "lib" / "ollama" / "cuda_v12"
+        库.mkdir(parents=True)
+        (库 / "大.bin").write_bytes(b"y" * 10)
+        for 补 in (mock.patch.object(模块, "项目便携目录",
+                                   lambda: 根 / "运行环境" / "本地模型"),
+                   mock.patch.object(模块, "带GPU后端", True)):
+            补.start()
+            self.addCleanup(补.stop)
+        self.assertEqual(模块.精简推理后端(), (0, []))
+        self.assertTrue(库.is_dir())
+
+    def test_说明里给出项目相对路径(self):
+        临时, 根 = self._搭一个项目(已有版本="0.1.0")
+        self.addCleanup(临时.cleanup)
+        from v8_3.AI import 本地模型 as 模块
+        补 = mock.patch.object(模块, "项目便携目录",
+                              lambda: 根 / "运行环境" / "本地模型")
+        补.start()
+        self.addCleanup(补.stop)
+        说明 = 模块.内置运行时说明()
+        self.assertIn("v0.1.0", 说明)
+        self.assertIn("运行环境/本地模型", 说明)
+        # 界面文案里绝不出现绝对路径（临时项目在项目外，所以这里用真项目再验一次）
+        真说明 = 模块.内置运行时说明()
+        self.assertNotIn(str(模块.项目根目录()), 真说明)
+        self.assertTrue("运行环境" in 真说明 or "未就位" in 真说明, 真说明)
 
 
 if __name__ == "__main__":

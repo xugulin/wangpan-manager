@@ -14,7 +14,7 @@ OpenAI 兼容      llama.cpp 的 ``llama-server``、LM Studio、vLLM、xinferenc
 ========
 * **自动探测**：不知道用户装的是哪种、端口是多少时，依次试 ``11434`` 与
   常见的 OpenAI 兼容端口（8080/8000/1234/5000/…），谁能通就用谁；
-* **零依赖**：只用 ``httpx``（V8_3 已有）；没有装运行时也不报错，
+* **零依赖**：只用 ``httpx``（V8_3 已有）；连内置基座都缺了也不报错，
   而是给出**可直接复制的安装/启动命令**（:meth:`本地模型客户端.安装指引`）；
 * **真免费**：本地调用不计费、不查价格、不受"高峰时段不调用"限制，
   :class:`对话结果` 里 ``费用`` 恒为 0、``来源`` 标记为 ``本地模型``；
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -43,6 +44,10 @@ except Exception:  # pragma: no cover - httpx 是 V8_3 的既有依赖
 __all__ = [
     "本地模型配置", "本地模型状态", "对话结果", "本地模型客户端",
     "取本地模型配置", "探测到的运行时", "默认模型", "候选端口",
+    # 内置（随包发布）的 ollama 基座
+    "项目根目录", "项目便携目录", "项目内可执行文件", "相对项目路径",
+    "内置运行时就位", "内置运行时版本", "内置运行时说明",
+    "便携版下载地址", "下载便携运行时", "精简推理后端", "带GPU后端",
 ]
 
 #: 默认拉取/使用的模型（1.5B 在纯 CPU 上也能跑动，约 1.1 GB）
@@ -213,9 +218,14 @@ class 对话结果:
         }
 
 
+def 项目根目录() -> Path:
+    """项目根（``v8_3/`` 的上一级）——所有项目内路径都从这里算，不写死绝对路径。"""
+    return Path(__file__).resolve().parents[2]
+
+
 def 项目便携目录() -> Path:
-    """项目内的便携运行时目录（一键安装就装这儿，不碰系统、不碰用户目录）。"""
-    return Path(__file__).resolve().parents[2] / "运行环境" / "本地模型"
+    """项目内的便携运行时目录（内置 ollama 基座就放这儿，不碰系统、不碰用户目录）。"""
+    return 项目根目录() / "运行环境" / "本地模型"
 
 
 def 项目内可执行文件() -> Path:
@@ -227,13 +237,73 @@ def 项目内可执行文件() -> Path:
     return 根 / 名字
 
 
+def 内置运行时就位() -> bool:
+    """内置（随包发布）的 ollama 基座在不在。"""
+    return 项目内可执行文件().is_file()
+
+
+def 相对项目路径(路径) -> str:
+    """把项目内的路径显示成**项目相对**路径。
+
+    界面/日志里一律用它，既不会泄露构建机或用户的家目录，
+    也顺带证明代码没有依赖任何写死的绝对路径。
+    """
+    try:
+        return str(Path(路径).resolve().relative_to(项目根目录()))
+    except Exception:  # noqa: BLE001 - 不在项目内就原样返回
+        return str(路径)
+
+
+def _跑版本(可执行: Path, 超时秒: float = 15.0) -> str:
+    """跑 ``<可执行> --version`` 取**这个文件自己**的版本；跑不起来返回空串。
+
+    ⚠️ 本机若已经跑着别的 ollama（很常见：系统装的那份），输出是两行::
+
+        ollama version is 0.34.1            ← 那个**服务端**的版本
+        Warning: client version is 0.34.2   ← 这个**二进制**的版本
+
+    内置的是这个文件，所以要的是后者 —— 优先匹配 ``client version``，
+    没有再退回第一个版本号（没有服务端时只有一行 ``ollama version is X``）。
+    """
+    try:
+        子 = subprocess.run([str(可执行), "--version"], capture_output=True,
+                            text=True, timeout=超时秒)
+    except Exception:  # noqa: BLE001 - 缺依赖/无执行权限/超时都算"取不到"
+        return ""
+    文本 = f"{子.stdout or ''}{子.stderr or ''}"
+    匹配 = re.search(r"client version is\s*(\d+\.\d+(?:\.\d+)?)", 文本)
+    if 匹配 is None:
+        匹配 = re.search(r"(\d+\.\d+(?:\.\d+)?)", 文本)
+    return 匹配.group(1) if 匹配 else ""
+
+
+def 内置运行时版本(超时秒: float = 15.0) -> str:
+    """内置 ollama 的版本号（如 ``0.34.1``）；没就位或跑不起来返回空串。"""
+    可执行 = 项目内可执行文件()
+    if not 可执行.is_file():
+        return ""
+    return _跑版本(可执行, 超时秒=超时秒)
+
+
+def 内置运行时说明(超时秒: float = 5.0) -> str:
+    """给界面用的一行说明（出现的是项目相对路径，不是绝对路径）。
+
+    默认超时压得比较短：它会被界面刷新调用，不能因为基座卡住就把界面顶住。
+    """
+    可执行 = 项目内可执行文件()
+    if not 可执行.is_file():
+        return "内置 ollama 未就位（点「⬆️ 更新内置ollama」拉一份官方基座）"
+    版本 = 内置运行时版本(超时秒=超时秒)
+    return f"内置 ollama {'v' + 版本 if 版本 else '（版本未知）'}｜{相对项目路径(可执行)}"
+
+
 def 模型仓库目录() -> Path:
     """本地模型权重放项目里（设 OLLAMA_MODELS），不写 ~/.ollama。"""
-    return Path(__file__).resolve().parents[2] / "数据" / "本地模型" / "模型"
+    return 项目根目录() / "数据" / "本地模型" / "模型"
 
 
 def 服务日志路径() -> Path:
-    return Path(__file__).resolve().parents[2] / "数据" / "本地模型" / "serve.log"
+    return 项目根目录() / "数据" / "本地模型" / "serve.log"
 
 
 def 模型环境() -> dict:
@@ -275,78 +345,299 @@ def _找可执行文件() -> str:
     return ""
 
 
+#: 只保留 CPU / Vulkan 推理后端：官方包里的 CUDA 目录占了 2 GB（整包 2.1 GB），
+#: 而发布包要能塞进 GitHub 单个资源 2 GiB 的限制里，所以默认裁掉 GPU 后端。
+#: 想连 GPU 后端一起要（N 卡加速）：设 ``V8_3_本地模型_带GPU后端=1``。
+带GPU后端 = bool(os.environ.get("V8_3_本地模型_带GPU后端"))
+
+#: 要裁掉的推理后端目录名（前缀匹配）。留下 CPU(ggml-cpu-*.so/dll) 与 vulkan。
+GPU后端前缀 = ("cuda", "rocm", "mlx")
+
+
+def 精简推理后端(根: Path | None = None) -> tuple[int, list[str]]:
+    """裁掉 GPU 推理后端，只留 CPU / Vulkan。返回 ``(释放字节, 删掉的目录名)``。
+
+    官方便携包里 ``lib/ollama/cuda_v12`` + ``cuda_v13`` 就有 ~2 GB，
+    而 CPU 那份只有一百多 MB —— 发布包默认要的是小包，所以下完（或打包前）
+    统一裁一次。裁掉后端不会影响 CPU 推理：ollama 会自己挑剩下的后端。
+
+    幂等：没有可裁的就返回 ``(0, [])``。
+    """
+    if 带GPU后端:
+        return 0, []
+    库目录 = (根 or 项目便携目录()) / "lib" / "ollama"
+    if not 库目录.is_dir():
+        return 0, []
+    释放 = 0
+    删了: list[str] = []
+    for 项 in sorted(库目录.iterdir()):
+        if not 项.is_dir() or not 项.name.lower().startswith(GPU后端前缀):
+            continue
+        try:
+            大小 = sum(f.stat().st_size for f in 项.rglob("*") if f.is_file())
+            shutil.rmtree(项)
+        except Exception:  # noqa: BLE001 - 裁不掉不算致命，包大一点而已
+            continue
+        释放 += 大小
+        删了.append(项.name)
+    return 释放, 删了
+
+
 def 便携版下载地址() -> str:
-    """官方便携包地址（Linux 是 tgz，Windows 是 zip）。"""
+    """官方便携包地址（Windows 是 zip，Linux 是 tar.zst）。
+
+    ⚠️ 2026-09 实测：官方**已经没有 ``.tgz`` 了**（那个地址 404），
+    Linux 侧改成了 ``.tar.zst``；.zst 用 Python 3.14 自带的 ``compression.zstd`` 解。
+    """
     if os.name == "nt":
         return "https://ollama.com/download/ollama-windows-amd64.zip"
     import platform
     架构 = platform.machine().lower()
     if 架构 in ("aarch64", "arm64"):
-        return "https://ollama.com/download/ollama-linux-arm64.tgz"
-    return "https://ollama.com/download/ollama-linux-amd64.tgz"
+        return "https://ollama.com/download/ollama-linux-arm64.tar.zst"
+    return "https://ollama.com/download/ollama-linux-amd64.tar.zst"
 
 
-def 下载便携运行时(进度回调=None) -> tuple[bool, str]:
-    """把官方便携版 ollama 下载并解压到**项目内** ``运行环境/本地模型``。
+def _找安装根(解压目录: Path, 名字: str) -> Optional[Path]:
+    """归档解开后，可执行文件所在的"安装根"。
+
+    官方两种包各是一种形状：
+
+    * Linux ``ollama-linux-amd64.tgz`` → ``bin/ollama`` + ``lib/ollama/…``；
+    * Windows ``ollama-windows-amd64.zip`` → ``ollama.exe`` + ``lib/ollama/…``。
+
+    ``lib/`` 必须留在可执行文件旁边（ollama 靠相对位置找推理后端），
+    所以这里返回的是**整棵子树要搬过去的那个根**，而不是单个可执行文件。
+    """
+    for 候选 in (解压目录, *[p for p in 解压目录.iterdir() if p.is_dir()]):
+        if (候选 / 名字).is_file() or (候选 / "bin" / 名字).is_file():
+            return 候选
+    for 候选 in 解压目录.rglob(名字):
+        if 候选.is_file():
+            return 候选.parent.parent if 候选.parent.name == "bin" else 候选.parent
+    return None
+
+
+def _解压便携包(压缩包: Path, 解开: Path) -> None:
+    """把官方便携包解到 ``解开``。
+
+    **按文件头判断格式，不看扩展名**：官方换过好几次打包方式
+    （``.tgz`` 已经 404 → 现在是 ``.tar.zst``，Windows 一直是 ``.zip``），
+    只认扩展名的话，哪天官方再改一次就又"解压失败"了。
+    """
+    import tarfile
+    import zipfile
+
+    with open(压缩包, "rb") as 文件:
+        头 = 文件.read(4)
+    if 头[:2] == b"PK":                      # zip
+        with zipfile.ZipFile(压缩包) as 包:
+            包.extractall(解开)
+        return
+    if 头 == b"\x28\xb5\x2f\xfd":            # zstd（PEP 784，Python 3.14+ 自带）
+        try:
+            from compression import zstd
+        except ImportError as e:
+            raise RuntimeError(
+                "这个 Python 没有 zstd 支持（要 3.14+），解不了官方 .tar.zst") from e
+        with open(压缩包, "rb") as 源:
+            with zstd.ZstdFile(源) as 流:
+                with tarfile.open(fileobj=流) as 包:
+                    包.extractall(解开)
+        return
+    if 头[:2] == b"\x1f\x8b":                # gzip（老的 .tgz）
+        with tarfile.open(压缩包, "r:gz") as 包:
+            包.extractall(解开)
+        return
+    with tarfile.open(压缩包) as 包:           # 裸 tar
+        包.extractall(解开)
+
+
+#: 分片下载的并发数。国内直连 GitHub 常被"单连接限速"（实测约 100 KB/s），
+#: 同一条线路开 8~12 个连接能跑到 ~10 MB/s —— 1.4 GB 的基座从几小时降到几分钟。
+分片并发数 = 8
+#: 太小的文件不值得分片（几百 KB 分片反而更慢）
+分片最小体积 = 32 * 1024 * 1024
+
+
+def _报进度(进度回调, 已下: int, 总量: int) -> None:
+    if 进度回调 is None:
+        return
+    try:
+        进度回调(已下, 总量)
+    except Exception:  # noqa: BLE001 - 回调是界面的事，不能影响下载
+        pass
+
+
+def _单连接下(地址: str, 目标: Path, 进度回调, 超时) -> None:
+    已下 = 0
+    with httpx.stream("GET", 地址, follow_redirects=True, timeout=超时) as 应答:
+        应答.raise_for_status()
+        总量 = int(应答.headers.get("content-length") or 0)
+        with open(目标, "wb") as 文件:
+            for 块 in 应答.iter_bytes(1024 * 512):
+                文件.write(块)
+                已下 += len(块)
+                _报进度(进度回调, 已下, 总量)
+
+
+def _分片下(地址: str, 目标: Path, 总量: int, 进度回调, 超时) -> None:
+    """用 ``Range`` 并发下到 ``目标.partNN``，再按顺序拼成 ``目标``。"""
+    import concurrent.futures as 并发
+    import threading
+
+    片数 = max(1, min(分片并发数, 总量 // (8 * 1024 * 1024)))
+    块 = 总量 // 片数 + 1
+    锁 = threading.Lock()
+    已下 = [0]
+
+    def 取(i: int) -> Path:
+        起, 止 = i * 块, min((i + 1) * 块 - 1, 总量 - 1)
+        分片 = 目标.with_name(f"{目标.name}.part{i:02d}")
+        with httpx.stream("GET", 地址, follow_redirects=True, timeout=超时,
+                          headers={"Range": f"bytes={起}-{止}"}) as 应答:
+            应答.raise_for_status()
+            with open(分片, "wb") as 文件:
+                for 数据块 in 应答.iter_bytes(1024 * 512):
+                    文件.write(数据块)
+                    with 锁:
+                        已下[0] += len(数据块)
+                        现在 = 已下[0]
+                    _报进度(进度回调, 现在, 总量)
+        return 分片
+
+    with 并发.ThreadPoolExecutor(max_workers=片数) as 池:
+        分片们 = list(池.map(取, range(片数)))
+    with open(目标, "wb") as 输出:
+        for 分片 in 分片们:
+            with open(分片, "rb") as 源:
+                shutil.copyfileobj(源, 输出, 8 << 20)
+            try:
+                分片.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001 - 临时分片删不掉不影响结果
+                pass
+    if 目标.stat().st_size != 总量:
+        raise RuntimeError(
+            f"分片下载不完整（{目标.stat().st_size} != {总量} 字节），已放弃这次更新")
+
+
+def _下到文件(地址: str, 目标: Path, 进度回调=None) -> None:
+    """把 URL 下到 ``目标``：能分片就分片，不能就单连接。
+
+    "先探测一次"是为了拿到总大小、并确认服务端支不支持 ``Range``
+    （不支持就退回单连接，绝不硬上）。
+    """
+    if httpx is None:
+        raise RuntimeError("缺少 httpx，无法下载")
+    超时 = httpx.Timeout(30.0, read=600.0)
+    with httpx.stream("GET", 地址, follow_redirects=True, timeout=超时,
+                      headers={"Range": "bytes=0-0"}) as 应答:
+        应答.raise_for_status()
+        范围 = str(应答.headers.get("content-range") or "")
+        支持分片 = 应答.status_code == 206 and "/" in 范围
+        总量 = int(范围.rsplit("/", 1)[1]) if 支持分片 and 范围.rsplit("/", 1)[1].isdigit() \
+            else int(应答.headers.get("content-length") or 0)
+    if 支持分片 and 总量 >= 分片最小体积:
+        _分片下(地址, 目标, 总量, 进度回调, 超时)
+        return
+    _单连接下(地址, 目标, 进度回调, 超时)
+
+
+def 下载便携运行时(进度回调=None, 强制: bool = False) -> tuple[bool, str]:
+    """把官方便携版 ollama 基座下载并解压到**项目内** ``运行环境/本地模型``。
+
+    * ``强制=False``（默认）：项目内已有就跳过（幂等，例如打包时调用）；
+    * ``强制=True``：重新下载并**替换**——这就是界面上的「⬆️ 更新内置ollama」。
+
+    更新是全有或全无：下载、解压、自检都在旁边的临时目录里做，
+    新那份跑不起来（或中途失败）就**保留原来那份**，绝不把能用的基座弄坏。
 
     这样做的好处：整个项目文件夹依然可以整体搬走/删掉，不写系统目录、
     不装包管理器、不需要 sudo —— 与"绿色版"的承诺一致。
     """
-    if httpx is None:
-        return False, "缺少 httpx，无法下载"
+    名字 = "ollama.exe" if os.name == "nt" else "ollama"
     目标目录 = 项目便携目录()
     可执行 = 项目内可执行文件()
-    if 可执行.is_file():
-        return True, f"项目内已有便携运行时：{可执行}"
+    # 已经就位就直接返回：这条要放在 httpx 检查**前面** —— 基座是随包内置的，
+    # 幂等调用（比如打包时）根本不需要联网，也不该因为没装 httpx 就报错。
+    if 可执行.is_file() and not 强制:
+        return True, f"内置运行时已就位：{相对项目路径(可执行)}"
+    if httpx is None:
+        return False, "缺少 httpx，无法下载"
     地址 = 便携版下载地址()
-    压缩包 = 目标目录 / ("ollama.zip" if 地址.endswith(".zip") else "ollama.tgz")
+    # 临时目录放在同一个父目录下：同盘 rename，换的时候是原子的
+    暂存 = 目标目录.parent / "本地模型.下载中"
+    是zip = 地址.endswith(".zip")
+    压缩包 = 暂存 / ("ollama.zip" if 是zip else "ollama.tar.zst")
+    解开 = 暂存 / "解开"
+    shutil.rmtree(暂存, ignore_errors=True)
     try:
-        目标目录.mkdir(parents=True, exist_ok=True)
-        已下 = 0
-        with httpx.stream("GET", 地址, follow_redirects=True,
-                          timeout=httpx.Timeout(30.0, read=600.0)) as 应答:
-            应答.raise_for_status()
-            总量 = int(应答.headers.get("content-length") or 0)
-            with open(压缩包, "wb") as 文件:
-                for 块 in 应答.iter_bytes(1024 * 512):
-                    文件.write(块)
-                    已下 += len(块)
-                    if 进度回调 is not None:
-                        try:
-                            进度回调(已下, 总量)
-                        except Exception:
-                            pass
+        解开.mkdir(parents=True, exist_ok=True)
+        _下到文件(地址, 压缩包, 进度回调)
     except Exception as e:  # noqa: BLE001
+        shutil.rmtree(暂存, ignore_errors=True)
         return False, f"下载失败：{type(e).__name__}: {e}"
     try:
-        if 压缩包.suffix == ".zip":
-            import zipfile
-            with zipfile.ZipFile(压缩包) as 包:
-                包.extractall(目标目录)
-        else:
-            import tarfile
-            with tarfile.open(压缩包) as 包:
-                包.extractall(目标目录)
+        _解压便携包(压缩包, 解开)
         压缩包.unlink(missing_ok=True)
     except Exception as e:  # noqa: BLE001
+        shutil.rmtree(暂存, ignore_errors=True)
         return False, f"解压失败：{type(e).__name__}: {e}"
-    if not 可执行.is_file():
-        # 有的包会多套一层目录（bin/、ollama-linux-amd64/），这里兜一下
-        找到 = ""
-        for 候选 in 目标目录.rglob("ollama*"):
-            if 候选.is_file() and os.access(候选, os.X_OK) and 候选.suffix != ".zip":
-                找到 = str(候选)
-                break
-        if 找到:
-            try:
-                shutil.copy2(找到, 可执行)
-            except Exception:
-                return True, f"已解压到 {目标目录}（可执行文件在 {找到}）"
+
+    安装根 = _找安装根(解开, 名字)
+    if 安装根 is None:
+        shutil.rmtree(暂存, ignore_errors=True)
+        return False, f"解压后没找到 {名字}（包结构变了？）"
+    # 只留 CPU / Vulkan：官方包里的 CUDA 目录 ~2 GB，发布包塞不下（GitHub 单个资源 2 GiB）
+    省了, 裁了 = 精简推理后端(安装根)
+    裁剪说明 = ""
+    if 裁了:
+        裁剪说明 = f"｜已裁掉 GPU 后端 {'/'.join(裁了)}（省 {省了 / 1073741824:.1f} GB）"
+    新可执行 = 安装根 / 名字
+    if not 新可执行.is_file():
+        新可执行 = 安装根 / "bin" / 名字
     try:
-        可执行.chmod(0o755)
+        新可执行.chmod(0o755)
     except Exception:
         pass
-    return True, f"便携运行时已就位：{可执行}"
+    # 自检：新那份得真能跑起来才换。跑不起来就留着旧的（更新失败 ≠ 基座坏掉）
+    新版本 = _跑版本(新可执行)
+    旧版本 = _跑版本(可执行) if 可执行.is_file() else ""
+    if not 新版本 and 旧版本:
+        shutil.rmtree(暂存, ignore_errors=True)
+        return False, ("新下载的 ollama 跑不起来（自检失败），已保留原来那份："
+                       f"{相对项目路径(可执行)} v{旧版本}")
+
+    备份 = 目标目录.parent / "本地模型.旧"
+    有旧的 = 目标目录.exists()
+    shutil.rmtree(备份, ignore_errors=True)
+    try:
+        if 有旧的:
+            目标目录.rename(备份)
+        安装根.rename(目标目录)
+    except Exception as e:  # noqa: BLE001 - 换的时候出问题，把旧的换回来
+        shutil.rmtree(目标目录, ignore_errors=True)
+        if 有旧的 and 备份.exists():
+            try:
+                备份.rename(目标目录)
+            except Exception:
+                pass
+        shutil.rmtree(暂存, ignore_errors=True)
+        return False, f"替换失败（已回滚到原来那份）：{type(e).__name__}: {e}"
+    shutil.rmtree(备份, ignore_errors=True)   # 换成功了才删旧的
+    shutil.rmtree(暂存, ignore_errors=True)
+    落点 = 项目内可执行文件()
+    try:
+        落点.chmod(0o755)
+    except Exception:
+        pass
+    版本尾巴 = f"（v{新版本}）" if 新版本 else ""
+    if 旧版本 and 新版本:
+        if 旧版本 == 新版本:
+            版本尾巴 = f"：已经是最新的 v{新版本}"
+        else:
+            版本尾巴 = f"：v{旧版本} → v{新版本}"
+    return True, f"内置运行时已就位{版本尾巴}{裁剪说明}：{相对项目路径(落点)}"
 
 
 def 探测到的运行时(超时秒: float = 1.5) -> list[dict]:
@@ -682,7 +973,8 @@ class 本地模型客户端:
         if 地址:
             return True, f"服务已在运行：{地址}"
         if not _找可执行文件():
-            return False, "没找到 ollama 可执行文件（先点「⬇️ 装运行时」）"
+            return False, ("没找到 ollama 可执行文件（内置基座缺失？"
+                           "AI 页「⬆️ 更新内置ollama」可以补一份官方便携版）")
         return self.启动服务(等待秒=等待秒)
 
     def 拉取模型(self, 模型: str = "", *, 超时秒: float = 3600.0) -> tuple[bool, str]:
@@ -830,7 +1122,8 @@ class 本地模型客户端:
         模型 = str(模型 or "").strip()
         可执行 = _找可执行文件()
         if not 可执行:
-            return False, "没找到 ollama 可执行文件（先点「⬇️ 装运行时」）"
+            return False, ("没找到 ollama 可执行文件（内置基座缺失？"
+                           "AI 页「⬆️ 更新内置ollama」可以补一份官方便携版）")
         if not 模型:
             return False, "模型名为空"
         # 装了运行时但服务没起来 → 自动拉起（否则 CLI 只会报"连不上服务"）

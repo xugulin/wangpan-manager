@@ -30,8 +30,8 @@ uv pip install --python-platform windows --python-version 3.14 \
   --target ./语音识别/python/Lib/site-packages -r /tmp/asr包.txt 2>&1 | tail -3
 
 echo "=== ⑤ 便携 ollama 运行时（Windows 版，不含模型权重）==="
-# 用户要求：打包预装基础 ollama，但不预装任何模型权重。
-# 有就跳过；下不动也不让整个构建失败（用户可在 AI 页点「装运行时」补装）。
+# 用户要求：发布包**内置**官方便携版 ollama 基座，但不含任何模型权重。
+# 有就跳过；下不动也不让整个构建失败（用户可在 AI 页点「⬆️ 更新内置ollama」补）。
 if [ ! -f 本地模型/ollama.exe ]; then
   mkdir -p 本地模型
   echo "  下载 ollama-windows-amd64.zip…"
@@ -43,9 +43,16 @@ if [ ! -f 本地模型/ollama.exe ]; then
     fi
     rm -f ollama-win.zip
   else
-    echo "  ⚠️ ollama 下载失败：这个 Windows 包将不含 ollama（AI 页可补装）"
+    echo "  ⚠️ ollama 下载失败：这个 Windows 包将不含内置 ollama（AI 页可补）"
   fi
 fi
+# 只留 CPU / Vulkan：CUDA 那两个目录 ~2 GB，发布包塞不下（GitHub 单资源 2 GiB）
+for d in 本地模型/lib/ollama/cuda* 本地模型/lib/ollama/rocm* 本地模型/lib/ollama/mlx*; do
+  if [ -e "$d" ]; then
+    rm -rf "$d"
+    echo "  已裁掉 $(basename "$d")"
+  fi
+done
 ls -la 本地模型 2>/dev/null | head -5 || true
 
 echo "=== ⑥ 体积 ==="
