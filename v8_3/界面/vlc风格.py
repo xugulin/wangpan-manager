@@ -488,6 +488,7 @@ def 构建工具栏(动作表: dict, 父=None, 隐藏项=()) -> QToolBar:
          {"属性": "静音按钮", "勾选": True}),
     ]
     栏.动作文本表 = {}
+    栏.动作索引 = {}
     栏.动作们 = []
     _藏 = {str(x) for x in (隐藏项 or ())}
     for 键, 图标, 精简, 完整, 提示, 额外 in 规格:
@@ -500,6 +501,7 @@ def 构建工具栏(动作表: dict, 父=None, 隐藏项=()) -> QToolBar:
                    勾选=bool(额外.get("勾选")), 传选中=bool(额外.get("勾选")),
                    快捷键=额外.get("快捷键"))
         栏.动作文本表[键] = (图标, 精简, 完整)
+        栏.动作索引[键] = 动作
         栏.动作们.append(动作)
         if 额外.get("属性"):
             setattr(栏, 额外["属性"], 动作)
@@ -544,16 +546,36 @@ def 构建工具栏(动作表: dict, 父=None, 隐藏项=()) -> QToolBar:
                       传选中=True,
                       提示="显示 / 隐藏右侧的「播放清单 + AI 助手」面板")
         栏.动作文本表["切换侧栏"] = ("🗂", "🗂 面板", "🗂 面板")
+        栏.动作索引["切换侧栏"] = 栏.侧栏动作
         栏.动作们.append(栏.侧栏动作)
     else:
         栏.侧栏动作 = None
 
     栏.模式们 = ("完整", "精简", "图标")
 
+    #: 各档的按钮左右内边距（px）。**Windows 上中文字体 + emoji 天生更宽**，
+    #: 同一档在 Windows 上比 Linux 宽 20~30%（真机 CI 实测：图标档都要 979px），
+    #: 所以窄档再收紧内边距，把这部分差距吃回来。
+    档内边距 = {"完整": 5, "精简": 3, "图标": 2}
+    栏._内边距 = None
+
+    #: 窄到连图标档都装不下时，按这个顺序把工具栏入口收起来
+    #: （它们全都还在右键菜单 / 菜单栏里，收掉的只是工具栏上那个入口）
+    可收起顺序 = ("循环切换", "随机切换", "上一个", "下一个")
+
     def 设置模式(模式: str = "完整", 可用宽度: int = 0):
         """切换三档文字密度；顺带按宽度收紧音量/速度控件。"""
         if 模式 not in 栏.模式们:
             模式 = "完整"
+        # 每一档都先**恢复**被收起的入口（窗口变宽时要把它们放回来）
+        for 动作 in 栏.动作们:
+            动作.setVisible(True)
+        栏.音量滑条.setVisible(True)
+        内边距 = 档内边距.get(模式, 5)
+        if 栏._内边距 != 内边距:
+            栏._内边距 = 内边距
+            栏.setStyleSheet("QToolBar{padding:1px;spacing:2px;}"
+                          f"QToolButton{{padding:1px {内边距}px;margin:0px;}}")
         for 动作 in 栏.动作们:
             图标 = 精简 = 完整 = None
             for _键, (图, 简, 全) in 栏.动作文本表.items():
@@ -565,8 +587,13 @@ def 构建工具栏(动作表: dict, 父=None, 隐藏项=()) -> QToolBar:
             动作.setText({"图标": 图标, "精简": 精简, "完整": 完整}[模式])
         宽 = int(可用宽度 or 栏.width() or 1200)
         栏.音量标签.setVisible(模式 != "图标" and 宽 >= 1150)
-        栏.音量滑条.setFixedWidth(60 if 模式 == "图标" else (80 if 宽 < 1250 else 100))
-        栏.速度框.setFixedWidth(62 if 模式 == "图标" else 74)
+        if 模式 == "图标":
+            栏.音量滑条.setFixedWidth(44)
+        elif 模式 == "精简":
+            栏.音量滑条.setFixedWidth(64)
+        else:
+            栏.音量滑条.setFixedWidth(80 if 宽 < 1250 else 100)
+        栏.速度框.setFixedWidth(54 if 模式 == "图标" else (64 if 模式 == "精简" else 74))
         栏.速度标签.setVisible(模式 != "图标")
         栏.当前模式 = 模式
 
@@ -579,15 +606,30 @@ def 构建工具栏(动作表: dict, 父=None, 隐藏项=()) -> QToolBar:
         宽 = int(宽度 or 栏.width() or 1200)
         if getattr(栏, "当前模式", None) is None:
             栏.当前模式 = None
-        for 模式 in 栏.模式们:
-            设置模式(模式, 宽)
+        def 装得下() -> bool:
             try:
                 栏.updateGeometry()
             except Exception:  # noqa: BLE001
                 pass
-            if int(栏.sizeHint().width() or 0) <= 宽 - 4:
+            return int(栏.sizeHint().width() or 0) <= 宽 - 4
+
+        for 模式 in 栏.模式们:
+            设置模式(模式, 宽)
+            if 装得下():
                 return 模式
-        return 栏.当前模式
+        # 连图标档都装不下（窄窗口 / Windows 字体更宽）：继续收 ——
+        # 先收音量滑条（音量还有静音键和 ↑↓ 快捷键），再按顺序收「菜单里也有」的按钮
+        设置模式("图标", 宽)
+        栏.音量滑条.setVisible(False)
+        栏.音量标签.setVisible(False)
+        if not 装得下():
+            for 键 in 可收起顺序:
+                动作 = 栏.动作索引.get(键)
+                if 动作 is not None:
+                    动作.setVisible(False)
+                if 装得下():
+                    break
+        return "图标"
 
     栏.设置模式 = 设置模式
     栏.按宽度自适应 = 按宽度自适应
