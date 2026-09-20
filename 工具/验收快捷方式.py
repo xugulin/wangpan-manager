@@ -38,7 +38,14 @@ def 检查(条件: bool, 说明: str) -> None:
 
 
 def 跑(参数: list[str], 超时: float = 60.0) -> subprocess.CompletedProcess:
-    return subprocess.run(参数, capture_output=True, text=True, timeout=超时)
+    """跑一个子进程并收输出。
+
+    ⚠️ ``errors="replace"`` 不能省：启动脚本会打印中文，而它在管道里被截断时
+    可能停在半个多字节字符上 —— 默认严格解码会直接抛 UnicodeDecodeError
+    （实测踩过：验收工具自己崩了，看起来像"启动脚本坏了"）。
+    """
+    return subprocess.run(参数, capture_output=True, text=True, timeout=超时,
+                          encoding="utf-8", errors="replace")
 
 
 def 主() -> int:
@@ -79,12 +86,16 @@ def 主() -> int:
     检查("运行环境/venv" in 输出, "认出了项目自带解释器")
     检查("PySide6" in 输出 and "httpx" in 输出, "打印了依赖版本")
 
-    print("\n[4] 防重复启动（假 PID）")
+    print("\n[4] 防重复启动（真进程 + 假 PID 文件两条）")
     PID文件 = 项目 / "数据" / ".一键启动.pid"
     旧内容 = PID文件.read_text() if PID文件.is_file() else None
-    假 = subprocess.Popen(["sleep", "30"])          # 保证这个 PID 活着
+    PID文件.parent.mkdir(parents=True, exist_ok=True)
+    # ① "看起来就是本项目在跑"的进程：命令行里带 启动.py 和项目路径
+    #    （启动脚本现在会核对 /proc/<pid>/cmdline，光有 PID 不算数 ——
+    #     因为 PID 会被系统回收给别的进程，误判会导致永远启动不起来）
+    假 = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                        str(项目 / "启动.py")])
     try:
-        PID文件.parent.mkdir(parents=True, exist_ok=True)
         PID文件.write_text(str(假.pid), encoding="utf-8")
         子 = 跑(["bash", str(SH)])
         检查(子.returncode == 0, f"已运行时退出码 0（实际 {子.returncode}）")
@@ -95,6 +106,19 @@ def 主() -> int:
         假.terminate()
         try:
             假.wait(timeout=5)
+        except Exception:
+            pass
+    # ② 陈旧 PID（进程活着但跟本项目无关）→ 必须**清掉 PID 文件照常启动**
+    陈旧 = subprocess.Popen(["sleep", "30"])
+    try:
+        PID文件.write_text(str(陈旧.pid), encoding="utf-8")
+        子2 = 跑(["bash", str(SH), "--check"])
+        检查(子2.returncode == 0 and "[OK] project" in 子2.stdout,
+             "陈旧 PID（别的进程占了这个号）不会挡住启动")
+    finally:
+        陈旧.terminate()
+        try:
+            陈旧.wait(timeout=5)
         except Exception:
             pass
         if 旧内容 is None:

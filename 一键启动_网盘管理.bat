@@ -13,6 +13,9 @@ if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 if not "%V83_HOME%"=="" set "PROJ=%V83_HOME%"
 
 if "%PROJ%"=="" (
+  rem 1) first: is the script itself in the project root?
+  if exist "%HERE%\v8_3" if exist "%HERE%\启动.py" set "PROJ=%HERE%"
+  rem 2) else scan subdirs (script placed outside the project)
   for /d %%D in ("%HERE%\*") do (
     if exist "%%D\v8_3" if exist "%%D\启动.py" set "PROJ=%%D"
   )
