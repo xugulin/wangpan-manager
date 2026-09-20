@@ -64,7 +64,8 @@ Linux源码 = ("启动.sh",)
 #: 平台附加文件（各平台只带自己那份，别把 Windows 的 .exe 塞进 Linux 包）
 Linux附加 = ("创建桌面图标.sh", "使用说明.txt", "assets") + Linux源码
 Windows附加 = ("启动.bat", "创建桌面图标.bat", "创建桌面图标.vbs",
-             "创建桌面图标.ps1", "启动（看报错）.bat", "使用说明.txt", "assets")
+             "创建桌面图标.ps1", "自检-Windows.bat", "自检-Windows.ps1",
+             "启动（看报错）.bat", "使用说明.txt", "assets")
 启动器exe = Path(__file__).resolve().parent / "启动器" / "启动.exe"
 
 #: 一律不拷的东西
