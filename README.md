@@ -66,9 +66,9 @@
 
 ```
 在 F:\tmp\win105\中文 目录 测试（中文+空格路径）运行 创建桌面图标.bat：
-  [OK] desktop shortcut created: C:\users\xgl\Desktop\启动.lnk
+  [OK] desktop shortcut created: C:\users\xgl\Desktop\网盘管理.lnk
   target: ...\中文 目录 测试\启动.exe
-桌面生成：启动.lnk（中文名正确）
+桌面生成：网盘管理.lnk（中文名正确）
 ```
 
 **界面卡顿：诊断工具实测可用**

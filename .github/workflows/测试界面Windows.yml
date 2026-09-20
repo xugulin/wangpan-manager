@@ -13,6 +13,12 @@ name: 测试界面性能（Windows 真机）
 #   建主窗口（含预热各页）/ 切每个功能页 / AI 三个子页 / 登录对话框 / 追加 200 行日志，
 #   并统计控件总数与样式表长度 —— 这些数字直接决定"界面卡不卡"。
 #
+# ⚠️ 踩过的坑（第一次跑就挂在这）：
+#   Windows runner 的控制台是 **cp1252**，而这个项目的路径/日志全是中文 ——
+#   `pip install -r 构建/依赖-主程序-win.txt` 时 pip 自己打印中文路径就
+#   UnicodeEncodeError 而退出 1。所以：整个 job 强制 UTF-8（PYTHONUTF8/PYTHONIOENCODING），
+#   并把依赖清单先复制成 ASCII 文件名再喂给 pip（中文不进 pip 的输出）。
+#
 # 触发：Actions → 测试界面性能（Windows 真机）→ Run workflow。
 # ============================================================================
 
@@ -33,6 +39,11 @@ jobs:
     name: 在 windows-latest 上量界面开销
     runs-on: windows-latest
     timeout-minutes: 25
+    env:
+      # 中文路径/中文日志在 cp1252 控制台上会炸，全局强制 UTF-8
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
+      QT_QPA_PLATFORM: 'offscreen'
 
     steps:
       - name: 取源码
@@ -44,26 +55,21 @@ jobs:
           python-version: '3.14'
 
       - name: 装依赖（PySide6 等）
+        shell: pwsh
         run: |
+          # 依赖清单先复制成 ASCII 文件名：pip 打印中文路径会因为 cp1252 报错退出
+          Copy-Item '构建/依赖-主程序-win.txt' 'req-win.txt'
           python -m pip install --upgrade pip
-          python -m pip install -r 构建/依赖-主程序-win.txt
+          python -m pip install -r req-win.txt
 
       - name: 环境信息
         shell: pwsh
         run: |
-          Write-Host "runner : $env:ImageOS / $env:RUNNER_OS"
+          Write-Host "runner : $env:ImageOS / $env:RUNNER_OS / $env:RUNNER_ARCH"
           python -c "import sys, PySide6; print('Python', sys.version.split()[0], '| PySide6', PySide6.__version__)"
 
       - name: 界面逐项计时（真 Windows）
-        env:
-          QT_QPA_PLATFORM: offscreen
-          PYTHONIOENCODING: utf-8
-          PYTHONUTF8: '1'
         run: python 工具/界面测速.py
 
       - name: 单测（Windows 上跑一遍）
-        env:
-          QT_QPA_PLATFORM: offscreen
-          PYTHONIOENCODING: utf-8
-          PYTHONUTF8: '1'
         run: python -m unittest discover -s tests -t .
