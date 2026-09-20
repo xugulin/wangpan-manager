@@ -2381,6 +2381,33 @@ def main() -> int:
              or "已切到" in _短信窗.状态标签.text(),
              f"短信方式：会自动填手机号或提示已切页（{_短信窗.状态标签.text()[:36]}）")
         _短信窗.close()
+        # 关窗前"深取一次"：库里有凭证就自动回调；没有就不回调（不拿空凭证打扰桥）
+        from v8_3.界面.浏览器引擎 import 假引擎 as _假引擎2
+        _关窗引擎 = _假引擎2()
+        _关窗抓到: list = []
+        _关窗 = _内置窗口("baidu", None,
+                       完成回调=lambda c: _关窗抓到.extend(c or []),
+                       引擎=_关窗引擎)
+        _关窗.show()
+        _关窗引擎.预置cookie([
+            {"name": "BDUSS", "value": "B" * 32, "domain": ".baidu.com"},
+            {"name": "STOKEN", "value": "S" * 32, "domain": ".pan.baidu.com"}])
+        _关窗.close()          # 不点"完成"，直接关窗
+        for _ in range(20):
+            泵(0.05)
+        检查(bool(_关窗抓到),
+             "关窗时会先深取一次凭证并回调（拿到 " + str(len(_关窗抓到)) + " 条）")
+        _空引擎 = _假引擎2()
+        _空抓到: list = []
+        _空窗 = _内置窗口("baidu", None,
+                       完成回调=lambda c: _空抓到.extend(c or []),
+                       引擎=_空引擎)
+        _空窗.show()
+        _空窗.close()
+        for _ in range(20):
+            泵(0.05)
+        检查(not _空抓到 and "未提交" in _空窗.状态标签.text(),
+             "没取到 cookie 时不回调（状态：" + _空窗.状态标签.text()[:20] + "）")
         _窗._收字典({"name": "STOKEN", "value": "x" * 8,
                   "domain": ".pan.baidu.com", "httpOnly": True})
         _名 = [c["name"] for c in _窗._凭证]

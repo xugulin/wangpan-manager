@@ -25,6 +25,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
 from .浏览器引擎 import 浏览器引擎, 规范cookie
@@ -276,11 +277,29 @@ class QtWebEngine引擎(浏览器引擎):
 
     # ---------------- 凭证 ----------------
 
-    def 取cookie(self, 域们: tuple[str, ...] = ()) -> list[dict]:
-        """两条路都走一遍：**直读库**（最可靠）+ Qt 的 filterCookies。"""
+    #: 直读 cookie 库失败时重试几次、每次间隔多少秒
+    #: （用户刚在内置浏览器里点完"登录"，Chromium 把 cookie 写进 sqlite 需要一点时间；
+    #   实测踩过：窗口一关就报"已捕获 0 条 cookie"，其实几秒后 cookie 就在库里了）
+    取cookie重试 = 4
+    取cookie间隔秒 = 0.7
+
+    def 取cookie(self, 只要名字: tuple[str, ...] = (),
+              域们: tuple[str, ...] = ()) -> list[dict]:
+        """三条路都走一遍（按可靠性排序），并做去重。
+
+        :param 只要名字: 只取这些名字（界面按此判断"齐不齐"）
+        :param 域们: 只取这些域（子串匹配）
+        """
         结果: list[dict] = []
+        名字集 = {str(x) for x in (只要名字 or ()) if x}
         if self._直读库:
-            结果.extend(读取cookie库(self._库文件, tuple(域们) if 域们 else ()))
+            for 第次 in range(max(1, self.取cookie重试)):
+                批 = 读取cookie库(self._库文件, tuple(只要名字) if 只要名字 else ())
+                if 批:
+                    结果.extend(批)
+                    break
+                if 第次 + 1 < self.取cookie重试:
+                    time.sleep(self.取cookie间隔秒)
         if self._profile is not None:
             try:
                 from PySide6.QtCore import QUrl
@@ -299,6 +318,10 @@ class QtWebEngine引擎(浏览器引擎):
                 pass
         去重: dict[tuple, dict] = {}
         for c in 结果:
+            if 名字集 and c.get("name") not in 名字集:
+                continue
+            if 域们 and not any(域 in (c.get("domain") or "") for 域 in 域们):
+                continue
             去重[(c["name"], c["domain"])] = c
         return list(去重.values())
 

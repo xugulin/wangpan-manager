@@ -371,18 +371,58 @@ class 内置浏览器登录窗口(QDialog):
             组.append(f"{c.get('name')}@{c.get('domain')}")
         return "、".join(sorted(set(组)))[:400]
 
+    def _最后深取一次(self, 尝试: int = 3) -> int:
+        """关窗/手动完成前的"最后一次深取"：连续取几轮，等 Chromium 把 cookie 落盘。
+
+        ⚠️ 实测踩过：用户在内置浏览器里登录成功后**直接关窗**，窗口报
+        "已捕获 0 条 cookie"，而其实几秒后 cookie 才落进 sqlite —— 于是白登一次。
+        所以关窗前要等一下、多取几轮。引擎那边也有重试，这里是第二层保险。
+
+        :return: 这次新拿到的条数
+        """
+        需要 = 网盘入口.get(self.网盘类型, ("", ()))[1]
+        前 = len(self._凭证)
+        for _ in range(max(1, 尝试)):
+            self._收引擎cookie(tuple(需要))
+            if self._凭证:
+                break
+            try:
+                import time as _t
+                _t.sleep(0.6)
+            except Exception:
+                pass
+        新增 = len(self._凭证) - 前
+        if 新增:
+            self.状态标签.setText(
+                f"✅ 关窗前又取到 {新增} 条 cookie（共 {len(self._凭证)} 条）")
+        return 新增
+
     def _手动完成(self) -> None:
         """点「我已登录完成」：**先现场取一次** cookie 再回调。
 
         ⚠️ 以前直接回调 ``self._凭证``：若定时器（1.5 秒一轮）还没跑过，
         点下去会"什么都没发生"（被单测抓到）。
         """
-        需要 = 网盘入口.get(self.网盘类型, ("", ()))[1]
-        self._收引擎cookie(tuple(需要))
+        self._最后深取一次()
+        if not self._凭证:
+            self.状态标签.setText(
+                "⚠️ 还没取到任何 cookie —— 请确认已经登录成功"
+                "（页面右上角能看到你的账号），再点这个按钮")
+            return
         self._回调(self._凭证, 手动=True)
 
     def closeEvent(self, 事件) -> None:
-        """关窗时把引擎也收掉（profile/视图/后台渲染进程）。"""
+        """关窗时：**先把凭证再深取一次**（用户可能刚登录完就关了窗口），再收引擎。
+
+        实取不到就**不要回调** —— 别拿空凭证去打扰桥（那样只会得到一句
+        "内置浏览器里还没拿到 BDUSS"，用户还以为是登录失败）。
+        """
+        if not self._已回调:
+            self._最后深取一次(尝试=4)
+            if self._凭证:
+                self._回调(self._凭证, 手动=True)
+            else:
+                self.状态标签.setText("已关闭内置浏览器（没取到 cookie，未提交）")
         try:
             self.引擎.关闭()
         except Exception:
