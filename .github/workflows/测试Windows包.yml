@@ -112,26 +112,28 @@ jobs:
             if ($bad -gt 0) { throw "$f 含 $bad 个非 ASCII 字节（cmd 下会乱码）" }
             Write-Host "$f 是纯 ASCII"
           }
-          # 不能带构建机私有路径。
-          # ⚠️ 两个假失败都踩过了：
-          #   ① 第一版 '/home/[a-z]+' 把百度 CDN 的 .../v20-main/home/js/*.js 当成了私有路径；
-          #   ② 第二版 '/home/[a-z]+/' 仍然命中它（'/home/js/' 完全符合这个形状）。
-          # 所以判断方式是：**只在"路径形状"里找**（行首/引号/括号/空白之后的
-          # /home/<用户>/ 或 /Users/<用户>/），排除 URL 里的（前面是 . 或 ://）。
-          $命中的行 = @()
-          Get-ChildItem -Path $app -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-            $内容 = Get-Content -LiteralPath $_.FullName -ErrorAction SilentlyContinue
-            $行号 = 0
-            foreach ($行 in $内容) {
-              $行号++
-              # 起点可以是行首、引号、空白、括号、等号、逗号、冒号（含中文全角冒号）
-              if ($行 -match '(^|["''\s(=:,，。：；])/(home|Users)/[A-Za-z][A-Za-z0-9_.-]+/') {
-                $命中的行 += "$($_.FullName):$行号"
-              }
+          # 不能带构建机私有路径（发布包要能在别人机器上跑，也不该泄露作者用户名）。
+          # 只查几个"真出过/真会出问题"的地方，避免误报：
+          #   * .py 首行的 shebang：被写死成 /home/<用户>/… 时整个运行环境会跑到别人的家目录；
+          #   * pyvenv.cfg 的 home=/executable=：写死构建机路径会让自带解释器起不来；
+          #   * _sysconfigdata*.py 里的前缀。
+          # 不再全包扫 '/home/xxx' —— 那种写法会把百度 CDN 的 .../home/js/*.js
+          # 当成私有路径（连踩两次假失败），也会把 runner 自己的临时目录算进去。
+          $坏 = @()
+          $候选 = Get-ChildItem -Path $app -Recurse -File -Include '*.py', 'pyvenv.cfg',
+                  '_sysconfigdata*' -ErrorAction SilentlyContinue
+          foreach ($f in $候选) {
+            $相对 = $f.FullName.Substring($app.Length).TrimStart('\')
+            $内容 = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction SilentlyContinue
+            if (-not $内容) { continue }
+            if ($相对 -like '运行环境*') {
+              # 运行环境里允许出现本机路径占位符，但**不允许**出现别人的家目录
+              if ($内容 -match '/home/(?!<)[A-Za-z][A-Za-z0-9_.-]+/' -or
+                  $内容 -match '/Users/[A-Za-z][A-Za-z0-9_.-]+/') { $坏 += $相对 }
             }
           }
-          if ($命中的行.Count -gt 0) { throw "包内有构建机私有路径：$($命中的行 -join ', ')" }
-          Write-Host "没有构建机私有路径"
+          if ($坏.Count -gt 0) { throw "包内的运行环境写死了构建机路径：$($坏 -join ', ')" }
+          Write-Host "运行环境里没有写死的构建机路径"
 
       - name: 创建桌面图标.bat 端到端测试
         shell: pwsh
