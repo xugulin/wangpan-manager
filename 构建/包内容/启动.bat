@@ -16,7 +16,8 @@ if not defined PY if exist "%HERE%\运行环境\venv\Scripts\python.exe" set "PY
 if not defined PY if exist "%HERE%\运行环境\python\pythonw.exe" set "PY=%HERE%\运行环境\python\pythonw.exe"
 if not defined PY if exist "%HERE%\运行环境\python\python.exe" set "PY=%HERE%\运行环境\python\python.exe"
 if not defined PY (
-  echo [X] Bundled Python not found ^(运行环境\venv\Scripts\pythonw.exe^).
+  echo [X] Bundled Python not found ^(looked for 运行环境\venv\Scripts *and*
+  echo     运行环境\python\pythonw.exe^).
   echo     Please extract the whole zip into a normal folder and try again.
   pause
   exit /b 1
