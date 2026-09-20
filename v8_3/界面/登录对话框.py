@@ -380,26 +380,36 @@ class 登录对话框(QDialog):
         面板 = QWidget()
         布局 = QVBoxLayout(面板)
         布局.setContentsMargins(0, 0, 0, 0)
-        布局.addWidget(QLabel("手机号（含国家码，例如 +86 13800000000）："))
-        行 = QHBoxLayout()
+        # 用户要求：**百度**的短信登录页不要"手机号框 / 发送验证码 / 验证码框"，
+        # 只留一个按钮——点它用内置浏览器直接跳到短信登录页（百度的发码带风险验证，
+        # 在程序里调接口会被拒）。**其他网盘保持原样**（光鸭的短信是真能发的）。
+        百度 = str(self.实例.get("类型") or self.标识) == "baidu"
         self.手机号框 = QLineEdit()
         self.手机号框.setPlaceholderText("+86 13800000000")
-        行.addWidget(self.手机号框, 1)
         self.发送验证码按钮 = QPushButton("📨 发送验证码")
         self.发送验证码按钮.clicked.connect(self._发送验证码)
-        行.addWidget(self.发送验证码按钮)
-        布局.addLayout(行)
-        布局.addWidget(QLabel("短信验证码："))
-        行2 = QHBoxLayout()
         self.验证码框 = QLineEdit()
         self.验证码框.setPlaceholderText("6 位数字")
         self.验证码框.returnPressed.connect(self._短信登录)
-        行2.addWidget(self.验证码框, 1)
         self.短信登录按钮 = QPushButton("✅ 登录")
         self.短信登录按钮.setObjectName("PrimaryButton")
         self.短信登录按钮.clicked.connect(self._短信登录)
-        行2.addWidget(self.短信登录按钮)
-        布局.addLayout(行2)
+        if not 百度:
+            布局.addWidget(QLabel("手机号（含国家码，例如 +86 13800000000）："))
+            行 = QHBoxLayout()
+            行.addWidget(self.手机号框, 1)
+            行.addWidget(self.发送验证码按钮)
+            布局.addLayout(行)
+            布局.addWidget(QLabel("短信验证码："))
+            行2 = QHBoxLayout()
+            行2.addWidget(self.验证码框, 1)
+            行2.addWidget(self.短信登录按钮)
+            布局.addLayout(行2)
+        else:
+            # 百度：控件都建出来（代码里还有引用），但不放进界面
+            for 控件 in (self.手机号框, self.发送验证码按钮,
+                       self.验证码框, self.短信登录按钮):
+                控件.setVisible(False)
         self.短信提示标签 = QLabel("")
         self.短信提示标签.setWordWrap(True)
         self.短信提示标签.setStyleSheet("color: #95a5a6; font-size: 12px;")
@@ -533,25 +543,15 @@ class 登录对话框(QDialog):
             # 「发送验证码 / 验证码登录」置灰 —— 否则用户点了会吃一个红色失败提示
             # （实测就是这样：点「发送验证码」弹出"百度适配器未提供短信登录"）。
             if 键 == "sms" and 可用 and str(项.get("方式") or "") == "内置浏览器":
-                # 只禁"点下去会失败"的按钮；**手机号框要留着能用** ——
-                # 用户在这里填了号码，内置浏览器窗口会自动带进去（少输入一次）。
-                for 控件, 原因 in (
-                        (getattr(self, "发送验证码按钮", None),
-                         "百度要在登录框里发验证码，请点下面的"
-                         "「📱 用内置浏览器短信登录（推荐）」"),
-                        (getattr(self, "短信登录按钮", None),
-                         "同上：请用「📱 用内置浏览器短信登录（推荐）」完成登录")):
-                    if 控件 is None:
-                        continue
-                    控件.setEnabled(False)
-                    控件.setToolTip(原因)
-                if hasattr(self, "手机号框"):
-                    self.手机号框.setEnabled(True)
-                    self.手机号框.setToolTip(
-                        "在这里填好手机号，点下面的「📱 用内置浏览器短信登录（推荐）」"
-                        "会自动帮你填进百度登录框")
-                if hasattr(self, "验证码框"):
-                    self.验证码框.setEnabled(False)
+                # 百度的短信登录面板只有"跳转按钮"：这几个原生控件直接隐藏，
+                # 免得用户点了吃失败提示（用户明确要求去掉它们）。
+                for 控件 in (getattr(self, "手机号框", None),
+                           getattr(self, "发送验证码按钮", None),
+                           getattr(self, "验证码框", None),
+                           getattr(self, "短信登录按钮", None)):
+                    if 控件 is not None:
+                        控件.setVisible(False)
+                        控件.setEnabled(False)
                 if hasattr(self, "短信提示标签"):
                     self.短信提示标签.setText(
                         "⚠️ 百度的短信登录带**风险验证**（发码要走登录框里的风控组件），"
