@@ -257,3 +257,28 @@ zbar 扫"字符画还原图"：✅ 内容一致（可扫）
    "但 bdstoken 未取到（写操作可能不可用）"，后续自愈成功后那句话**没被撤掉**，
    于是提示变成"…但 bdstoken 未取到…；写操作已验证可用"。
    现在改成"暂定问题"清单：写权限真打接口验过就清空，只有确实没解决才提示。
+
+### 实验脚本新增 `--自检`（不需要账号密码）
+
+```bash
+运行环境/venv/bin/python ~/v8_3_工作区/逆向/实验_纯HTTP能否拿STOKEN.py --自检
+```
+
+它跑一遍真实的百度登录流程里**纯 HTTP 能走到的那部分**（打开 pan.baidu.com →
+调 `passport.baidu.com/v2/api/getqrcode`），把 cookie 摊开。实测输出：
+
+```
+① 打开 pan.baidu.com：HTTP 200
+② 取二维码接口：HTTP 200，325 字节
+   纯 HTTP 侧 cookie：BAIDUID、BAIDUID_BFESS、PANPSC、csrfToken、newlogin
+③ BDUSS：没有；pan 域 STOKEN：没有
+结论（复现成功）：纯 HTTP 流程拿不到 pan 域 STOKEN —— 与前面实测一致
+```
+
+**这说明什么**：不走浏览器渲染，纯 HTTP 打接口这条路，连扫码流程的 cookie
+都拿不全（没有 BDUSS、没有 pan 域 STOKEN）。前面"扫码会话只能读"的结论在这个
+更"裸"的路径上同样成立。
+
+**真正的判决性实验仍然是带账号密码的那一次**（`--账号 xxx` + 交互输密码）：
+只有它能回答"表单登录成功时服务端会不会下发 pan 域 STOKEN"。
+这个必须由账号主人在自己机器上跑 —— 密码不经过任何第三方。
