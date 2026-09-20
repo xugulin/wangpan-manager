@@ -242,6 +242,29 @@ class QtWebEngine引擎(浏览器引擎):
         except Exception:
             return False
 
+    def 执行JS(self, 脚本: str):
+        """在页面里跑 JS 并同步拿回结果（runJavaScript 是异步的，这里转成同步）。
+
+        做法：QEventLoop + 回调置结果 + 超时兜底（页面卡住也不会把界面挂死）。
+        """
+        if self._页面 is None:
+            return None
+        from PySide6.QtCore import QEventLoop, QTimer
+        结果: dict = {"值": None}
+
+        def 收到(值) -> None:
+            结果["值"] = 值
+            循环.quit()
+
+        循环 = QEventLoop()
+        try:
+            self._页面.runJavaScript(脚本, 收到)
+        except Exception:
+            return None
+        QTimer.singleShot(2500, 循环.quit)      # 兜底：最多等 2.5 秒
+        循环.exec()
+        return 结果["值"]
+
     def 滚动(self, 增量: int) -> bool:
         if self._页面 is None:
             return False

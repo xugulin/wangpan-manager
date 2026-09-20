@@ -166,6 +166,15 @@ class 浏览器引擎:
     def 滚动(self, 增量: int) -> bool:
         return False
 
+    def 执行JS(self, 脚本: str):
+        """在页面里跑一段 JS 并**同步返回结果**（不支持就返回 None）。
+
+        用途：把登录框切到「短信登录」页之类的"页面内小动作"。
+        为什么不用 点()/输入文本()：那些是按坐标/焦点操作，而这里要按**文字**找元素
+        （百度改版会换 class 名，按文字最稳）。
+        """
+        return None
+
     # ---------------- 凭证 ----------------
 
     def 取cookie(self, 只要名字: tuple[str, ...] = (),
@@ -274,6 +283,13 @@ class 假引擎(浏览器引擎):
     def 按键(self, 键: str) -> bool:
         self.操作记录.append(("按键", 键))
         return True
+
+    def 执行JS(self, 脚本: str):
+        """假引擎：记录调用，并按"脚本里有没有短信关键词"给个合理返回值。"""
+        self.操作记录.append(("执行JS", 脚本[:40]))
+        if "短信" in 脚本 or "sms" in 脚本.lower():
+            return getattr(self, "JS返回", "clicked:短信登录")
+        return getattr(self, "JS返回", "ok")
 
     def 取cookie(self, 只要名字: tuple[str, ...] = (),
               域们: tuple[str, ...] = ()) -> list[dict]:

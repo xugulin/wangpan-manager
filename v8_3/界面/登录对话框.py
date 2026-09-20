@@ -326,8 +326,11 @@ class 登录对话框(QDialog):
             布局.addLayout(浏览器行)
         return 面板
 
-    def _内置浏览器登录(self):
-        """打开内置浏览器窗口登录，登录完成后把凭证交给桥落库。"""
+    def _内置浏览器登录(self, 登录方式: str = ""):
+        """打开内置浏览器窗口登录，登录完成后把凭证交给桥落库。
+
+        ``登录方式="sms"`` 时窗口会自动把网盘登录框切到「短信登录」页。
+        """
         try:
             from .内置浏览器登录 import 内置浏览器登录窗口
         except Exception as e:  # noqa: BLE001
@@ -348,7 +351,15 @@ class 登录对话框(QDialog):
                    lambda 进度: self.适配器.Cookie登录(载荷))
 
         try:
-            窗口 = 内置浏览器登录窗口(类型, self, 完成回调=完成)
+            # 短信方式：把用户在短信面板里填过的手机号带进去（窗口会自动填进登录框）
+            手机号 = ""
+            if 登录方式 == "sms":
+                try:
+                    手机号 = self.手机号框.text().strip()
+                except Exception:  # noqa: BLE001
+                    手机号 = ""
+            窗口 = 内置浏览器登录窗口(类型, self, 完成回调=完成,
+                                登录方式=登录方式, 手机号=手机号)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "打开失败", str(e))
             return
@@ -393,6 +404,31 @@ class 登录对话框(QDialog):
         self.短信提示标签.setWordWrap(True)
         self.短信提示标签.setStyleSheet("color: #95a5a6; font-size: 12px;")
         布局.addWidget(self.短信提示标签)
+
+        # ---- 百度专用：走**程序内置浏览器**里的短信登录（推荐）----
+        # 为什么百度不用上面的"发码接口"：实测百度现在的短信登录是登录框里的
+        # ARMOR 组件（跨域 iframe + 设备指纹 + 风控），纯 HTTP 复刻不出来
+        # （`?regphonesend` 能回 200 但**不会真的发短信**；`?getsmscode` 等老接口
+        #  全 404）。而内置浏览器是**真 Chromium**，短信登录框在里面能正常工作，
+        # 而且登录完我们照样能自动取走完整会话（含 pan 域 STOKEN）。
+        if str(self.实例.get("类型") or self.标识) == "baidu":
+            内置行 = QHBoxLayout()
+            self.短信内置浏览器按钮 = QPushButton("📱 用内置浏览器短信登录（推荐）")
+            self.短信内置浏览器按钮.setObjectName("PrimaryButton")
+            self.短信内置浏览器按钮.setToolTip(
+                "在程序里打开百度登录框并**自动切到「短信登录」**：\n"
+                "填手机号 → 收验证码 → 登录，登录完程序自动取走完整会话。\n"
+                "（百度的短信登录是登录框里的风控组件，必须在真浏览器里跑；\n"
+                "  这条路也能拿到写操作要的 pan 域 STOKEN）")
+            self.短信内置浏览器按钮.clicked.connect(
+                lambda: self._内置浏览器登录(登录方式="sms"))
+            内置行.addWidget(self.短信内置浏览器按钮)
+            内置说明2 = QLabel("百度的验证码要走登录框里的风控组件，"
+                           "所以短信登录请用内置浏览器")
+            内置说明2.setWordWrap(True)
+            内置说明2.setStyleSheet("color: #95a5a6; font-size: 11px;")
+            内置行.addWidget(内置说明2, 1)
+            布局.addLayout(内置行)
         布局.addStretch(1)
         return 面板
 

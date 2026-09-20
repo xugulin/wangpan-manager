@@ -101,10 +101,18 @@ class 内置浏览器登录窗口(QDialog):
 
     def __init__(self, 网盘类型: str, 父=None,
                  完成回调: Optional[Callable[[dict], None]] = None,
-                 引擎: 浏览器引擎 | None = None):
-        """``引擎`` 可注入（测试时传 :class:`假引擎`，生产走 QtWebEngine）。"""
+                 引擎: 浏览器引擎 | None = None,
+                 登录方式: str = "",
+                 手机号: str = ""):
+        """``引擎`` 可注入（测试时传 :class:`假引擎`，生产走 QtWebEngine）。
+
+        ``登录方式`` 可选值：``"sms"`` —— 加载完自动把登录框切到「短信登录」页，
+        省得用户自己找（百度登录框有三种方式：扫码 / 账号 / 短信）。
+        """
         super().__init__(父)
         self.网盘类型 = str(网盘类型 or "")
+        self.登录方式 = str(登录方式 or "")
+        self.手机号 = str(手机号 or "").strip()
         self._完成回调 = 完成回调
         self._凭证: list[dict] = []
         self._已回调 = False
@@ -119,8 +127,10 @@ class 内置浏览器登录窗口(QDialog):
         布局 = QVBoxLayout(self)
         布局.setSpacing(6)
 
+        方式提示 = "（已自动切到「短信登录」，填手机号 → 收验证码 → 登录）" \
+            if self.登录方式 == "sms" else "（扫码 / 短信 / 账号密码都行）"
         说明 = QLabel(
-            f"在下面的窗口里登录 <b>{名称}</b>（扫码 / 短信 / 账号密码都行）。\n"
+            f"在下面的窗口里登录 <b>{名称}</b>{方式提示}。\n"
             "登录成功后**程序会自动取走完整会话**（含 HttpOnly 的凭证），"
             "不用你复制任何东西；看到 ✅ 就可以关掉这个窗口。")
         说明.setWordWrap(True)
@@ -187,8 +197,97 @@ class 内置浏览器登录窗口(QDialog):
         入口, _ = 网盘入口.get(self.网盘类型, ("about:blank", ()))
         self.引擎.打开(入口)
 
+    def _切到短信登录(self) -> None:
+        """把登录框切到「短信登录」页。
+
+        为什么要重试：登录框本身是异步渲染的（先加载静态页，再由 JS 挂登录组件），
+        刚 loadFinished 时 tab 常常还不存在 —— 所以按 0.5 秒一次、最多 12 次重试。
+        JS 里按"文字命中 + 可点"找元素，比记 class 名稳（百度改版会换 class）。
+        """
+        if self.引擎 is None:
+            return
+        js = r"""
+(function(){
+  var 词 = ['短信登录', '短信快捷登录'];
+  var 元素 = document.querySelectorAll('a,button,div,span,li,p');
+  for (var i = 0; i < 元素.length; i++) {
+    var e = 元素[i];
+    var t = (e.innerText || e.textContent || '').trim();
+    if (词.indexOf(t) < 0) continue;
+    var r = e.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) continue;
+    try {
+      e.click();
+      var ev = new MouseEvent('click', {bubbles: true, cancelable: true, view: window});
+      e.dispatchEvent(ev);
+      return 'clicked:' + t;
+    } catch (err) { return 'error:' + err; }
+  }
+  // 再看有没有已经出现的短信表单（说明已经在短信页了）
+  var 有手机框 = !!document.querySelector('input[placeholder*="手机"], input[name*="phone"]');
+  return 有手机框 ? 'already' : 'notfound';
+})()
+"""
+        def 试(剩余: int) -> None:
+            if self._已回调 or 剩余 <= 0:
+                return
+            try:
+                结果 = self.引擎.执行JS(js)
+            except Exception:
+                结果 = None
+            if 结果 in ("already",) or (isinstance(结果, str) and 结果.startswith("clicked")):
+                self.状态标签.setText("✅ 已切到「短信登录」：填手机号 → 点发送验证码 → 填验证码")
+                self._填手机号()          # 顺手帮用户把手机号填上
+                return
+            QTimer.singleShot(500, lambda: 试(剩余 - 1))
+        QTimer.singleShot(600, lambda: 试(12))
+
+    #: 自动填手机号最多重试几次（输入框是异步渲染的，但要有个上限）
+    填号重试上限 = 8
+
+    def _填手机号(self, 第几次: int = 0) -> None:
+        """把用户在上一个界面填过的手机号写进登录框（省一次手输）。
+
+        百度登录框会把手机号 base64 编码后塞进 ``encryptMobile`` 隐藏域，
+        只设 ``input.value`` 不够 —— 所以两个都试，并派发 input/change 事件。
+        """
+        if not self.手机号 or self.登录方式 != "sms":
+            return
+        if 第几次 > self.填号重试上限:
+            return                      # 不再无限重试（状态栏已有提示）
+        import json as _json
+        安全 = _json.dumps(self.手机号, ensure_ascii=False)
+        # 选择器里的引号统一改用 \\u0022（双引号）露出，避免和外层 Python 字符串打架
+        脚本 = (
+            "(function(){var v=" + 安全 + ";"
+            "var b=document.querySelector("
+            "'input[placeholder*=\\u624b\\u673a],input[name*=phone],"
+            "input[name*=mobile],input[maxlength=\\u002211\\u0022]');"
+            "if(!b)return 'nofield';"
+            "b.focus();b.value=v;"
+            "b.dispatchEvent(new Event('input',{bubbles:true}));"
+            "b.dispatchEvent(new Event('change',{bubbles:true}));"
+            "b.dispatchEvent(new Event('blur',{bubbles:true}));"
+            "var h=document.getElementById('encryptMobile')||"
+            "document.querySelector('input[name*=encryptMobile]');"
+            "if(h){h.value=btoa(v);}"
+            "return 'filled';})()")
+        try:
+            结果 = self.引擎.执行JS(脚本)
+        except Exception:
+            结果 = None
+        if 结果 == "filled":
+            self.状态标签.setText(
+                f"✅ 已自动填入手机号（{self.手机号[:3]}****）"
+                "：点「发送验证码」→ 收到后填验证码 → 登录")
+        elif 结果 == "nofield":
+            # 输入框还没渲染出来：再等一会儿重试（有次数上限）
+            QTimer.singleShot(600, lambda: self._填手机号(第几次 + 1))
+
     def _加载完(self, 好: bool) -> None:
         if not self._已回调:
+            if self.登录方式 == "sms" and self.网盘类型 == "baidu":
+                self._切到短信登录()
             地址 = ""
             try:
                 地址 = str(self.引擎.页面地址() or "")[:80]

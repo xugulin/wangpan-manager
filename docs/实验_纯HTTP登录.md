@@ -357,3 +357,47 @@ GET https://pan.baidu.com/api/list?dir=/     → {"errno":-6,...}
     （Cookie/凭证/手机号/验证码全部脱敏，POST 体保留结构）。
 * 但**这次结论已经不需要短信接口了** —— 因为结论 2 已经证明：
   即使把短信登录复刻成纯 HTTP，拿到的还是会话仍然换不到 pan STOKEN。
+
+---
+
+# 百度短信登录的实现方式（2026-09-20，最终结论）
+
+## 为什么不做"纯 HTTP 短信登录"
+
+把百度登录页的 JS 扒下来看过（`loginv4_tangram_4e0e15d.js`，593 KB），实测结论：
+
+| 线索 | 结果 |
+|---|---|
+| `POST passport.baidu.com/v2/?getphonestatus`（`phone` + `loginVersion=v4`） | **活着**：返回 `{"errInfo":{"no":"0","msg":"已存在","isPwd":"1"}}`（能判断账号是否存在/有无密码） |
+| `?getsmscode`、`?getpasscode`、`?getphonelogininfo`、`?checkphone` | **全部 404**（nginx 直接拒） |
+| `?loginspmbindmobilesend`、`?bindmobilesend`、`?sendmobilesms`、`sapi/authwidgetverify` | **全部 404** |
+| `POST ?regphonesend` | 回 200 但**响应为空、手机收不到短信**（实测两次都没收到） |
+| JS 里的真实路径 | 短信登录走 `passport.pop.ArmorWidget("bindmobile", {token: bindMobileToken, authsid, …})` —— **ARMOR 风控组件**，接口在它自己的 JS 里 |
+
+所以：**百度的短信登录是登录框里的 ARMOR 组件（跨域 iframe + 设备指纹 + 风控），
+纯 HTTP 复刻不出来**；而且即使复刻出来，按上一节的判决性实验，拿到的 BDUSS
+也换不到 pan 域 STOKEN（写权限还是要真浏览器）。
+
+## 于是实现方式：「内置浏览器 + 自动切到短信登录」
+
+用户在程序里点一下，程序打开**内置浏览器**（真 Chromium），自动：
+
+1. 加载 `pan.baidu.com`；
+2. 用 JS 按**文字**找「短信登录」tab 并点它（重试 12 次 × 0.5 秒，因为登录框是异步渲染的）；
+3. 把用户在短信面板里填过的**手机号自动填进登录框**（连 `encryptMobile`
+   隐藏域一起设 —— 百度会把手机号 base64 塞进这个域）；
+4. 用户只需点「发送验证码」→ 填验证码 → 登录；
+5. **登录成功后程序照旧自动取走完整会话**（含 pan 域 STOKEN），并当场验写权限。
+
+对应改动：
+
+| 文件 | 改动 |
+|---|---|
+| `v8_3/界面/浏览器引擎.py` | 接口新增 `执行JS(脚本)`（页面内小动作用；按文字找元素比记 class 稳） |
+| `v8_3/界面/引擎_QtWebEngine.py` | `执行JS` 实现：`runJavaScript` 异步 → `QEventLoop` + 2.5 秒超时转同步 |
+| `v8_3/界面/内置浏览器登录.py` | 构造支持 `登录方式="sms"` 与 `手机号=`；新增 `_切到短信登录()`、`_填手机号()`（带重试上限） |
+| `v8_3/界面/登录对话框.py` | 短信面板新增「📱 用内置浏览器短信登录（推荐）」，并把手机号带进窗口 |
+| `v8_3/桥/后端_百度.py` | `auth_caps.sms` 从"不支持"改成"支持"，说明写清为什么走内置浏览器 |
+| `工具/界面自检.py` | 新增：短信方式会执行切页 JS、会自动填手机号（假引擎离线验证） |
+
+回归：单测 646 项全绿、界面自检 487 项全绿。
