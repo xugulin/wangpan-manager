@@ -54,6 +54,11 @@ __all__ = [
 默认模型 = "deepseek-r1:1.5b"
 
 #: 探测顺序：先 Ollama，再常见的 OpenAI 兼容端口
+#: 探测本地端口用的超时（秒）。本地服务几毫秒就回应；**不能用聊天那套 5 秒超时** ——
+#: Windows 上连没人听的端口是"一直等"而不是立刻拒绝，6 个端口串行就是 30 秒，
+#: 界面（AI 页）一打开就卡死（真机 CI 实测 60 秒）。
+探测超时秒 = 0.4
+
 候选端口: list[tuple[str, int]] = [
     ("ollama", 11434),
     ("openai兼容", 8080),
@@ -640,48 +645,89 @@ def 下载便携运行时(进度回调=None, 强制: bool = False) -> tuple[bool
     return True, f"内置运行时已就位{版本尾巴}{裁剪说明}：{相对项目路径(落点)}"
 
 
-def 探测到的运行时(超时秒: float = 1.5) -> list[dict]:
+def 探测到的运行时(超时秒: float = 探测超时秒) -> list[dict]:
     """扫一遍本机常见端口，返回**正在运行**的本地推理服务。
 
     每项形如 ``{"提供方": "ollama", "地址": "http://127.0.0.1:11434",
     "模型列表": [...], "版本": "0.34.1"}``。
+
+    ⚠️ **并发**探、超时压到 0.4 秒（本地端口几毫秒就该有回应）。原来是一个端口一个
+    端口串行、每个等 5 秒 —— 在 Windows 上（那儿连没人听的端口不是立刻 refuse，
+    而是一直等到超时）6 个端口就是 30 秒，AI 页一打开就"卡死"（真机 CI 实测 60 秒）。
     """
     if httpx is None:
         return []
-    结果: list[dict] = []
-    for 提供方, 端口 in 候选端口:
-        地址 = f"http://127.0.0.1:{端口}"
-        try:
-            客户端 = httpx.Client(timeout=超时秒)
-            if 提供方 == "ollama":
-                响应 = 客户端.get(f"{地址}/api/version")
-                if 响应.status_code != 200:
-                    continue
-                版本 = str((响应.json() or {}).get("version") or "")
-                模型列表 = []
-                try:
-                    标签 = 客户端.get(f"{地址}/api/tags")
-                    模型列表 = [str(m.get("name") or "")
-                            for m in (标签.json() or {}).get("models", [])]
-                except Exception:
-                    pass
-            else:
-                响应 = 客户端.get(f"{地址}/v1/models")
-                if 响应.status_code != 200:
-                    continue
-                版本 = ""
-                模型列表 = [str(m.get("id") or "")
-                        for m in (响应.json() or {}).get("data", [])]
-            结果.append({"提供方": 提供方, "地址": 地址,
-                      "模型列表": [m for m in 模型列表 if m],
-                      "版本": 版本})
-        except Exception:
-            continue
-        finally:
+    return [项 for 项 in _并发探端口(候选端口, 超时秒=超时秒) if 项]
+
+
+def _试一个端口(提供方: str, 端口: int, 超时秒: float) -> Optional[dict]:
+    """探一个端口；通就返回运行时信息，不通返回 None。"""
+    地址 = f"http://127.0.0.1:{端口}"
+    try:
+        客户端 = httpx.Client(timeout=超时秒)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        if 提供方 == "ollama":
+            响应 = 客户端.get(f"{地址}/api/version")
+            if 响应.status_code != 200:
+                return None
+            版本 = str((响应.json() or {}).get("version") or "")
+            模型列表 = []
             try:
-                客户端.close()
-            except Exception:
+                标签 = 客户端.get(f"{地址}/api/tags")
+                模型列表 = [str(m.get("name") or "")
+                        for m in (标签.json() or {}).get("models", [])]
+            except Exception:  # noqa: BLE001
                 pass
+        else:
+            响应 = 客户端.get(f"{地址}/v1/models")
+            if 响应.status_code != 200:
+                return None
+            版本 = ""
+            模型列表 = [str(m.get("id") or "")
+                    for m in (响应.json() or {}).get("data", [])]
+        return {"提供方": 提供方, "地址": 地址,
+                "模型列表": [m for m in 模型列表 if m], "版本": 版本}
+    except Exception:  # noqa: BLE001 - 端口没人听/超时都算"没有"
+        return None
+    finally:
+        try:
+            客户端.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _并发探端口(候选们, 超时秒: float = 探测超时秒) -> list[Optional[dict]]:
+    """**并发**探一批 ``(提供方, 端口)``，按传入顺序返回结果（没探到 = None）。
+
+    串行探在有防火墙"丢包而不是拒绝"的机器上会拖到几十秒 —— 这是"界面卡死"的元凶之一。
+
+    ⚠️ 用**短命 daemon 线程 + 带超时的 join**，不用 ThreadPoolExecutor：
+    executor 的线程是**非 daemon**、要等解释器退出才回收（``shutdown(wait=False)``
+    照样把它们留着）。长跑进程里（比如整套单测）攒下一堆线程后 Qt 会随机段错误 ——
+    实测：全量单测从 679 全绿变成 exit 139，而逐个测试文件跑都正常。
+    """
+    import threading
+
+    候选们 = list(候选们)
+    if not 候选们:
+        return []
+    结果: list[Optional[dict]] = [None] * len(候选们)
+
+    def 干(i: int, 提供方: str, 端口: int) -> None:
+        try:
+            结果[i] = _试一个端口(提供方, 端口, 超时秒)
+        except Exception:  # noqa: BLE001 - 探测失败就是"没有"
+            结果[i] = None
+
+    线程们 = [threading.Thread(target=干, args=(i, 提供方, 端口),
+                            name=f"探端口-{端口}", daemon=True)
+             for i, (提供方, 端口) in enumerate(候选们)]
+    for 线 in 线程们:
+        线.start()
+    for 线 in 线程们:
+        线.join(timeout=超时秒 + 0.6)      # httpx 自己有超时，这里只是兜底
     return 结果
 
 
@@ -709,10 +755,12 @@ class 本地模型客户端:
     def _客户端(self, 超时秒: float | None = None):
         if httpx is None:
             raise RuntimeError("缺少 httpx（V8_3 依赖之一）")
+        读 = float(超时秒 or self.配置.超时秒)
         return httpx.Client(
-            timeout=httpx.Timeout(connect=2.0,
-                                read=float(超时秒 or self.配置.超时秒),
-                                write=30.0, pool=10.0))
+            # connect 也跟着收：探测本地端口时"连不上"要立刻失败，
+            # 不能等 2 秒（Windows 上没人听的端口是丢包，不是拒绝）
+            timeout=httpx.Timeout(connect=min(2.0, 读),
+                                read=读, write=30.0, pool=10.0))
 
     def _候选地址(self) -> list[tuple[str, str]]:
         """返回 [(提供方, 地址)]：优先用户配置，其次自动探测。"""
@@ -741,48 +789,92 @@ class 本地模型客户端:
             状态.错误 = "缺少 httpx"
             self._状态 = 状态
             return 状态
-        错误们: list[str] = []
-        for 提供方, 地址 in self._候选地址():
-            开始 = time.time()
-            try:
-                客户端 = self._客户端(超时秒=min(5.0, self.配置.超时秒))
-                if 提供方 == "ollama":
-                    响应 = 客户端.get(f"{地址}/api/version")
-                    响应.raise_for_status()
-                    版本 = str((响应.json() or {}).get("version") or "")
-                    模型列表 = self._列模型_ollama(客户端, 地址)
-                else:
-                    响应 = 客户端.get(f"{地址}/v1/models")
-                    响应.raise_for_status()
-                    版本 = ""
-                    模型列表 = self._列模型_openai(客户端, 地址)
-                延迟 = (time.time() - 开始) * 1000
-                模型 = self._选模型(模型列表)
-                状态.可用 = True
-                状态.提供方 = 提供方
-                状态.地址 = 地址
-                状态.版本 = 版本
-                状态.模型列表 = 模型列表
-                状态.模型 = 模型
-                状态.延迟毫秒 = 延迟
-                状态.说明 = (f"已就绪：{len(模型列表)} 个模型可选"
-                          if 模型列表 else "服务在跑，但还没拉取任何模型")
-                if not 模型列表:
-                    状态.说明 += f"（可执行：ollama pull {self.配置.模型 or 默认模型}）"
-                self._状态 = 状态
-                return 状态
-            except Exception as e:  # noqa: BLE001
-                错误们.append(f"{地址}: {type(e).__name__}")
-            finally:
-                try:
-                    客户端.close()
-                except Exception:
-                    pass
+        # ⚠️ 必须**并发**探、而且只等 探测超时秒：串行 + 5 秒超时在 Windows 上
+        #    实测能把"打开 AI 页"拖到 60 秒（那台机器连没人听的端口不是立刻拒绝）。
+        候选 = self._候选地址()
+        开始 = time.time()
+        探到 = [项 for 项 in self._并发探测(候选) if 项]
+        用时毫秒 = (time.time() - 开始) * 1000
+        if 探到:
+            首选 = 探到[0]                     # 候选顺序 = 优先顺序（ollama 在前）
+            模型列表 = list(首选.get("模型列表") or [])
+            模型 = self._选模型(模型列表)
+            状态.可用 = True
+            状态.提供方 = str(首选.get("提供方") or "")
+            状态.地址 = str(首选.get("地址") or "")
+            状态.版本 = str(首选.get("版本") or "")
+            状态.模型列表 = 模型列表
+            状态.模型 = 模型
+            状态.延迟毫秒 = 用时毫秒
+            状态.说明 = (f"已就绪：{len(模型列表)} 个模型可选"
+                      if 模型列表 else "服务在跑，但还没拉取任何模型")
+            if not 模型列表:
+                状态.说明 += f"（可执行：ollama pull {self.配置.模型 or 默认模型}）"
+            self._状态 = 状态
+            return 状态
+        错误们 = [f"{项[1]}: 未响应" for 项 in 候选]
         状态.错误 = ("没检测到本地推理服务；"
                   + (f"试过 {len(错误们)} 个端口" if 错误们 else ""))
         状态.说明 = self.安装指引()
         self._状态 = 状态
         return 状态
+
+    def _试一个候选(self, 提供方: str, 地址: str) -> Optional[dict]:
+        """探一个候选地址（用**类自己的**客户端与列模型逻辑，不另起一套）。"""
+        客户端 = None
+        try:
+            客户端 = self._客户端(超时秒=探测超时秒)
+            if 提供方 == "ollama":
+                响应 = 客户端.get(f"{地址}/api/version")
+                响应.raise_for_status()
+                版本 = str((响应.json() or {}).get("version") or "")
+                模型列表 = self._列模型_ollama(客户端, 地址)
+            else:
+                响应 = 客户端.get(f"{地址}/v1/models")
+                响应.raise_for_status()
+                版本 = ""
+                模型列表 = self._列模型_openai(客户端, 地址)
+            return {"提供方": 提供方, "地址": 地址, "版本": 版本,
+                    "模型列表": [m for m in 模型列表 if m]}
+        except Exception:  # noqa: BLE001 - 连不上/超时/不是这个协议，都算"没有"
+            return None
+        finally:
+            if 客户端 is not None:
+                try:
+                    客户端.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _并发探测(self, 候选们) -> list[Optional[dict]]:
+        """**并发**探一批候选地址，按传入顺序返回（没探到 = None）。
+
+        为什么必须并发、而且超时只给 探测超时秒：串行 + 5 秒超时在 Windows 上
+        实测能把"打开 AI 页"拖到 60 秒（那台机器连没人听的端口是丢包，不是拒绝）。
+        怎么实现：短命 daemon 线程 + 带超时的 join —— 不用 ThreadPoolExecutor，
+        它的线程是非 daemon，长跑进程里攒着容易出事。
+        """
+        import threading
+
+        候选们 = list(候选们)
+        if not 候选们:
+            return []
+        结果: list[Optional[dict]] = [None] * len(候选们)
+
+        def 干(i: int, 提供方: str, 地址: str) -> None:
+            try:
+                结果[i] = self._试一个候选(提供方, 地址)
+            except Exception:  # noqa: BLE001
+                结果[i] = None
+
+        线程们 = [threading.Thread(target=干, args=(i, 提供方, 地址),
+                                name=f"探本地服务-{地址.rsplit(':', 1)[-1]}",
+                                daemon=True)
+                 for i, (提供方, 地址) in enumerate(候选们)]
+        for 线 in 线程们:
+            线.start()
+        for 线 in 线程们:
+            线.join(timeout=探测超时秒 + 0.8)
+        return 结果
 
     @staticmethod
     def _列模型_ollama(客户端, 地址: str) -> list[str]:

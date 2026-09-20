@@ -610,3 +610,67 @@ class 内置ollama基座测试(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class 端口黑洞探测测试(unittest.TestCase):
+    """Windows 上"连没人听的端口"是**丢包等超时**，不是立刻拒绝。
+
+    所以探测必须**并发 + 短超时**：6 个端口串行、每个 5 秒 = 30 秒，AI 页一打开
+    就是"卡死"（真机 CI 实测 60 秒 —— 检测() 在被预热时被调了两次）。这条把它钉住。
+
+    一个测试里把两条探测路径都量了：黑洞监听架一次就够，分开写会互相抢端口（跳过）。
+    """
+
+    def test_黑洞端口不许把探测拖住(self):
+        import socket
+        import threading
+        import time as _t
+        from v8_3.AI.本地模型 import (候选端口, 取本地模型配置, 本地模型客户端,
+                                 探测到的运行时)
+
+        监听们 = []
+        for _提供方, 端口 in 候选端口:
+            套 = socket.socket()
+            套.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                套.bind(("127.0.0.1", 端口))
+                套.listen(8)
+            except OSError:
+                套.close()
+                continue          # 端口被真服务占着（比如本机真在跑 ollama）就跳过
+            监听们.append(套)
+
+            收下的 = []
+
+            def 收(套=套):
+                while True:
+                    try:
+                        连接, _ = 套.accept()      # 收下连接，但**永不回数据**
+                    except OSError:
+                        return
+                    收下的.append(连接)              # 留着不放（回数据就不是黑洞了）
+            threading.Thread(target=收, daemon=True).start()
+
+        if not 监听们:
+            self.skipTest("候选端口全被占用，造不出黑洞")
+        try:
+            客户端 = 本地模型客户端(取本地模型配置({"启用": True}),
+                              日志回调=lambda *_: None)
+            开始 = _t.time()
+            客户端.检测()
+            检测用时 = _t.time() - 开始
+            开始 = _t.time()
+            探测到的运行时()
+            探测用时 = _t.time() - 开始
+        finally:
+            for 套 in 监听们:
+                套.close()
+            for 连接 in 收下的:
+                try:
+                    连接.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        self.assertLess(检测用时, 3.0,
+                        f"黑洞端口把 检测() 拖住了 {检测用时:.1f}s（应该并发 + 短超时）")
+        self.assertLess(探测用时, 3.0,
+                        f"黑洞端口把 探测到的运行时() 拖住了 {探测用时:.1f}s")
