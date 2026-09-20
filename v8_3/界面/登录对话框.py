@@ -575,31 +575,6 @@ class 登录对话框(QDialog):
         if 键 in 顺序:
             self.堆叠.setCurrentIndex(顺序.index(键))
         self._设置状态(f"当前方式：{方式标题[键][0]}")
-        # 用"扫码"或"短信"方式时，顺手在后台把该网盘的登录页加载起来：
-        # 用户点「用内置浏览器登录」时页面往往已经在那儿了（省 2.6~4.2 秒）。
-        # 只在"还没登录"时才预热 —— 已登录的网盘不需要登录页。
-        if 键 in ("qrcode", "sms"):
-            self._预热登录页(键)
-
-    def _预热登录页(self, 方式: str = "qrcode") -> None:
-        """后台预热登录页；失败/不需要就静默跳过（这只是加速，不是功能）。"""
-        try:
-            if bool((self.账号状态 or {}).get("已登录")) if isinstance(
-                    getattr(self, "账号状态", None), dict) else False:
-                return
-        except Exception:
-            pass
-        try:
-            from .预热登录页 import 预热登录页 as _预热
-        except Exception:
-            return
-        try:
-            if _预热(self.标识, 登录方式="sms" if 方式 == "sms" else "",
-                    父=self):
-                self._日志("已在后台预加载登录页（点「用内置浏览器登录」时不用等）")
-        except Exception:
-            pass
-
     # ==================== 通用 ====================
 
     def _设置状态(self, 文本: str, 颜色: str = "#34495e",

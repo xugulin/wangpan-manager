@@ -118,29 +118,27 @@ class 内置浏览器登录窗口(QDialog):
         self._凭证: list[dict] = []
         self._已回调 = False
         # 浏览器交给可插拔引擎：本窗口只做"显示 + 流程 + 收凭证"
+        # 浏览器交给可插拔引擎：本窗口只做"显示 + 流程 + 收凭证"。
+        # ⚠️ 曾经尝试过"预热登录页 + 接管预热视图"来提速（打开窗口 0.5 秒），
+        #    但两次实测都出现**窗口一片空白**：预热是在隐藏控件里导航的，
+        #    QtWebEngine 在"隐藏视图里加载 + 视图换父"这条路上不可靠；
+        #    而且量下来预热只能热 HTTP 缓存，收益无法量化（loadFinished 在 SPA 上
+        #    本来就不可靠）。结论：**删掉预热，窗口永远用自己的视图**，可靠优先。
+        #    详见 docs/实验_纯HTTP登录.md「预热为什么被删掉」。
         self.接管了预热 = False
+        # 测试/自检用：强制只用注入的引擎，绝不偷偷建真的 QtWebEngine
+        # （自检里建真引擎会把 QtWebEngine 拉起来，退出时它自己会闹脾气 —— 段错误）
+        import os as _os
+        self._只用注入引擎 = _os.environ.get("V8_3_只用注入引擎", "") in ("1", "true", "True")
         if 引擎 is not None:
             self.引擎: 浏览器引擎 = 引擎
+        elif self._只用注入引擎:
+            from .浏览器引擎 import 假引擎 as _假引擎
+            self.引擎 = _假引擎()
+            self.引擎.名字 = "假引擎（V8_3_只用注入引擎=1）"
         else:
-            # 先问预热模块有没有"已经加载好的登录页" —— 这是登录提速的关键：
-            # 用户点「用内置浏览器登录」时，页面往往已经加载完了（省 2.6~4.2 秒）。
-            预热 = None
-            try:
-                from .预热登录页 import 取预热引擎
-                预热 = 取预热引擎(self.网盘类型)
-            except Exception:
-                预热 = None
-            if 预热 is not None and 预热.可用():
-                self.引擎 = 预热
-                self.接管了预热 = True
-            else:
-                try:
-                    from .预热登录页 import 丢掉预热引擎
-                    丢掉预热引擎(self.网盘类型)      # 拿到的不可用就扔掉，别占内存
-                except Exception:
-                    pass
-                self.引擎 = 建引擎(
-                    "qtwebengine", {"数据目录": str(内置浏览器目录())}, 父=self)
+            self.引擎 = 建引擎(
+                "qtwebengine", {"数据目录": str(内置浏览器目录())}, 父=self)
 
         名称 = 网盘名称.get(self.网盘类型, self.网盘类型)
         self.setWindowTitle(f"🌐 内置浏览器登录 · {名称}")
@@ -221,26 +219,6 @@ class 内置浏览器登录窗口(QDialog):
             self.引擎.挂加载回调(self._加载完)
         except Exception:
             pass
-        if self.接管了预热:
-            # 预热时已经导航过同一个地址了 —— 地址对得上就别重新加载（这是提速的关键）
-            现在 = ""
-            try:
-                现在 = str(self.引擎.页面地址() or "")
-            except Exception:
-                现在 = ""
-            想要 = "sms_login=1" if self.登录方式 == "sms" else "pan.baidu.com"
-            if 想要 in 现在 and not self._像是白板():
-                self.状态标签.setText("🔥 已接管预热好的登录页（省下一次加载）")
-                return
-            # ⚠️ 实测踩过：预热那次导航可能**早就停了/从没画出来** ——
-            #    用户看到的就是"窗口一片空白、地址栏却对"。接管时先查一下：
-            #    还在加载、或者文档是空的，就强制重来一次（这次窗口已经可见了）。
-            self.状态标签.setText("🔥 接管预热页面（正在确认渲染，必要时重新加载）…")
-            try:
-                self.引擎.打开(现在 or 入口)
-            except Exception:
-                pass
-            return
         # （视图已经在 布局.addWidget(视图) 那一步从预热宿主"抢"过来了：
         #   Qt 加进布局时会自动换父，所以这里不用再 重新挂到()。）
         入口, _ = 网盘入口.get(self.网盘类型, ("about:blank", ()))
@@ -250,6 +228,9 @@ class 内置浏览器登录窗口(QDialog):
             # 万一百度改了这个参数，_切到短信登录()（按文字点页签）还会兜底。
             入口 = "https://pan.baidu.com/?sms_login=1"
         self.引擎.打开(入口)
+        # 兜底：SPA 的 loadFinished 不一定按时来（实测百度网盘首页经常不触发），
+        # 所以打开后 4 秒自己查一次：还在转/是白板就重载一次（只救一次）。
+        QTimer.singleShot(4000, self._四秒后看一看)
 
     def _切到短信登录(self) -> None:
         """把登录框切到「短信登录」页。
@@ -341,8 +322,7 @@ class 内置浏览器登录窗口(QDialog):
     def _加载完(self, 好: bool) -> None:
         if not self._已回调:
             # 加载"完成"了但文档还是空的（预热遗留的空白页）→ 自动重载一次
-            if self.接管了预热 and not getattr(self, "_救过一次", False) \
-                    and self._像是白板():
+            if not getattr(self, "_救过一次", False) and self._像是白板():
                 self._救过一次 = True
                 self.状态标签.setText("⚠️ 页面是空白的，正在重新加载…")
                 try:
@@ -364,6 +344,24 @@ class 内置浏览器登录窗口(QDialog):
         #    引擎不会再发"新增 cookie"事件 —— 必须主动捞一遍，
         #    否则"打开窗口就是登录态"却永远收不到凭证（引擎内部已实现这一点）。
         self._查凭证()
+
+    def _四秒后看一看(self) -> None:
+        """打开页面 4 秒后的兜底检查（防"白板/一直转圈"没人管）。"""
+        if self._已回调 or getattr(self, "_救过一次", False):
+            return
+        try:
+            地址 = str(self.引擎.页面地址() or "")
+        except Exception:
+            地址 = ""
+        if not 地址 or 地址.startswith("about:"):
+            return                      # 还没开始导航，别乱重载
+        if self._像是白板():
+            self._救过一次 = True
+            self.状态标签.setText("⚠️ 页面还是空的，正在重新加载…")
+            try:
+                self.引擎.打开(地址 or self.地址框.text().strip())
+            except Exception:
+                pass
 
     def _像是白板(self) -> bool:
         """页面是不是"空白/还没画出来"：还在加载，或文档几乎没内容。
