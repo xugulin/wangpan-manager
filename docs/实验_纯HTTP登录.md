@@ -282,3 +282,78 @@ zbar 扫"字符画还原图"：✅ 内容一致（可扫）
 **真正的判决性实验仍然是带账号密码的那一次**（`--账号 xxx` + 交互输密码）：
 只有它能回答"表单登录成功时服务端会不会下发 pan 域 STOKEN"。
 这个必须由账号主人在自己机器上跑 —— 密码不经过任何第三方。
+
+---
+
+# 🔬 判决性实验（2026-09-20）：pan 域 STOKEN 到底靠什么拿到
+
+## 实验设计
+
+用户指出"用手机短信登录"更现实（账号密码之后还有短信验证）。为了不再猜接口，
+先做了一个**不需要复刻任何登录接口**的判决性实验：
+
+> **一个"真网页版登录"（用户刚在浏览器里短信登录成功）拿到的 BDUSS，
+> 用纯 httpx 访问 pan 域，能不能换到 pan 域 STOKEN？**
+
+如果**能** → 任何能拿到 BDUSS 的登录方式（扫码/短信/纯 HTTP 复刻）都能自己换成
+可写会话 → **浏览器引擎不必内置**（省 209 MB）。
+如果**不能** → 服务端还要看浏览器指纹/JS 执行 → 真浏览器渲染是硬要求。
+
+## 结果（脚本：`~/v8_3_工作区/逆向/实验_BDUSS换panSTOKEN.py`）
+
+浏览器（CDP 取 cookie，确认已登录）侧：
+
+```
+cookie 名：BAIDUID、BDUSS、BDUSS_BFESS、STOKEN、STOKEN_BFESS、PTOKEN、
+          PANPSC、csrfToken、HISTORY、UBI、XFI、XFT …
+BDUSS：取到（tLSUNvRn…）        ← 网页版登录换来的
+pan 域 STOKEN 在浏览器里： True   ← 浏览器里有
+```
+
+纯 httpx（**只带这个 BDUSS**，带正常 UA/Referer，跟随重定向）侧：
+
+```
+GET https://pan.baidu.com/disk/main          → HTTP 200，最终地址没被踢
+   ↓ Set-Cookie PANPSC（域 pan.baidu.com）    ← 只有"清空"用的 PANPSC
+GET https://pan.baidu.com/api/list?dir=/     → {"errno":-6,...}
+结论：纯 httpx 访问 pan 域后，pan 域 STOKEN ❌ 没拿到
+      （cookie jar 里只有 BAIDUID / BAIDUID_BFESS / PANPSC / csrfToken / newlogin）
+```
+
+补充：`passport.baidu.com/v2/api/` 上那些"不带正确查询串就 404"的接口一律
+回 404（nginx），我未能用纯 HTTP 复现出"有效会话"的判据 —— 这条也说明
+**纯 HTTP 侧连"证明自己已登录"都做不到**。
+
+## 三条实测结论（决定路线）
+
+| # | 结论 | 证据 |
+|---|---|---|
+| 1 | **扫码登录的 BDUSS 拿不到 pan STOKEN** | 前一轮实测：`/disk/main` 被重定向到 `errmsg=Auth Login Params Not Corret`；`补齐 bdstoken 失败 errno:-6` |
+| 2 | **网页版（短信）登录的 BDUSS，用纯 HTTP 复用也拿不到 pan STOKEN** | 本次实验：只带 BDUSS 请求 pan 域 → 没有 STOKEN、`errno:-6` |
+| 3 | **浏览器里有 pan STOKEN** | CDP 取到的 cookie 里 `STOKEN`（域 `.pan.baidu.com`）存在，且写操作实测可用 |
+
+**因此**：pan 域 STOKEN 的发放**不是"拿到某个 cookie 就能换"**，而是与
+"浏览器里真实执行了网页版登录流程"绑定（登录页要跑设备指纹
+`mkd.js`/`fingerprint.js`、风控 `loginv5`/`hercules bundle`，pan 域的换发
+也在浏览器上下文里完成）。
+
+## 对"省掉浏览器引擎"的影响
+
+* **纯 HTTP 复刻登录（无论扫码/密码/短信）→ 最多只能拿到"只读会话"**，
+  写权限拿不到；
+* 唯一稳的写权限来源是**真浏览器渲染的网页版登录**（内置浏览器 / 用户自己的
+  浏览器导入）；
+* 所以"自研登录器替代 QtWebEngine"这条路**在写权限上不成立**；
+  能省的只有"Windows 用系统 WebView2"（0 体积、仍是真浏览器）或
+  "出无内置浏览器的精简包，让用户用自己的浏览器"。
+
+## 顺带记录：HAR / 抓包工具的现状
+
+* 为了抓短信接口，写了两个工具（都在工作区，不进仓库）：
+  * `抓短信接口.py`：CDP 连浏览器面板 → **在页面里挂钩 XHR/fetch** →
+    轮询读回请求（URL/方法/POST 体，自动脱敏）。比 CDP 的 Network 事件可靠
+    （本机实测 Network 事件一条都收不到）；
+  * `工具/洗HAR.py`（**进仓库**）：把浏览器导出的 HAR 洗成可安全分享的样子
+    （Cookie/凭证/手机号/验证码全部脱敏，POST 体保留结构）。
+* 但**这次结论已经不需要短信接口了** —— 因为结论 2 已经证明：
+  即使把短信登录复刻成纯 HTTP，拿到的还是会话仍然换不到 pan STOKEN。
