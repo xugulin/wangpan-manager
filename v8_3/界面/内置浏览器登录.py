@@ -195,6 +195,11 @@ class 内置浏览器登录窗口(QDialog):
         except Exception:
             pass
         入口, _ = 网盘入口.get(self.网盘类型, ("about:blank", ()))
+        if self.登录方式 == "sms" and self.网盘类型 == "baidu":
+            # 从"短信登录"入口直接进：百度网盘首页支持 URL 参数把登录框直接开到
+            # 短信登录页（?sms_login=1），用户不用先找登录按钮再切页签。
+            # 万一百度改了这个参数，_切到短信登录()（按文字点页签）还会兜底。
+            入口 = "https://pan.baidu.com/?sms_login=1"
         self.引擎.打开(入口)
 
     def _切到短信登录(self) -> None:

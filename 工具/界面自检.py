@@ -2372,6 +2372,9 @@ def main() -> int:
         for _ in range(30):            # 循环泵 1.5 秒：窗口里的 QTimer 才会真正触发
             泵(0.05)
         _短信Js = [x for x in _短信引擎.操作记录 if x[0] == "执行JS"]
+        检查(any("sms_login=1" in str(x[1]) for x in _短信引擎.操作记录
+                 if x[0] == "打开"),
+             "短信方式：入口直接带 ?sms_login=1（一键跳到短信登录页）")
         检查(bool(_短信Js), '短信方式：窗口会执行『切到短信登录』的 JS')
         检查(any("encryptMobile" in x[1] for x in _短信Js)
              or "已自动填入" in _短信窗.状态标签.text()
