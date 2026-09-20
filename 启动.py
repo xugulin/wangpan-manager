@@ -107,6 +107,23 @@ def _装卡死自诊断() -> None:
         pass
 
 
+def 装卡顿诊断() -> bool:
+    """命令行给了 --性能诊断/--诊断（或环境变量 V8_3_卡顿诊断=1）就开诊断。
+
+    诊断只写 数据/卡顿诊断.log，不改任何行为。
+    """
+    try:
+        from v8_3.卡顿诊断 import 开着吗, 开始
+        if not 开着吗():
+            return False
+        开了 = 开始()
+        if 开了:
+            print("[诊断] 卡顿诊断已开启 → 数据/卡顿诊断.log")
+        return 开了
+    except Exception:
+        return False
+
+
 def main() -> int:
     argv, 级别, 静默, 要自检 = _取出日志参数(list(sys.argv[1:]))
 
@@ -137,6 +154,8 @@ def main() -> int:
         启动日志 = 自检.行
     else:
         打印启动横幅()
+
+    装卡顿诊断()          # --性能诊断 / V8_3_卡顿诊断=1 时开（只写日志，不改行为）
 
     from v8_3.界面.主窗口 import 运行界面
     return int(运行界面(AI运行时=运行时, 主题=主题名,

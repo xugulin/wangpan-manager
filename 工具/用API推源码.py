@@ -22,7 +22,8 @@ import urllib.request
 令牌 = (pathlib.Path.home() / "python/令牌/github-token.txt").read_text().strip()
 拥有人, 仓库名, 分支 = "xugulin", "wangpan-manager", "main"
 API = "https://api.github.com"
-项目 = pathlib.Path("/home/xgl/python/网盘管理")
+# 项目根**相对本文件推导**（不写死本机路径：可移植性单测会拦，也不该泄露用户名）
+项目 = pathlib.Path(__file__).resolve().parents[1]
 
 
 def 请求(方法, 地址, 数据=None, 类型="application/json"):

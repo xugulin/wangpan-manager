@@ -1105,9 +1105,62 @@ class 主窗口(QMainWindow):
         super().closeEvent(事件)
 
 
+def _调优应用(应用):
+    """按平台关掉几个"拖慢界面"的开关，并把环境信息写进诊断。
+
+    Windows 上实测过"点一下卡几分钟"，常见放大因素：
+      * **可访问性桥（UIA）**：装了某些输入法/屏幕阅读器时，Qt 会为每个控件建
+        可访问性节点，控件一多就成倍变慢 —— 本项目界面有几百个控件，
+        这里显式关掉（默认也没有辅助功能依赖）；
+      * **原生菜单栏**：Windows 上是原生菜单，主题样式会失效还会触发额外重绘；
+      * 高 DPI 缩放策略：取整会让 125%/150% 缩放下出现半像素重绘，用 PassThrough 更稳。
+    所有开关都是"失败就跳过"，不影响功能。
+    """
+    try:
+        from PySide6.QtCore import Qt
+        # 不要可访问性桥（Windows 上最明显的卡顿来源之一；可用环境变量强制打开）
+        import os as _os
+        if _os.environ.get("V8_3_保留可访问性", "") not in ("1", "true", "True"):
+            应用.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+            try:
+                from PySide6.QtCore import QCoreApplication
+                QCoreApplication.setAttribute(Qt.AA_DontUseNativeMenuBar, True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        # 环境/渲染器 → **同时**写诊断日志和启动日志（卡顿排查全靠它；
+        # 诊断没开时也要能拿到，所以这里直接调追加日志）
+        import platform as _pf
+        from PySide6.QtGui import QGuiApplication
+        屏 = ""
+        try:
+            主屏 = QGuiApplication.primaryScreen()
+            if 主屏 is not None:
+                比例 = 主屏.devicePixelRatio() or 1.0
+                几何 = 主屏.geometry()
+                屏 = (f"{几何.width()}x{几何.height()} @{比例:.2f}x"
+                     f"（逻辑 {主屏.size().width()}x{主屏.size().height()}）")
+        except Exception:
+            pass
+        文本 = (f"环境：{_pf.platform()} {_pf.release()}｜Python {_pf.python_version()}"
+              f"｜平台插件 {QGuiApplication.platformName()}｜屏幕 {屏}")
+        print(f"[环境] {文本}", flush=True)
+        try:
+            from ..卡顿诊断 import _写 as _诊断写
+            _诊断写(文本)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return 应用
+
+
 def 运行界面(AI运行时=None, 主题: str = "", 启动日志=None):
     import sys as _sys
     应用 = QApplication.instance() or QApplication(_sys.argv)
+    应用 = _调优应用(应用)
     if 主题:
         try:
             应用.setStyleSheet(主题管理器.获取样式表(主题))
