@@ -13,13 +13,40 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import pathlib
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 
-令牌 = (pathlib.Path.home() / "python/令牌/github-token.txt").read_text().strip()
+def _读令牌() -> str:
+    """按优先级找令牌：环境变量 → 网盘管理专用 → 通用。
+
+    为什么要多候选：GitHub 的 Actions 工作流需要令牌带 `workflow` 作用域，
+    而通用令牌（`github-token.txt`）只有 `repo` —— 于是单独建一个网盘管理专用令牌
+    （`github-token-网盘管理.txt`）放这里，代码不用改就能用上。
+    """
+    import os
+    环境 = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+    if 环境:
+        return 环境
+    家 = pathlib.Path.home() / "python" / "令牌"
+    for 名 in ("网盘管理token.txt", "github-token-网盘管理.txt",
+             "github-token-wangpan.txt", "github-token.txt"):
+        文件 = 家 / 名
+        try:
+            if 文件.is_file():
+                值 = 文件.read_text(encoding="utf-8").strip()
+                if 值:
+                    return 值
+        except Exception:
+            continue
+    raise SystemExit("找不到 GitHub 令牌：请把令牌写进 ~/python/令牌/github-token-网盘管理.txt，"
+                     "或设置环境变量 GITHUB_TOKEN")
+
+
+令牌 = _读令牌()
 拥有人, 仓库名, 分支 = "xugulin", "wangpan-manager", "main"
 API = "https://api.github.com"
 # 项目根**相对本文件推导**（不写死本机路径：可移植性单测会拦，也不该泄露用户名）

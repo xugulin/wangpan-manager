@@ -24,7 +24,15 @@ from urllib.parse import quote
 
 项目根 = Path(__file__).resolve().parent.parent
 发布目录 = 项目根 / "构建" / "发布"
-令牌文件 = Path.home() / "python" / "令牌" / "github-token.txt"
+#: 令牌候选（按优先级）：网盘管理专用 → 通用。留多候选是为了"专用令牌带 workflow
+#: 作用域"这种情况不用改代码（Actions 工作流必须有 workflow 作用域）。
+令牌候选 = (
+    Path.home() / "python" / "令牌" / "网盘管理token.txt",
+    Path.home() / "python" / "令牌" / "github-token-网盘管理.txt",
+    Path.home() / "python" / "令牌" / "github-token-wangpan.txt",
+    Path.home() / "python" / "令牌" / "github-token.txt",
+)
+令牌文件 = next((x for x in 令牌候选 if x.is_file()), 令牌候选[0])
 
 拥有人 = "xugulin"
 仓库名 = "wangpan-manager"
