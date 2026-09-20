@@ -969,7 +969,11 @@ class 播放页面(QWidget):
         self._守护.开始(无限=True)
 
     def _自愈画面(self) -> None:
-        """把画面收回播放页（同一个播放器：绑句柄 + 重开媒体 + 跳回位置）。"""
+        """把画面收回播放页（同一个播放器：**先停住** → 绑句柄 → 重开媒体 → 跳回位置）。
+
+        ⚠️ 必须先停：播放中 set_xwindow 不会搬走已有的视频输出，直接重播会在新句柄上
+        **再开一个 vout** —— 那就是"多出来一个超出屏幕的大窗口、两个窗口都在放"的来源。
+        """
         if self.会话 is None or self.会话.播放器 is None:
             return
         位置 = 0.0
@@ -977,6 +981,13 @@ class 播放页面(QWidget):
             位置 = float(self.会话.播放器.进度秒())
         except Exception:  # noqa: BLE001
             位置 = 0.0
+        try:
+            已停 = bool(self.会话.播放器.停止并等待(3.0))
+        except Exception:
+            已停 = True
+        if not 已停:
+            self._AI写("[显示] ⚠️ 播放器没能及时停住，仍尝试收回画面"
+                     "（若出现第二个窗口，用「独立窗口」按钮或重开播放）")
         if self.会话.起播(self._安全句柄()):
             def _跳(秒=位置):
                 try:

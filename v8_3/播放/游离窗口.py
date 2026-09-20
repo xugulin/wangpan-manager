@@ -62,6 +62,9 @@ def _载入():
     L.XOpenDisplay.restype = ctypes.c_void_p
     L.XOpenDisplay.argtypes = [ctypes.c_char_p]
     L.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    L.XGetWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                     ctypes.c_void_p]
+    L.XGetWindowAttributes.restype = ctypes.c_int
     L.XDefaultRootWindow.restype = ctypes.c_ulong
     L.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
     L.XQueryTree.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
@@ -110,6 +113,24 @@ class _类提示(ctypes.Structure):
     # 拿不到原始指针去 XFree —— 传 bytes 给 XFree 会**堆损坏崩溃**（实测
     # "free(): invalid size"）。
     _fields_ = [("res_name", ctypes.c_void_p), ("res_class", ctypes.c_void_p)]
+
+
+class _窗口属性(ctypes.Structure):
+    """XWindowAttributes 的**前缀**（我们只读 width/height，后面字段不关心）。"""
+
+    _fields_ = [("x", ctypes.c_int), ("y", ctypes.c_int),
+                ("width", ctypes.c_int), ("height", ctypes.c_int),
+                ("border_width", ctypes.c_int), ("depth", ctypes.c_int),
+                ("visual", ctypes.c_void_p), ("root", ctypes.c_ulong),
+                ("class_", ctypes.c_int), ("bit_gravity", ctypes.c_int),
+                ("win_gravity", ctypes.c_int), ("backing_store", ctypes.c_int),
+                ("backing_planes", ctypes.c_ulong),
+                ("backing_pixel", ctypes.c_ulong), ("save_under", ctypes.c_int),
+                ("colormap", ctypes.c_ulong), ("map_installed", ctypes.c_int),
+                ("map_state", ctypes.c_int), ("all_event_masks", ctypes.c_long),
+                ("your_event_mask", ctypes.c_long),
+                ("do_not_propagate_mask", ctypes.c_long),
+                ("override_redirect", ctypes.c_int), ("screen", ctypes.c_void_p)]
 
 
 class _客户端消息数据(ctypes.Union):
@@ -202,6 +223,28 @@ def 是VLC窗口(类名: str, 标题: str) -> bool:
         return False
     return (名.endswith(VLC窗口标题尾巴) or "vlc 媒体播放器" in 名
             or 名 == "vlc")
+
+
+def 窗口尺寸(窗口号: int) -> tuple[int, int]:
+    """取窗口宽高（拿不到就 (0, 0)）—— 诊断"那个窗口比屏幕还大"用。"""
+    if not 可用():
+        return (0, 0)
+    L = _载入()
+    显示 = L.XOpenDisplay(None)
+    if not 显示:
+        return (0, 0)
+    try:
+        属性 = _窗口属性()
+        L.XGetWindowAttributes(ctypes.c_void_p(显示), ctypes.c_ulong(窗口号),
+                             ctypes.byref(属性))
+        return (int(属性.width), int(属性.height))
+    except Exception:
+        return (0, 0)
+    finally:
+        try:
+            L.XCloseDisplay(ctypes.c_void_p(显示))
+        except Exception:
+            pass
 
 
 def 找游离窗口(排除窗口号=()) -> list[tuple[int, str]]:

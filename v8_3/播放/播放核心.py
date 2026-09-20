@@ -529,6 +529,15 @@ class 播放会话:
         if self.播放器 is None:
             self.播放器 = VLC(窗口句柄=窗口句柄, 日志回调=self._日志)
         else:
+            # ⚠️ 换绑之前必须**真的停住**：播放中 set_xwindow 不会搬走已有 vout，
+            #    紧接着重播就会多开一个窗口（用户实测："多出来一个超出屏幕的大窗口，
+            #    两个窗口都在放同一个视频"）。句柄没变就不用停。
+            旧句柄 = int(getattr(self.播放器, "窗口句柄", 0) or 0)
+            if int(窗口句柄 or 0) != 旧句柄:
+                try:
+                    self.播放器.停止并等待(3.0)
+                except Exception:
+                    pass
             self.播放器.绑定窗口(窗口句柄)
         选项 = self.设置.libvlc选项()
         self._日志(f"[播放] 起播（缓存 {self.设置.网络缓存毫秒}ms，"

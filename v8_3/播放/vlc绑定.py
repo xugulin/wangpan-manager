@@ -568,6 +568,28 @@ class VLC:
                 pass
             self._媒体 = None
 
+    def 停止并等待(self, 超时秒: float = 3.0) -> bool:
+        """停止播放并**等它真的停下来**（vout 释放是异步的）。
+
+        为什么必须等：播放中直接 `set_xwindow` 换绑不会搬走已有的视频输出，
+        紧接着再 `播放()` 就会在新句柄上**又开一个 vout** —— 用户看到的
+        "多出来一个超大窗口、两个窗口都在放同一个视频"就是这么来的。
+        等到状态变成 Stopped（或超时）再换绑/重播，才只可能有一个窗口。
+        """
+        self.停止()
+        if not self._播放器:
+            return True
+        截止 = time.time() + max(0.1, float(超时秒))
+        while time.time() < 截止:
+            try:
+                if int(self.状态) in (播放状态.已停止, 播放状态.已结束,
+                                    播放状态.出错):
+                    return True
+            except Exception:
+                return True
+            time.sleep(0.05)
+        return False
+
     # ---------------- 状态 / 进度 ----------------
 
     @property
