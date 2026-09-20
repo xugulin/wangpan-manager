@@ -189,6 +189,24 @@ class QtWebEngine引擎(浏览器引擎):
         视图 = self.取视图()
         视图.load(QUrl(str(url)))
 
+    def 加载中(self) -> bool:
+        """页面还在加载吗（拿不到就当 False）。"""
+        try:
+            页面 = self._视图.page() if self._视图 is not None else None
+            return bool(页面 is not None and 页面.isLoading())
+        except Exception:
+            return False
+
+    def 重新加载(self) -> bool:
+        """重新加载当前地址（预热"卡住/白板"时用它救一次）。"""
+        try:
+            if self._视图 is None:
+                return False
+            self._视图.reload()
+            return True
+        except Exception:
+            return False
+
     def 重新挂到(self, 新父) -> bool:
         """把视图挂到另一个父控件上（预热引擎被登录窗口"接管"时用）。
 

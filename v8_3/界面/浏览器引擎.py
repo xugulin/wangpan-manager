@@ -166,6 +166,14 @@ class 浏览器引擎:
     def 滚动(self, 增量: int) -> bool:
         return False
 
+    def 加载中(self) -> bool:
+        """页面还在加载吗（不支持就返回 False）。"""
+        return False
+
+    def 重新加载(self) -> bool:
+        """重新加载当前地址（预热引擎卡住/白板时救一次）。不支持就返回 False。"""
+        return False
+
     def 重新挂到(self, 新父) -> bool:
         """把浏览器视图挂到另一个父控件上（预热引擎被登录窗口接管时用）。
 
@@ -290,6 +298,13 @@ class 假引擎(浏览器引擎):
 
     def 按键(self, 键: str) -> bool:
         self.操作记录.append(("按键", 键))
+        return True
+
+    def 加载中(self) -> bool:
+        return bool(getattr(self, "还在加载", False))
+
+    def 重新加载(self) -> bool:
+        self.操作记录.append(("重新加载",))
         return True
 
     def 重新挂到(self, 新父) -> bool:

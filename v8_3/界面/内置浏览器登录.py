@@ -222,16 +222,25 @@ class 内置浏览器登录窗口(QDialog):
         except Exception:
             pass
         if self.接管了预热:
-            # 预热时已经导航过同一个地址了 —— 只在"地址对不上"时才重新加载
+            # 预热时已经导航过同一个地址了 —— 地址对得上就别重新加载（这是提速的关键）
             现在 = ""
             try:
                 现在 = str(self.引擎.页面地址() or "")
             except Exception:
                 现在 = ""
             想要 = "sms_login=1" if self.登录方式 == "sms" else "pan.baidu.com"
-            if 想要 in 现在:
+            if 想要 in 现在 and not self._像是白板():
                 self.状态标签.setText("🔥 已接管预热好的登录页（省下一次加载）")
                 return
+            # ⚠️ 实测踩过：预热那次导航可能**早就停了/从没画出来** ——
+            #    用户看到的就是"窗口一片空白、地址栏却对"。接管时先查一下：
+            #    还在加载、或者文档是空的，就强制重来一次（这次窗口已经可见了）。
+            self.状态标签.setText("🔥 接管预热页面（正在确认渲染，必要时重新加载）…")
+            try:
+                self.引擎.打开(现在 or 入口)
+            except Exception:
+                pass
+            return
         # （视图已经在 布局.addWidget(视图) 那一步从预热宿主"抢"过来了：
         #   Qt 加进布局时会自动换父，所以这里不用再 重新挂到()。）
         入口, _ = 网盘入口.get(self.网盘类型, ("about:blank", ()))
@@ -331,6 +340,16 @@ class 内置浏览器登录窗口(QDialog):
 
     def _加载完(self, 好: bool) -> None:
         if not self._已回调:
+            # 加载"完成"了但文档还是空的（预热遗留的空白页）→ 自动重载一次
+            if self.接管了预热 and not getattr(self, "_救过一次", False) \
+                    and self._像是白板():
+                self._救过一次 = True
+                self.状态标签.setText("⚠️ 页面是空白的，正在重新加载…")
+                try:
+                    self.引擎.打开(self.引擎.页面地址() or self.地址框.text().strip())
+                except Exception:
+                    pass
+                return
             if self.登录方式 == "sms" and self.网盘类型 == "baidu":
                 self._切到短信登录()
             地址 = ""
@@ -345,6 +364,24 @@ class 内置浏览器登录窗口(QDialog):
         #    引擎不会再发"新增 cookie"事件 —— 必须主动捞一遍，
         #    否则"打开窗口就是登录态"却永远收不到凭证（引擎内部已实现这一点）。
         self._查凭证()
+
+    def _像是白板(self) -> bool:
+        """页面是不是"空白/还没画出来"：还在加载，或文档几乎没内容。
+
+        为什么要这个判断：预热是在**隐藏控件**里导航的，实测存在"导航早停了、
+        页面从没渲染"的情况（用户看到窗口一片空白、地址栏却是对的）。
+        """
+        try:
+            if self.引擎.加载中():
+                return True
+        except Exception:
+            pass
+        try:
+            长度 = self.引擎.执行JS(
+                "(document.body?document.body.innerHTML.length:0)")
+            return int(长度 or 0) < 200
+        except Exception:
+            return False
 
     def _刷新页面(self) -> None:
         try:
