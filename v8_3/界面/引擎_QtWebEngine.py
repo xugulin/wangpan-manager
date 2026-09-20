@@ -48,12 +48,19 @@ def 读取cookie库(库文件: Path, 需要: tuple[str, ...] = ()) -> list[dict]
     try:
         if not Path(库文件).is_file():
             return []
-        try:
-            连接 = sqlite3.connect(f"file:{库文件}?mode=ro&immutable=1", uri=True)
-        except Exception:
+        # 快路径：多数时刻库没被锁，immutable 只读连接**不需要拷贝文件**
+        # （以前先 is_file() 再 connect，失败还要 copy2 —— 轮询里全是白干的 IO）。
+        连接 = None
+        for _尝试 in range(2):
+            try:
+                连接 = sqlite3.connect(f"file:{库文件}?mode=ro&immutable=1", uri=True)
+                break
+            except Exception:
+                连接 = None
+        if 连接 is None:
             临时 = tempfile.mktemp(suffix=".db")
             shutil.copy2(库文件, 临时)
-            连接 = sqlite3.connect(临时)
+            连接 = sqlite3.connect(临时, timeout=2.0)
         try:
             连接.row_factory = sqlite3.Row
             if 需要:
@@ -181,6 +188,20 @@ class QtWebEngine引擎(浏览器引擎):
         from PySide6.QtCore import QUrl
         视图 = self.取视图()
         视图.load(QUrl(str(url)))
+
+    def 重新挂到(self, 新父) -> bool:
+        """把视图挂到另一个父控件上（预热引擎被登录窗口"接管"时用）。
+
+        QWebEngineView 只要换个 Qt 父对象就跟着过去，**不会重新加载页面** ——
+        这正是"预热"能省掉 2.6~4.2 秒的原因。
+        """
+        if self._视图 is None:
+            return False
+        try:
+            self._视图.setParent(新父)
+            return True
+        except Exception:
+            return False
 
     def 页面地址(self) -> str:
         try:
@@ -359,10 +380,17 @@ class QtWebEngine引擎(浏览器引擎):
         if self._已关闭:
             return
         super().关闭()
+        # ⚠️ 销毁顺序（试出来的）：
+        #   * 先 stop、再把视图从布局里摘下来（setParent(None)）、最后删视图；
+        #   * **不要**在这里手动 页面.deleteLater() + processEvents() —— 那样虽然
+        #     能消掉 "Release of profile requested but WebEnginePage still not
+        #     deleted" 那句警告，但在程序退出阶段会**段错误**（实测自检必崩）。
+        #     那句警告只是 Qt 的提醒，进程马上就退出了，留着无害。
         try:
             if self._视图 is not None:
                 self._视图.stop()
                 self._视图.setParent(None)
+                self._视图.deleteLater()
         except Exception:
             pass
         self._视图 = None

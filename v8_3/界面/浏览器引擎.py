@@ -166,6 +166,14 @@ class 浏览器引擎:
     def 滚动(self, 增量: int) -> bool:
         return False
 
+    def 重新挂到(self, 新父) -> bool:
+        """把浏览器视图挂到另一个父控件上（预热引擎被登录窗口接管时用）。
+
+        实现得对的话**不会重新加载页面** —— 这就是"预热"省时间的关键。
+        不支持/没视图就返回 False（调用方会退化成"重新打开一次"）。
+        """
+        return False
+
     def 执行JS(self, 脚本: str):
         """在页面里跑一段 JS 并**同步返回结果**（不支持就返回 None）。
 
@@ -282,6 +290,11 @@ class 假引擎(浏览器引擎):
 
     def 按键(self, 键: str) -> bool:
         self.操作记录.append(("按键", 键))
+        return True
+
+    def 重新挂到(self, 新父) -> bool:
+        self.操作记录.append(("重新挂到", type(新父).__name__))
+        self.挂了新父 = 新父
         return True
 
     def 执行JS(self, 脚本: str):

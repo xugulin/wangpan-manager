@@ -118,8 +118,29 @@ class 内置浏览器登录窗口(QDialog):
         self._凭证: list[dict] = []
         self._已回调 = False
         # 浏览器交给可插拔引擎：本窗口只做"显示 + 流程 + 收凭证"
-        self.引擎: 浏览器引擎 = 引擎 if 引擎 is not None else 建引擎(
-            "qtwebengine", {"数据目录": str(内置浏览器目录())}, 父=self)
+        self.接管了预热 = False
+        if 引擎 is not None:
+            self.引擎: 浏览器引擎 = 引擎
+        else:
+            # 先问预热模块有没有"已经加载好的登录页" —— 这是登录提速的关键：
+            # 用户点「用内置浏览器登录」时，页面往往已经加载完了（省 2.6~4.2 秒）。
+            预热 = None
+            try:
+                from .预热登录页 import 取预热引擎
+                预热 = 取预热引擎(self.网盘类型)
+            except Exception:
+                预热 = None
+            if 预热 is not None and 预热.可用():
+                self.引擎 = 预热
+                self.接管了预热 = True
+            else:
+                try:
+                    from .预热登录页 import 丢掉预热引擎
+                    丢掉预热引擎(self.网盘类型)      # 拿到的不可用就扔掉，别占内存
+                except Exception:
+                    pass
+                self.引擎 = 建引擎(
+                    "qtwebengine", {"数据目录": str(内置浏览器目录())}, 父=self)
 
         名称 = 网盘名称.get(self.网盘类型, self.网盘类型)
         self.setWindowTitle(f"🌐 内置浏览器登录 · {名称}")
@@ -200,6 +221,19 @@ class 内置浏览器登录窗口(QDialog):
             self.引擎.挂加载回调(self._加载完)
         except Exception:
             pass
+        if self.接管了预热:
+            # 预热时已经导航过同一个地址了 —— 只在"地址对不上"时才重新加载
+            现在 = ""
+            try:
+                现在 = str(self.引擎.页面地址() or "")
+            except Exception:
+                现在 = ""
+            想要 = "sms_login=1" if self.登录方式 == "sms" else "pan.baidu.com"
+            if 想要 in 现在:
+                self.状态标签.setText("🔥 已接管预热好的登录页（省下一次加载）")
+                return
+        # （视图已经在 布局.addWidget(视图) 那一步从预热宿主"抢"过来了：
+        #   Qt 加进布局时会自动换父，所以这里不用再 重新挂到()。）
         入口, _ = 网盘入口.get(self.网盘类型, ("about:blank", ()))
         if self.登录方式 == "sms" and self.网盘类型 == "baidu":
             # 从"短信登录"入口直接进：百度网盘首页支持 URL 参数把登录框直接开到

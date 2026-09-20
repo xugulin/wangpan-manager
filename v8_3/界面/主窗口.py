@@ -185,6 +185,43 @@ class 主窗口(QMainWindow):
                     or 主题管理器.获取默认主题())
         # 首屏直接落在上次用的网盘上（不用延时定时器，避免用户刚切页又被切回来）
         self.重建网盘导航(首选标识=界面配置(self.配置).get("上次网盘") or "")
+        # 悄悄预热"还没登录"的网盘登录页：用户点登录时页面已经加载好，
+        # 省掉实测 2.6~4.2 秒的等待（详见 界面/预热登录页.py 的实测表格）。
+        # 延迟 2 秒是为了别跟首屏抢网络/CPU。
+        QTimer.singleShot(2000, self._悄悄预热登录页)
+
+    def _悄悄预热登录页(self) -> None:
+        """后台预热"还没登录"的网盘登录页（只看本地凭证文件在不在，不发网络请求）。"""
+        try:
+            from .预热登录页 import 预热登录页 as _预热登录页
+        except Exception:
+            return
+        凭证文件 = {
+            "baidu": "适配器/百度网盘适配器/数据/会话.json",
+            "quark": "适配器/夸克网盘适配器/数据/凭证.json",
+            "guangya": "适配器/光鸭云盘适配器/数据/令牌.json",
+        }
+        根 = Path(__file__).resolve().parents[2]
+        for 实例 in 网盘实例列表(self.配置):
+            if not 实例.get("启用"):
+                continue
+            类型 = str(实例.get("类型") or 实例.get("标识") or "")
+            相对 = 凭证文件.get(类型)
+            if not 相对:
+                continue
+            try:
+                有会话 = (根 / 相对).is_file()
+            except Exception:
+                有会话 = True
+            if 有会话:
+                continue        # 已登录：不需要登录页，别白占内存
+            try:
+                if _预热登录页(类型, 父=self):
+                    self.追加日志(f"[预热] 已在后台预加载 "
+                              f"{实例.get('名称') or 类型} 的登录页"
+                              f"（点登录时不用再等那几秒）")
+            except Exception:
+                continue
 
     # ==================== 界面搭建 ====================
 
@@ -1116,4 +1153,11 @@ def 运行界面(AI运行时=None, 主题: str = "", 启动日志=None):
             pass
     窗口 = 主窗口(AI运行时=AI运行时, 主题=主题, 启动日志=启动日志)
     窗口.show()
+    # 退出前把"预热好的登录引擎"放掉（它带着一个后台渲染进程；
+    # 预热模块自己也挂了 aboutToQuit，这里是明面上的第二道保险）
+    try:
+        from .预热登录页 import 关掉全部预热
+        应用.aboutToQuit.connect(关掉全部预热)
+    except Exception:
+        pass
     return 应用.exec()
