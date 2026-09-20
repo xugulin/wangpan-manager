@@ -1,0 +1,69 @@
+name: 测试界面性能（Windows 真机）
+
+# ============================================================================
+# 干什么：在 GitHub 免费的 windows-latest（**真 Windows**）上量界面的真实开销。
+#
+# 为什么单独一个工作流：
+#   * 本地 Linux/Wine 量不准 —— offscreen 平台是软件渲染，某些页面（播放页）会
+#     慢到几十秒，跟真机完全不是一回事；
+#   * 另一个工作流（测试Windows包）测的是**已发布的包**，得先发版才能跑；
+#     这个工作流直接 checkout 源码 + pip 装依赖，改完代码马上就能量。
+#
+# 量什么（工具/界面测速.py）：
+#   建主窗口（含预热各页）/ 切每个功能页 / AI 三个子页 / 登录对话框 / 追加 200 行日志，
+#   并统计控件总数与样式表长度 —— 这些数字直接决定"界面卡不卡"。
+#
+# 触发：Actions → 测试界面性能（Windows 真机）→ Run workflow。
+# ============================================================================
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'v8_3/界面/**'
+      - 'v8_3/播放/**'
+      - '工具/界面测速.py'
+      - '.github/workflows/测试界面Windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ui-speed:
+    name: 在 windows-latest 上量界面开销
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 取源码
+        uses: actions/checkout@v4
+
+      - name: 装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: 装依赖（PySide6 等）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r 构建/依赖-主程序-win.txt
+
+      - name: 环境信息
+        shell: pwsh
+        run: |
+          Write-Host "runner : $env:ImageOS / $env:RUNNER_OS"
+          python -c "import sys, PySide6; print('Python', sys.version.split()[0], '| PySide6', PySide6.__version__)"
+
+      - name: 界面逐项计时（真 Windows）
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
+        run: python 工具/界面测速.py
+
+      - name: 单测（Windows 上跑一遍）
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
+        run: python -m unittest discover -s tests -t .

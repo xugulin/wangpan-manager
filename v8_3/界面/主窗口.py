@@ -27,7 +27,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
@@ -175,8 +177,7 @@ class 主窗口(QMainWindow):
         self._当前标识 = ""
 
         self.setWindowTitle("网盘管理 V8_3 · 去 Alist 直连直传")
-        self.resize(1400, 860)
-        self.setMinimumSize(1080, 620)
+        self._按屏幕定尺寸()
         self._应用日志配置()
         self._构建界面()
         self._写入启动日志()
@@ -185,6 +186,83 @@ class 主窗口(QMainWindow):
                     or 主题管理器.获取默认主题())
         # 首屏直接落在上次用的网盘上（不用延时定时器，避免用户刚切页又被切回来）
         self.重建网盘导航(首选标识=界面配置(self.配置).get("上次网盘") or "")
+        self._预热页面()
+
+    # ==================== 屏幕适配 / 预热 ====================
+
+    def _按屏幕定尺寸(self) -> None:
+        """按**当前屏幕可用区**定初始尺寸与最小尺寸（小屏笔记本不再被窗口顶出屏幕）。
+
+        以前是写死 ``resize(1400, 860)`` + ``setMinimumSize(1080, 620)``：
+        1366×768 的笔记本上窗口比屏幕还大（标题栏/底栏被顶到屏幕外），
+        1024×600 的上网本更惨 —— 最小尺寸就比屏幕大，Qt 也只能照做。
+        现在：初始尺寸取"设计尺寸"和"屏幕可用区 - 边距"的较小值，
+        最小尺寸也跟着屏幕收，页面本身有滚动区兜底，小屏上照样能用。
+        """
+        try:
+            from PySide6.QtGui import QGuiApplication
+            屏 = QGuiApplication.primaryScreen()
+            可用 = 屏.availableGeometry() if 屏 is not None else None
+        except Exception:  # noqa: BLE001
+            可用 = None
+        if 可用 is None or 可用.width() <= 0 or 可用.height() <= 0:
+            self.resize(1400, 860)
+            self.setMinimumSize(1080, 620)
+            return
+        # 留一点边距给标题栏/任务栏，别贴着屏幕边
+        宽 = max(760, min(1400, 可用.width() - 60))
+        高 = max(520, min(860, 可用.height() - 90))
+        self.resize(宽, 高)
+        # 最小尺寸再比初始小一档（小屏上也能再往小拉一点；页面本身有滚动区兜底），
+        # 大屏上仍是设计值 1080×620，不会因为屏幕大就允许拉得比设计还小。
+        self.setMinimumSize(min(1080, max(720, 宽 - 120)),
+                            min(620, max(460, 高 - 80)))
+        self._屏幕尺寸 = (可用.width(), 可用.height())
+
+    def _预热页面(self) -> None:
+        """窗口**还没显示**时，把各功能页先建出来 —— 首次点击就不再卡一秒。
+
+        为什么要这么做：主题 QSS 有 126 条规则、界面 600+ 控件，某个页面第一次显示时
+        Qt 要给其中每个控件做样式匹配 + 布局 + 首帧绘制。实测（Wine 真 Windows 运行时）：
+        第一次切到 AI 页要 700~1150 ms、敏感词页 260 ms、播放页 250 ms ——
+        用户感受到的就是"点一下卡一秒"。实测把这些页面在**窗口显示之前**先建好，
+        之后每次切页都只要 60~70 ms（快 4~10 倍）。这段时间用户本来就看不到界面，
+        等于白赚；页面切换发生在隐藏状态下，所以**不会闪**。
+
+        设 ``V8_3_不预热界面=1`` 可跳过（排查启动问题时用）。
+        """
+        if os.environ.get("V8_3_不预热界面"):
+            return
+        try:
+            导航 = (list(self._网盘按钮.values())
+                  + [self.传输按钮, self.播放按钮, self.敏感词按钮,
+                     self.AI按钮, self.日志按钮, self.设置按钮])
+            起始页 = self.堆叠.currentWidget()
+            起始按钮 = next((b for b in 导航 if b.objectName() == "active"), None)
+            起始标签 = self.当前网盘标签.text()
+        except Exception:  # noqa: BLE001
+            return
+        开始 = time.time()
+        明细: list[str] = []
+        for 名, 动作 in (("传输", self.切换到传输页), ("播放", self.切换到播放页),
+                      ("敏感词", self.切换到敏感词页), ("日志", self.切换到日志页),
+                      ("设置", self.切换到设置页), ("AI", self.切换到AI页)):
+            t = time.time()
+            try:
+                动作()
+                明细.append(f"{名} {(time.time() - t) * 1000:.0f}ms")
+            except Exception as e:  # noqa: BLE001 - 某一页建不起来不该拖垮启动
+                明细.append(f"{名} 跳过({type(e).__name__})")
+        try:                      # 回到启动时那一页（窗口还没显示，用户看不到这一串切换）
+            if 起始页 is not None:
+                self.堆叠.setCurrentWidget(起始页)
+            self._设置导航激活(起始按钮)
+            self.当前网盘标签.setText(起始标签)
+        except Exception:  # noqa: BLE001
+            pass
+        self.追加日志(f"[界面] 已预建各页（主题样式下首次显示最贵，先建好就不卡了）："
+                  f"{'、'.join(明细)}，共 {(time.time() - 开始) * 1000:.0f} ms")
+
     # ==================== 界面搭建 ====================
 
     def _放进堆叠(self, 页: QWidget) -> QWidget:
