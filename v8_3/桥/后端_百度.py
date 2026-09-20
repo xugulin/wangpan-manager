@@ -1237,16 +1237,17 @@ class 后端(后端基类):
                 self.记录(f"[百度] 子域会话种植失败（不影响登录）："
                          f"{type(e).__name__}: {e}", "warning")
             提示 = "会话已写入适配器 数据/会话.json，可以关闭本对话框"
+            暂定问题: list[str] = []      # 先记下"暂时不行"的结论，后面能补回来就删掉
             try:
                 模板 = self._刷新模板变量(m["全局会话仓库"])   # 补齐 bdstoken / uk
                 if 模板.get("bdstoken"):
                     self.记录("[百度] 已补齐 bdstoken / uk，写操作可用")
                 else:
-                    提示 = "登录成功，但服务端没有下发 bdstoken（写操作可能不可用）"
-                    self.记录("[百度] 服务端未下发 bdstoken（不影响登录）", "warning")
+                    暂定问题.append("服务端没有下发 bdstoken")
+                    self.记录("[百度] 服务端未下发 bdstoken（稍后复测）", "warning")
             except Exception as e:  # noqa: BLE001
-                提示 = f"登录成功，但 bdstoken 未取到（写操作可能不可用）：{e}"
-                self.记录(f"[百度] 补齐 bdstoken 失败（不影响登录）："
+                暂定问题.append(f"bdstoken 未取到（{e}）")
+                self.记录(f"[百度] 补齐 bdstoken 失败（稍后复测）："
                          f"{type(e).__name__}: {e}", "warning")
             self._登录成功后的收尾()      # 解除退出后的静默期、清写权限缓存
             # 扫码得到的会话**可能只能读**（实测：它的 BDUSS 进不了网页版 pan 域，
@@ -1257,12 +1258,17 @@ class 后端(后端基类):
                 _写状态缓存.update({"指纹": "", "状态": "", "时间": 0.0})
                 状态 = self._写权限状态()
                 if 状态 == "可写":
+                    # 写权限是**真打接口**验的，之前那些"bdstoken 可能没取到"的
+                    # 暂定结论已被推翻，不能再留在提示里（用户实测见过自相矛盾的
+                    # 提示："但 bdstoken 未取到…；写操作已验证可用"）。
+                    暂定问题.clear()
                     提示 += "；写操作（上传/改名/删除）已验证可用"
                 else:
                     if self._试从浏览器补全会话():
                         _写状态缓存.update({"指纹": "", "状态": "", "时间": 0.0})
                         状态 = self._写权限状态()
                     if 状态 == "可写":
+                        暂定问题.clear()
                         提示 += "；写操作已验证可用（已从浏览器补全会话）"
                     else:
                         原因 = str(_最近补会话.get("失败原因") or "")
@@ -1274,7 +1280,10 @@ class 后端(后端基类):
                     self.记录(f"[百度] 扫码登录后的写权限：{状态}", "warning")
             except Exception as e:  # noqa: BLE001
                 self.记录(f"[百度] 扫码登录后写权限检查失败（不影响登录）：{e}", "warning")
-            self.记录("[百度] 扫码登录成功")
+            if 暂定问题:
+                提示 += "；⚠️ " + "；".join(暂定问题) + "（写操作可能不可用）"
+            self.记录("[百度] 扫码登录成功"
+                     + (f"（遗留：{'；'.join(暂定问题)}）" if 暂定问题 else ""))
             return self.登录成功("百度扫码登录成功", 提示)
         except Exception as e:  # noqa: BLE001
             self.记录(f"[百度] 扫码登录失败：{type(e).__name__}: {e}", "warning")
