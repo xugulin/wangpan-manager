@@ -14,10 +14,12 @@ if not "%V83_HOME%"=="" set "PROJ=%V83_HOME%"
 
 if "%PROJ%"=="" (
   rem 1) first: is the script itself in the project root?
-  if exist "%HERE%\v8_3" if exist "%HERE%\启动.py" set "PROJ=%HERE%"
+  rem ASCII-only test (v8_3\__init__.py): a non-ASCII literal never matches in
+  rem `if exist` (Wine-measured: the .py sat right there and it still said NO).
+  if exist "%HERE%\v8_3\__init__.py" set "PROJ=%HERE%"
   rem 2) else scan subdirs (script placed outside the project)
   for /d %%D in ("%HERE%\*") do (
-    if exist "%%D\v8_3" if exist "%%D\启动.py" set "PROJ=%%D"
+    if not defined PROJ if exist "%%D\v8_3\__init__.py" set "PROJ=%%D"
   )
 )
 if "%PROJ%"=="" (
@@ -29,12 +31,27 @@ if "%PROJ%"=="" (
 )
 
 set "PY="
-rem 用 if exist 逐个判断（比 for 里靠延迟展开更稳，路径含中文也不怕）
-if exist "%PROJ%\运行环境\venv\Scripts\python.exe" set "PY=%PROJ%\运行环境\venv\Scripts\python.exe"
-if "%PY%"=="" if exist "%PROJ%\运行环境\venv\Scripts\python3.exe" set "PY=%PROJ%\运行环境\venv\Scripts\python3.exe"
-if "%PY%"=="" if exist "%PROJ%\运行环境\python\python.exe" set "PY=%PROJ%\运行环境\python\python.exe"
+rem The bundled runtime folder has a non-ASCII name. Do NOT write that name as a
+rem literal: cmd decodes .bat bytes with the console code page, so the literal never
+rem matches the real folder (Wine-measured: dir lists it, if exist says NO, also with
+rem chcp 65001). for /d takes the real name from the file system instead.
+for /d %%D in ("%PROJ%\*") do (
+  if not defined PY if exist "%%D\venv\Scripts\python.exe"  set "PY=%%D\venv\Scripts\python.exe"
+  if not defined PY if exist "%%D\venv\Scripts\python3.exe" set "PY=%%D\venv\Scripts\python3.exe"
+  if not defined PY if exist "%%D\python\python.exe"       set "PY=%%D\python\python.exe"
+  if not defined PY if exist "%%D\python\python3.exe"      set "PY=%%D\python\python3.exe"
+)
 if "%PY%"=="" (
-  echo [X] 找不到项目自带的 Python：%PROJ%\运行环境\venv\Scripts\python.exe
+  echo [X] 找不到项目自带的 Python（运行时目录里应有 python\python.exe 或 venv\Scripts\python.exe）。
+  pause
+  exit /b 1
+)
+
+rem Resolve the startup script the same way: wildcard, no literal (one root .py).
+set "MAIN="
+for %%F in ("%PROJ%\*.py") do if not defined MAIN set "MAIN=%%~fF"
+if not defined MAIN (
+  echo [X] 找不到启动脚本（项目目录下没有 .py）：%PROJ%
   pause
   exit /b 1
 )
@@ -56,12 +73,12 @@ if "%~1"=="--check" (
 
 echo [^>] 启动 网盘管理：%PROJ%
 cd /d "%PROJ%"
-"%PY%" "%PROJ%\启动.py" --日志级别 警告
+"%PY%" "%MAIN%" --日志级别 警告
 if errorlevel 1 (
   echo.
   echo [!] 启动失败。看这两处：
   echo     · %PROJ%\数据\界面日志.txt
-  echo     · 用命令行跑： "%PY%" "%PROJ%\启动.py" --调试
+  echo     · 用命令行跑： "%PY%" "%MAIN%" --调试
   pause
 )
 endlocal

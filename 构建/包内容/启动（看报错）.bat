@@ -9,10 +9,16 @@ set "HERE=%~dp0"
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 cd /d "%HERE%"
 
-set "RT=%HERE%\运行环境"
+rem  The runtime folder name is non-ASCII; a literal would never match it (see the
+rem  plain launcher for the measurement). `for /d` lets the file system fill in the
+rem  real name, so no non-ASCII byte is needed in here.
 set "PY="
-for %%F in ("%RT%\venv\Scripts\python.exe") do set "PY=%%~fF"
-if not defined PY for %%F in ("%RT%\python\python.exe") do set "PY=%%~fF"
+for /d %%D in ("%HERE%\*") do (
+  if not defined PY if exist "%%D\venv\Scripts\python.exe"  set "PY=%%D\venv\Scripts\python.exe"
+  if not defined PY if exist "%%D\venv\Scripts\python3.exe" set "PY=%%D\venv\Scripts\python3.exe"
+  if not defined PY if exist "%%D\python\python.exe"       set "PY=%%D\python\python.exe"
+  if not defined PY if exist "%%D\python\python3.exe"      set "PY=%%D\python\python3.exe"
+)
 set "MAIN="
 for %%F in ("%HERE%\*.py") do if not defined MAIN set "MAIN=%%~fF"
 

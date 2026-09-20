@@ -70,6 +70,19 @@ def _第一方文件() -> list[Path]:
     return 结果
 
 
+def _第一方bat() -> list[Path]:
+    """会被 Windows 双击、或被打进发布包的 .bat。
+
+    （``构建/windows``、``运行环境`` 里那些第三方自带的 .bat 不算。）
+    """
+    候选: list[Path] = []
+    for 基 in (项目根 / "构建" / "包内容", 项目根 / "构建" / "发布"):
+        if 基.is_dir():
+            候选.extend(sorted(基.glob("*.bat")))
+    候选.extend(sorted(项目根.glob("*.bat")))
+    return [路径 for 路径 in 候选 if 路径.is_file()]
+
+
 class 路径可移植性测试(unittest.TestCase):
     def test_没有写死的家目录路径(self):
         命中: list[str] = []
@@ -127,6 +140,51 @@ class 路径可移植性测试(unittest.TestCase):
             命中, [],
             "shell 变量名只能用 ASCII（bash 会把中文变量名当命令执行）：\n  "
             + "\n  ".join(命中[:10]))
+
+    def test_发布包的_bat_里没有非_ASCII_字节(self):
+        """cmd.exe 按控制台代码页解码 .bat 的字节，所以里面的中文字面量在
+        ``if exist`` / ``for`` 里匹配不上真实文件名（Wine 实测：``dir`` 列得出来、
+        ``if exist`` 却报 NO，加了 ``chcp 65001`` 也一样），还可能把命令行拆坏。
+
+        这个坑真出过：``创建桌面图标.bat`` 被写回了 347 个非 ASCII 字节，而且是
+        **发布出去之后**才被 Actions 上的真机检查抓到。所以在打包前就卡住它。
+        中文目录名一律用 ``for /d`` 从文件系统取（见 ``构建/包内容/启动.bat``）。
+        """
+        包内容 = 项目根 / "构建" / "包内容"
+        if not 包内容.is_dir():
+            self.skipTest("没有 构建/包内容")
+        候选 = sorted(包内容.glob("*.bat"))
+        self.assertTrue(候选, "构建/包内容 里一个 .bat 都没有，是不是路径变了？")
+        命中: list[str] = []
+        for 路径 in 候选:
+            坏 = sum(1 for 字节 in 路径.read_bytes() if 字节 > 127)
+            if 坏:
+                命中.append(f"{路径.relative_to(项目根)}：{坏} 个非 ASCII 字节")
+        self.assertEqual(
+            命中, [],
+            "发布包里的 .bat 必须纯 ASCII（cmd 下会乱码；中文目录名用 for /d 取）：\n  "
+            + "\n  ".join(命中))
+
+    def test_bat_必须是_CRLF_行尾(self):
+        """只有 LF 行尾时 cmd 解析括号块会错位。
+
+        实测（Wine，中文+空格路径，同一份脚本只改行尾）：
+        ``if exist ... ( ... set "PROJ=%HERE%" )`` 里那句 ``set``
+        在 CRLF 版会执行、LF 版**根本不执行**（PROJ 是空的 → 启动器报"没找到项目目录"）。
+
+        ``.gitattributes`` 里那句 ``* text=auto eol=lf`` 会把 .bat 也变成 LF，
+        所以那里必须给 ``*.bat`` / ``*.cmd`` 单独写 ``eol=crlf``。
+        """
+        命中: list[str] = []
+        for 路径 in _第一方bat():
+            原始 = 路径.read_bytes()
+            孤立LF = 原始.replace(b"\r\n", b"").count(b"\n")
+            if 孤立LF:
+                命中.append(f"{路径.relative_to(项目根)}：{孤立LF} 个 LF 行尾")
+        self.assertEqual(
+            命中, [],
+            "Windows 批处理必须用 CRLF 行尾（LF 会让 cmd 的括号块解析错位）：\n  "
+            + "\n  ".join(命中))
 
     def test_环境目录都在项目内(self):
         from v8_3.自举 import 主环境, 项目解释器

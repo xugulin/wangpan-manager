@@ -1,5 +1,10 @@
 # 让 GitHub 正确识别语言与换行
 * text=auto eol=lf
+# .bat 必须是 CRLF：只有 LF 行尾时 cmd 解析括号块会错位——实测（Wine，中文+空格路径）
+# `if exist ... ( ... set "PROJ=..." )` 里的 set 根本不执行，启动器直接找不到项目目录。
+# 这里必须排在 `*` 后面（gitattributes 是后面的规则覆盖前面的）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
 *.png binary
 *.ico binary
 *.zip binary
