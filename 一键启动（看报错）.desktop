@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=网盘管理（看报错）
+Name[en]=Wangpan Manager (verbose)
+Comment=带终端启动：启动失败时能看到报错（排查用）
+Exec=/home/xgl/python/网盘管理/启动.sh
+Path=/home/xgl/python/网盘管理
+Icon=/home/xgl/python/网盘管理/网盘管理_图标.png
+Terminal=true
+StartupNotify=true
+Categories=Network;FileTools;
+Keywords=网盘;报错;日志;wangpan;

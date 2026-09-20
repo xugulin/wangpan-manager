@@ -58,4 +58,52 @@ for SD in "$HERE"/运行环境/python/lib/python3.14/_sysconfigdata_*.py; do
   fi
 done
 
-exec "$PY" "$HERE/启动.py" "$@"
+# ---- 启动日志：双击启动看不到终端时，至少有个文件能查 ----
+LOG="$HERE/数据/一键启动.log"
+mkdir -p "$HERE/数据" 2>/dev/null || true
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true; }
+tell() {
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --info --title="网盘管理" --text="$1" >/dev/null 2>&1 &
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send "网盘管理" "$1" >/dev/null 2>&1 || true
+  fi
+}
+
+# ---- 已经在运行？提示一下（但**不挡**：宁可多开一个，也别让用户以为坏了）----
+PIDFILE="$HERE/数据/.一键启动.pid"
+if [ "${V83_FORCE:-0}" != "1" ] && [ -f "$PIDFILE" ]; then
+  OLD=$(cat "$PIDFILE" 2>/dev/null || true)
+  if [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null; then
+    if [ -r "/proc/$OLD/cmdline" ]; then
+      CMD=$(tr '\0' ' ' < "/proc/$OLD/cmdline" 2>/dev/null || true)
+      case "$CMD" in
+        *启动.py*) case "$CMD" in *"$HERE"*)
+          log "already running (PID $OLD)"
+          echo "[i] 网盘管理已经在运行（PID $OLD）——窗口可能被最小化或在别的桌面。"
+          tell "网盘管理已经在运行（PID $OLD）。\n窗口可能被最小化或在别的桌面；\n找不到就先把它关掉，再启动一次。\n（想强制再开一个：V83_FORCE=1 ./启动.sh）"
+          exit 0 ;;
+        esac ;;
+      esac
+    fi
+  fi
+  rm -f "$PIDFILE" 2>/dev/null || true      # 过期/串号的 PID：清掉别挡路
+fi
+
+log "starting interpreter=$PY args=$*"
+echo "[>] 启动 网盘管理（包内自带运行环境）"
+
+"$PY" "$HERE/启动.py" "$@" &
+CHILD=$!
+echo "$CHILD" > "$PIDFILE" 2>/dev/null || true
+wait "$CHILD"
+CODE=$?
+log "exited with code $CODE"
+rm -f "$PIDFILE" 2>/dev/null || true
+if [ "$CODE" -ne 0 ]; then
+  echo
+  echo "[!] 程序退出，返回码 $CODE。如果没看到界面，看这两个文件："
+  echo "    - $LOG"
+  echo "    - $HERE/数据/界面日志.txt"
+fi
+exit "$CODE"
