@@ -225,6 +225,42 @@ def 是VLC窗口(类名: str, 标题: str) -> bool:
             or 名 == "vlc")
 
 
+def 映射状态(窗口号: int) -> int:
+    """问 X：这个窗口映射了没有。0=没映射 1=没映射但可映射 2=已映射；-1=拿不到。"""
+    if not 窗口号 or not 可用():
+        return -1
+    L = _载入()
+    显示 = L.XOpenDisplay(None)
+    if not 显示:
+        return -1
+    try:
+        属性 = _窗口属性()
+        L.XGetWindowAttributes(ctypes.c_void_p(显示), ctypes.c_ulong(窗口号),
+                             ctypes.byref(属性))
+        return int(属性.map_state)
+    except Exception:
+        return -1
+    finally:
+        try:
+            L.XCloseDisplay(ctypes.c_void_p(显示))
+        except Exception:
+            pass
+
+
+def 窗口已映射(窗口号: int) -> bool:
+    """这个 X 窗口是不是**真的**已经在屏幕上了（map_state == IsViewable）。
+
+    ⚠️ 为什么要问 X 而不是信 Qt：Qt 的 ``isVisible()/isExposed()`` 说"可见"，
+    不代表 X 服务器已经把它映射好。libvlc 在那一刻拿不到可用父窗口，就会
+    **自己开一个顶层窗口**放画面（用户实测两次："又多了一个 VLC media player 在放"）。
+    拿不到状态时返回 True（宁可照旧，也别把正常环境卡住）。
+    """
+    状态 = 映射状态(窗口号)
+    if 状态 < 0:
+        return True
+    return 状态 == 2
+
+
 def 窗口尺寸(窗口号: int) -> tuple[int, int]:
     """取窗口宽高（拿不到就 (0, 0)）—— 诊断"那个窗口比屏幕还大"用。"""
     if not 可用():
@@ -324,8 +360,34 @@ def 请关闭窗口(窗口号: int) -> bool:
         L.XCloseDisplay(显示)
 
 
+def _子窗口们(L, 显示, 窗口号: int) -> list[int]:
+    """取一个窗口的直接子窗口。"""
+    根 = ctypes.c_ulong(); 父 = ctypes.c_ulong()
+    子们 = ctypes.POINTER(ctypes.c_ulong)()
+    个数 = ctypes.c_uint()
+    出: list[int] = []
+    try:
+        if L.XQueryTree(显示, int(窗口号), ctypes.byref(根), ctypes.byref(父),
+                      ctypes.byref(子们), ctypes.byref(个数)):
+            for i in range(int(个数.value)):
+                出.append(int(子们[i]))
+    except Exception:
+        pass
+    finally:
+        if 子们:
+            try:
+                L.XFree(子们)
+            except Exception:
+                pass
+    return 出
+
+
 def 销毁窗口(窗口号: int) -> bool:
-    """最后手段：直接销毁那个画布（它只是 libvlc 的 vout 窗口）。"""
+    """最后手段：销毁那块画布（**连子窗口一起**）。
+
+    只销毁父窗口有时会留下 vout 子窗口（用户会看到"窗口没了但画面还在"），
+    所以先把直接子窗口逐个销毁，再销毁它自己。
+    """
     if not 可用():
         return False
     L = _载入()
@@ -333,6 +395,11 @@ def 销毁窗口(窗口号: int) -> bool:
     if not 显示:
         return False
     try:
+        for 子 in _子窗口们(L, 显示, 窗口号):
+            try:
+                L.XDestroyWindow(显示, int(子))
+            except Exception:
+                pass
         L.XDestroyWindow(显示, int(窗口号))
         L.XFlush(显示)
         L.XSync(显示, 0)
@@ -341,3 +408,29 @@ def 销毁窗口(窗口号: int) -> bool:
         return False
     finally:
         L.XCloseDisplay(显示)
+
+
+def 清干净游离窗口(最多轮: int = 3) -> int:
+    """反复"找 → 销毁"，直到再也找不到（返回销毁总数）。
+
+    为什么需要"反复"：X 的窗口层次里，frame 与真正的 vout 可能是两个不同的顶层窗口，
+    一轮（只销毁我们扫到的那一个）有时会留下另一个。**这条路径不做自愈**，
+    只负责把不合时宜的窗口清掉 —— 播放器画面本身在我们自己的窗口里。
+    """
+    if not 可用():
+        return 0
+    总数 = 0
+    for _ in range(max(1, int(最多轮))):
+        剩 = 找游离窗口()
+        if not 剩:
+            break
+        for 号, _名 in 剩:
+            if 销毁窗口(号):
+                总数 += 1
+        # 给 X 一点时间真的处理掉
+        try:
+            import time as _t
+            _t.sleep(0.2)
+        except Exception:
+            pass
+    return 总数

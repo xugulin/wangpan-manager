@@ -2412,6 +2412,31 @@ def main() -> int:
             泵(0.05)
         检查(not _空抓到 and "未提交" in _空窗.状态标签.text(),
              "没取到 cookie 时不回调（状态：" + _空窗.状态标签.text()[:20] + "）")
+        # X11"窗口真的在屏幕上"的判断（用户两次看到游离 VLC 窗口的根因）：
+        # 不能信 Qt 的 isVisible/isExposed，要问 X 的 map_state
+        try:
+            from v8_3.播放.游离窗口 import (映射状态 as _映射状态,
+                                      窗口已映射 as _窗口已映射,
+                                      可用 as _游离可用)
+            if _游离可用():
+                from PySide6.QtWidgets import QWidget as _W
+                _没显示 = _W()
+                _没显示.resize(300, 200)
+                检查(not _窗口已映射(int(_没显示.winId())),
+                     "没 show 的窗口不算已映射（map_state="
+                     + str(_映射状态(int(_没显示.winId()))) + "）")
+                _没显示.show()
+                for _ in range(20):
+                    泵(0.05)
+                检查(_窗口已映射(int(_没显示.winId())),
+                     "show 之后算已映射（map_state="
+                     + str(_映射状态(int(_没显示.winId()))) + "）")
+                _没显示.close()
+            else:
+                检查(True, "X11 不可用，跳过窗口映射检查")
+        except Exception as _e:  # noqa: BLE001
+            检查(False, f"窗口映射检查出错：{_e}")
+
         # 加载完发现是白板 → 自动重载一次（用户实测踩过：窗口一片空白）
         _白引擎 = _假引擎2()
         _白引擎.还在加载 = True          # 模拟"还没画出来"
@@ -2519,92 +2544,6 @@ def main() -> int:
             泵(0.05)
         检查(not _空抓到 and "未提交" in _空窗.状态标签.text(),
              "没取到 cookie 时不回调（状态：" + _空窗.状态标签.text()[:20] + "）")
-        # 加载完发现是白板 → 自动重载一次（用户实测踩过：窗口一片空白）
-        _白引擎 = _假引擎2()
-        _白引擎.还在加载 = True          # 模拟"还没画出来"
-        _白引擎.JS返回 = 0
-        _白窗 = _内置窗口("baidu", None, 完成回调=lambda _c: None,
-                       引擎=_白引擎)      # 必须注入，否则窗口会建真引擎
-        _白窗.show()
-        _白引擎.触发加载完成(True)
-        for _ in range(20):
-            泵(0.05)
-        _白重载 = len([x for x in _白引擎.操作记录 if x[0] == "打开"])
-        检查(_白重载 >= 2,
-             f"加载完发现是白板会自动重载一次（打开次数 {_白重载}）")
-        _白窗.close()
-
-        # 短信方式：窗口会自动切「短信登录」并把手机号填进登录框
-        _短信引擎 = _假引擎()
-        _短信引擎.JS返回 = "clicked:短信登录"
-        _短信窗 = _内置窗口("baidu", None, 完成回调=lambda _c: None,
-                        引擎=_短信引擎, 登录方式="sms", 手机号="13800000000")
-        _短信窗.show()
-        _短信引擎.触发加载完成(True)
-        for _ in range(30):            # 循环泵 1.5 秒：窗口里的 QTimer 才会真正触发
-            泵(0.05)
-        _短信Js = [x for x in _短信引擎.操作记录 if x[0] == "执行JS"]
-        检查(any("sms_login=1" in str(x[1]) for x in _短信引擎.操作记录
-                 if x[0] == "打开"),
-             "短信方式：入口直接带 ?sms_login=1（一键跳到短信登录页）")
-        检查(bool(_短信Js), '短信方式：窗口会执行『切到短信登录』的 JS')
-        检查(any("encryptMobile" in x[1] for x in _短信Js)
-             or "已自动填入" in _短信窗.状态标签.text()
-             or "已切到" in _短信窗.状态标签.text(),
-             f"短信方式：会自动填手机号或提示已切页（{_短信窗.状态标签.text()[:36]}）")
-        _短信窗.close()
-        # 关窗前"深取一次"：库里有凭证就自动回调；没有就不回调（不拿空凭证打扰桥）
-        from v8_3.界面.浏览器引擎 import 假引擎 as _假引擎2
-        _关窗引擎 = _假引擎2()
-        _关窗抓到: list = []
-        _关窗 = _内置窗口("baidu", None,
-                       完成回调=lambda c: _关窗抓到.extend(c or []),
-                       引擎=_关窗引擎)
-        _关窗.show()
-        _关窗引擎.预置cookie([
-            {"name": "BDUSS", "value": "B" * 32, "domain": ".baidu.com"},
-            {"name": "STOKEN", "value": "S" * 32, "domain": ".pan.baidu.com"}])
-        _关窗.close()          # 不点"完成"，直接关窗
-        for _ in range(20):
-            泵(0.05)
-        检查(bool(_关窗抓到),
-             "关窗时会先深取一次凭证并回调（拿到 " + str(len(_关窗抓到)) + " 条）")
-        _空引擎 = _假引擎2()
-        _空抓到: list = []
-        _空窗 = _内置窗口("baidu", None,
-                       完成回调=lambda c: _空抓到.extend(c or []),
-                       引擎=_空引擎)
-        _空窗.show()
-        _空窗.close()
-        for _ in range(20):
-            泵(0.05)
-        检查(not _空抓到 and "未提交" in _空窗.状态标签.text(),
-             "没取到 cookie 时不回调（状态：" + _空窗.状态标签.text()[:20] + "）")
-        # 自动收割：引擎报"收到新 cookie"→ 窗口延后一拍去查（不用等 1.2 秒轮询）
-        _收引擎 = _假引擎2()
-        _收割抓到: list = []
-        _收窗 = _内置窗口("baidu", None,
-                       完成回调=lambda c: _收割抓到.extend(c or []),
-                       引擎=_收引擎)
-        _收窗.show()
-        _收引擎.预置cookie([
-            {"name": "BDUSS", "value": "B" * 32, "domain": ".baidu.com"},
-            {"name": "STOKEN", "value": "S" * 32, "domain": ".pan.baidu.com"}])
-        _收窗._新cookie到了()          # 模拟引擎的 cookieAdded 通知
-        for _ in range(30):
-            泵(0.05)
-        检查(bool(_收割抓到),
-             "自动收割：引擎报『收到新 cookie』后窗口立刻收割（"
-             + str(len(_收割抓到)) + " 条）")
-        _收窗.close()
-        _窗._收字典({"name": "STOKEN", "value": "x" * 8,
-                  "domain": ".pan.baidu.com", "httpOnly": True})
-        _名 = [c["name"] for c in _窗._凭证]
-        检查("STOKEN" in _名, f"窗口能收下 cookie：{_名}")
-        _窗._查凭证()
-        泵(0.2)
-        检查("还缺" in _窗.状态标签.text() or "✅" in _窗.状态标签.text(),
-             f"窗口会提示还缺哪些凭证：{_窗.状态标签.text()[:60]}")
     finally:
         _窗.close()
 

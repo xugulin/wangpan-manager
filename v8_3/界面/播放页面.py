@@ -941,9 +941,18 @@ class 播放页面(QWidget):
                 return True          # 离屏/无头平台没有嵌入这回事，别卡住起播
             if not self.视频.isVisible():
                 return False
-            句柄 = self.视频.windowHandle()
-            就绪 = bool(句柄.isExposed()) if (句柄 is not None
-                                        and hasattr(句柄, "isExposed")) else True
+            # ⚠️ 关键：以 **X 服务器的映射状态**为准。Qt 说"可见"不等于窗口已经
+            #    映射好；libvlc 那一刻会自己开顶层窗口（用户实测的游离窗口）。
+            就绪 = False
+            try:
+                from ..播放.游离窗口 import 窗口已映射 as _已映射X
+                就绪 = bool(_已映射X(self._安全句柄()))
+            except Exception:
+                就绪 = True
+            if not 就绪:
+                句柄 = self.视频.windowHandle()
+                if 句柄 is not None and hasattr(句柄, "isExposed"):
+                    就绪 = bool(句柄.isExposed())
             if not 就绪:
                 self._映射重试 = getattr(self, "_映射重试", 0) + 1
                 if self._映射重试 > 15:
@@ -976,6 +985,22 @@ class 播放页面(QWidget):
         """
         if self.会话 is None or self.会话.播放器 is None:
             return
+        # ⚠️ 我的窗口要是**还没真的在屏幕上**，现在收回等于又把画面绑到无效句柄 ——
+        #    结果就是"又一个游离窗口"。先等它上屏（最多 10 次 × 0.5 秒）。
+        try:
+            from ..播放.游离窗口 import 窗口已映射 as _已映射X
+            if not _已映射X(self._安全句柄()):
+                次数 = int(getattr(self, "_自愈等映射", 0)) + 1
+                self._自愈等映射 = 次数
+                if 次数 <= 10:
+                    self._AI写(f"[显示] 播放窗口还没在屏幕上，暂不收回（第 {次数} 次，"
+                             f"0.5 秒后重试）")
+                    from PySide6.QtCore import QTimer as _T
+                    _T.singleShot(500, self._自愈画面)
+                    return
+                self._AI写("[显示] 窗口迟迟没上屏，直接清掉游离窗口（画面改用它自己的窗口）")
+        except Exception:
+            pass
         位置 = 0.0
         try:
             位置 = float(self.会话.播放器.进度秒())
