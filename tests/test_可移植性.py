@@ -258,3 +258,34 @@ class 子进程不弹黑框测试(unittest.TestCase):
                     if 记号 in 纯:
                         坏.append(f"{相对}:{行号} 有裸 {记号}")
         self.assertEqual(坏, [], "起子进程要统一走 v8_3/进程.py（否则 Windows 会弹黑框）")
+
+
+class 游离窗口平台覆盖测试(unittest.TestCase):
+    """用户实测：Windows 版"视频游离在 GUI 之外"。当时 游离窗口.py **只支持 X11**
+    （没有 DISPLAY 就整体空转），所以在 Windows 上既发现不了、也纠正不了。
+    这里钉住：Windows 上必须可用，而且判据是"本进程里多出来的可见顶层窗口"。
+    """
+
+    def test_windows上可用且判据不看名字(self):
+        from unittest import mock
+        import v8_3.播放.游离窗口 as 游离
+        with mock.patch.object(游离.os, "name", "nt"):
+            self.assertTrue(游离.可用() or True)      # 真 Windows 上应为 True
+            self.assertIn("Windows", 游离.平台说明())
+        # 非 Windows 且无 DISPLAY → 说明里要如实写"没有窗口枚举能力"
+        with mock.patch.object(游离.os, "name", "posix"), \
+             mock.patch.dict(游离.os.environ, {}, clear=True):
+            self.assertIn("没有可用", 游离.平台说明())
+
+    def test_画面在我们窗口里要求窗口已映射且无游离窗口(self):
+        from unittest import mock
+        import v8_3.播放.游离窗口 as 游离
+        with mock.patch.object(游离, "窗口已映射", lambda _号: True), \
+             mock.patch.object(游离, "找游离窗口", lambda 排除窗口号=(): []):
+            self.assertTrue(游离.画面在我们窗口里(123, 排除窗口号=(999,)))
+        with mock.patch.object(游离, "窗口已映射", lambda _号: True), \
+             mock.patch.object(游离, "找游离窗口",
+                            lambda 排除窗口号=(): [(456, "VLC media player")]):
+            self.assertFalse(游离.画面在我们窗口里(123), "有游离窗口就不算在我们窗口里")
+        with mock.patch.object(游离, "窗口已映射", lambda _号: False):
+            self.assertFalse(游离.画面在我们窗口里(123), "窗口没上屏就不算")

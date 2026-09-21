@@ -10,9 +10,15 @@ libvlc 3 嵌入播放靠 ``set_xwindow(窗口号)``。如果那一刻我们给�
 
 怎么发现
 ========
-直接问 X 服务器：列出根窗口的所有子窗口，看有没有名字以 ``VLC media player`` 结尾的
-顶层窗口（VLC 自己的窗口标题就是 "<文件名> - VLC media player" 或 "VLC media player"）。
-用 ctypes 直连 ``libX11``，不额外依赖任何 Python 包。
+* **Linux/X11**：直接问 X 服务器 —— 列出根窗口的所有子窗口，看有没有名字以
+  ``VLC media player`` 结尾的顶层窗口；类名 ``vlc`` 更可靠（中文界面标题会变）；
+* **Windows**：``EnumWindows`` 枚举本进程的顶层窗口，看有没有**不是我们 Qt 窗口**的
+  可见顶层窗口（VLC 在 Windows 上自己开窗口时类名是 ``VLC video output`` /
+  标题带 ``VLC``）；同一个判断也用来做"画面到底在不在我们窗口里"的自检
+  （见 :func:`画面在我们窗口里`）。
+
+Windows 这条是**必须**的：用户实测 Windows 版"能播了，但视频游离在 GUI 之外"，
+而当时这里只支持 X11 → 守护整个是空转的，没人去发现和纠正。
 
 怎么收拾
 ========
@@ -29,7 +35,8 @@ import os
 from typing import Optional
 
 __all__ = ["可用", "不可用原因", "找游离窗口", "请关闭窗口", "销毁窗口",
-           "VLC窗口标题尾巴", "VLC窗口类名"]
+           "VLC窗口标题尾巴", "VLC窗口类名", "窗口已映射", "窗口尺寸",
+           "映射状态", "画面在我们窗口里", "平台说明"]
 
 #: libvlc 自己那个窗口的标题尾巴（VLC 3 默认标题就是 "<文件名> - VLC media player"）
 VLC窗口标题尾巴 = "vlc media player"
@@ -100,10 +107,16 @@ def _载入():
 
 
 def 可用() -> bool:
+    """当前平台能不能发现游离窗口（X11 或 Windows 都行）。"""
+    if os.name == "nt":
+        return _载入win() is not None
     return _载入() is not None
 
 
 def 不可用原因() -> str:
+    if os.name == "nt":
+        _载入win()
+        return _win加载错误
     _载入()
     return _加载错误
 
@@ -143,6 +156,97 @@ class _客户端消息(ctypes.Structure):
                 ("send_event", ctypes.c_int), ("display", ctypes.c_void_p),
                 ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
                 ("format", ctypes.c_int), ("data", _客户端消息数据)]
+
+
+# ==================== Windows 后端 ====================
+
+#: VLC 在 Windows 上自己那个视频窗口的类名（VLC 3.x 用 direct3d/gl 输出时都是它）
+Windows_VLC类名们 = ("vlc video output", "vlc", "videolan")
+
+_user32 = None
+_win加载错误 = ""
+
+
+def _载入win():
+    """Windows 上载入 user32（找不到就说明不是 Windows）。"""
+    global _user32, _win加载错误
+    if _user32 is not None or _win加载错误:
+        return _user32
+    if os.name != "nt":
+        _win加载错误 = "不是 Windows"
+        return None
+    try:
+        import ctypes as _c
+        _user32 = _c.WinDLL("user32", use_last_error=True)
+    except Exception as 错:  # noqa: BLE001
+        _win加载错误 = f"载入 user32 失败：{错}"
+        return None
+    return _user32
+
+
+def _win窗口文本(号: int) -> str:
+    用户 = _载入win()
+    if 用户 is None:
+        return ""
+    try:
+        长度 = int(用户.GetWindowTextLengthW(int(号)) or 0)
+        if 长度 <= 0:
+            return ""
+        缓冲 = ctypes.create_unicode_buffer(长度 + 1)
+        用户.GetWindowTextW(int(号), 缓冲, 长度 + 1)
+        return 缓冲.value or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _win窗口类名(号: int) -> str:
+    用户 = _载入win()
+    if 用户 is None:
+        return ""
+    try:
+        缓冲 = ctypes.create_unicode_buffer(256)
+        用户.GetClassNameW(int(号), 缓冲, 256)
+        return 缓冲.value or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _win本进程窗口们() -> list[int]:
+    """本进程所有顶层窗口（含不可见的）。"""
+    用户 = _载入win()
+    if 用户 is None:
+        return []
+    import ctypes as _c
+    结果: list[int] = []
+
+    def _回调(号, _参数):
+        pid = _c.c_ulong()
+        用户.GetWindowThreadProcessId(int(号), _c.byref(pid))
+        if int(pid.value) == os.getpid():
+            结果.append(int(号))
+        return True
+
+    原型 = _c.WINFUNCTYPE(_c.c_bool, _c.c_void_p, _c.c_void_p)
+    用户.EnumWindows(原型(_回调), 0)
+    return 结果
+
+
+def _win是VLC窗口(号: int) -> bool:
+    类名 = _win窗口类名(号).strip().lower()
+    标题 = _win窗口文本(号).strip().lower()
+    if any(名 in 类名 for 名 in Windows_VLC类名们):
+        return True
+    return "vlc" in 标题 and ("media player" in 标题 or "媒体播放器" in 标题
+                          or 标题.endswith("vlc"))
+
+
+def 平台说明() -> str:
+    """给日志用的一句话：当前平台靠什么发现游离窗口。"""
+    if os.name == "nt":
+        return "Windows（EnumWindows 枚举本进程顶层窗口）"
+    if os.environ.get("DISPLAY"):
+        return "X11（XQueryTree 枚举根窗口子窗口）"
+    return "当前平台没有可用的窗口枚举能力"
 
 
 def _窗口名(显示, 窗口号: int) -> str:
@@ -225,6 +329,16 @@ def 是VLC窗口(类名: str, 标题: str) -> bool:
             or 名 == "vlc")
 
 
+def _win可见(号: int) -> bool:
+    用户 = _载入win()
+    if 用户 is None:
+        return True
+    try:
+        return bool(用户.IsWindow(int(号))) and bool(用户.IsWindowVisible(int(号)))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def 映射状态(窗口号: int) -> int:
     """问 X：这个窗口映射了没有。0=没映射 1=没映射但可映射 2=已映射；-1=拿不到。"""
     if not 窗口号 or not 可用():
@@ -255,6 +369,10 @@ def 窗口已映射(窗口号: int) -> bool:
     **自己开一个顶层窗口**放画面（用户实测两次："又多了一个 VLC media player 在放"）。
     拿不到状态时返回 True（宁可照旧，也别把正常环境卡住）。
     """
+    if os.name == "nt":
+        # Windows 没有 map_state：IsWindow + IsWindowVisible 就是最好的等价物
+        # （用户实测的问题正是"窗口还没真的显示就把 HWND 交给 VLC" → VLC 自己开窗口）
+        return _win可见(int(窗口号 or 0))
     状态 = 映射状态(窗口号)
     if 状态 < 0:
         return True
@@ -263,6 +381,22 @@ def 窗口已映射(窗口号: int) -> bool:
 
 def 窗口尺寸(窗口号: int) -> tuple[int, int]:
     """取窗口宽高（拿不到就 (0, 0)）—— 诊断"那个窗口比屏幕还大"用。"""
+    if os.name == "nt":
+        用户 = _载入win()
+        if 用户 is None:
+            return (0, 0)
+        try:
+            import ctypes as _c
+
+            class _矩形(_c.Structure):
+                _fields_ = [("左", _c.c_long), ("上", _c.c_long),
+                            ("右", _c.c_long), ("下", _c.c_long)]
+            矩 = _矩形()
+            if not 用户.GetWindowRect(int(窗口号), _c.byref(矩)):
+                return (0, 0)
+            return (int(矩.右 - 矩.左), int(矩.下 - 矩.上))
+        except Exception:  # noqa: BLE001
+            return (0, 0)
     if not 可用():
         return (0, 0)
     L = _载入()
@@ -288,6 +422,34 @@ def 找游离窗口(排除窗口号=()) -> list[tuple[int, str]]:
 
     :param 排除窗口号: 我们自己的窗口号（Qt 里 ``winId()``），避免误判。
     """
+    if os.name == "nt":
+        # Windows：枚举本进程的顶层窗口，挑出**不是我们 Qt 窗口**的可见大窗口。
+        # 为什么不只按类名/标题匹配：VLC 自己开窗时的类名/标题会随版本与语言变
+        # （实测中文界面标题是"VLC 媒体播放器"），而"本进程里多出来的那个顶层窗口"
+        # 这个判据不依赖它的名字，最稳。
+        try:
+            排除 = {int(x) for x in (排除窗口号 or ()) if x}
+        except Exception:  # noqa: BLE001
+            排除 = set()
+        用户 = _载入win()
+        if 用户 is None:
+            return []
+        结果: list[tuple[int, str]] = []
+        for 号 in _win本进程窗口们():
+            if 号 in 排除:
+                continue
+            if not _win可见(号):
+                continue
+            类 = _win窗口类名(号)
+            if 类.lower().startswith("qt"):      # Qt 自己的窗口（含各种辅助窗）
+                continue
+            宽, 高 = 窗口尺寸(号)
+            if 宽 < 160 or 高 < 120:             # 太小的多半是提示/气泡/隐藏助手窗
+                continue
+            名 = _win窗口文本(号)
+            尾巴 = "（VLC 的窗口）" if _win是VLC窗口(号) else ""
+            结果.append((号, f"{(名 or 类).strip() or '未知窗口'}{尾巴}"))
+        return 结果
     if not 可用():
         return []
     L = _载入()
@@ -329,6 +491,19 @@ def 找游离窗口(排除窗口号=()) -> list[tuple[int, str]]:
 
 
 def 请关闭窗口(窗口号: int) -> bool:
+    """客气体面地请窗口关闭（Windows: WM_CLOSE；X11: WM_DELETE_WINDOW）。"""
+    if os.name == "nt":
+        用户 = _载入win()
+        if 用户 is None:
+            return False
+        try:
+            return bool(用户.PostMessageW(int(窗口号), 0x0010, 0, 0))   # WM_CLOSE
+        except Exception:  # noqa: BLE001
+            return False
+    return _请关闭窗口X11(窗口号)
+
+
+def _请关闭窗口X11(窗口号: int) -> bool:
     """发 ``WM_DELETE_WINDOW`` 客气体面地请求关闭（首选）。"""
     if not 可用():
         return False
@@ -383,6 +558,19 @@ def _子窗口们(L, 显示, 窗口号: int) -> list[int]:
 
 
 def 销毁窗口(窗口号: int) -> bool:
+    """最后手段：直接销毁（Windows: DestroyWindow；X11: XDestroyWindow）。"""
+    if os.name == "nt":
+        用户 = _载入win()
+        if 用户 is None:
+            return False
+        try:
+            return bool(用户.DestroyWindow(int(窗口号)))
+        except Exception:  # noqa: BLE001
+            return False
+    return _销毁窗口X11(窗口号)
+
+
+def _销毁窗口X11(窗口号: int) -> bool:
     """最后手段：销毁那块画布（**连子窗口一起**）。
 
     只销毁父窗口有时会留下 vout 子窗口（用户会看到"窗口没了但画面还在"），
@@ -408,6 +596,32 @@ def 销毁窗口(窗口号: int) -> bool:
         return False
     finally:
         L.XCloseDisplay(显示)
+
+
+def 画面在我们窗口里(视频窗口号: int, 排除窗口号=()) -> bool:
+    """libvlc 的画面**真的**画在我们给的窗口里吗？
+
+    判据（两端都能用、且和"用户看到什么"一致）：
+
+    * 我们给出去的那个窗口**在屏幕上**（:func:`窗口已映射`）；
+    * 本进程里**没有多出来的顶层窗口**（:func:`找游离窗口` 为空）——
+      有游离窗口就说明画面跑到 VLC 自己开的窗口里去了（用户实测的
+      "视频游离在 GUI 之外"就是这个）。
+
+    为什么不用"我们的窗口里有没有子窗口"来判断：VLC 的 ``xcb_window`` 输出是
+    **直接画进给定窗口**、不一定建子窗口（真机日志实测：``using vout window
+    module "xcb_window"`` 之后我们那个窗口依然是空的 → 会误判成"不在我们窗口里"）。
+    """
+    号 = int(视频窗口号 or 0)
+    if not 号:
+        return False
+    if not 窗口已映射(号):
+        return False
+    try:
+        排除 = (号,) + tuple(排除窗口号 or ())
+    except Exception:  # noqa: BLE001
+        排除 = (号,)
+    return not 找游离窗口(排除窗口号=排除)
 
 
 def 清干净游离窗口(最多轮: int = 3) -> int:

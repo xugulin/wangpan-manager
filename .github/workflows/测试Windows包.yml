@@ -232,6 +232,25 @@ jobs:
             if ($结论 -notmatch '通过') { throw "起子进程会弹黑框（下载模型时会冒出黑窗口）" }
           } finally { Pop-Location }
 
+      - name: 真播放一次：画面必须在 GUI 窗口里（不许游离）
+        shell: pwsh
+        run: |
+          # 用户实测的 Windows 问题："能播，但视频游离在 GUI 之外播放"。
+          # 这一步用**发布包里的真软件**播一段随包附带的小视频，并检查画面到底
+          # 画在哪个窗口里（判据见 工具/测试播放嵌入.py）——只跑静态检查发现不了这种问题。
+          $app = '${{ steps.fetch.outputs.APP }}'
+          Push-Location $app
+          try {
+            $py = Join-Path $app '运行环境\python\python.exe'
+            if (-not (Test-Path -LiteralPath $py)) { $py = Join-Path $app '运行环境\venv\Scripts\python.exe' }
+            $素材 = Join-Path $app '工具\测试素材\样片.mp4'
+            if (-not (Test-Path -LiteralPath $素材)) { throw "包内没有测试素材（工具\测试素材\样片.mp4）" }
+            & $py (Join-Path $app '工具\测试播放嵌入.py')
+            $码 = $LASTEXITCODE
+            Write-Host "播放嵌入测试退出码：$码"
+            if ($码 -ne 0) { throw "画面游离在 GUI 之外（或起播失败）—— 见上面的日志" }
+          } finally { Pop-Location }
+
       - name: 启动程序并抓日志
         shell: pwsh
         run: |

@@ -508,6 +508,20 @@ class VLC:
         # ⚠️ 不要加 --no-stats：卡顿诊断（丢帧/码率）就靠它
     ]
 
+    @staticmethod
+    def _排查日志参数() -> list[str]:
+        """排查用：``V8_3_VLC日志文件=某路径`` 时，把 libvlc 自己的日志写进去。
+
+        为什么需要：Windows 上"画面游离在 GUI 之外"这类问题，只能靠 VLC 自己那句
+        ``vout display module matching …`` / ``using …`` 来定位；CI 上的真机
+        播放测试（``工具/测试播放嵌入.py``）就是开这个开关抓证据的。
+        平时不设这个环境变量，行为完全不变。
+        """
+        路径 = str(os.environ.get("V8_3_VLC日志文件") or "").strip()
+        if not 路径:
+            return []
+        return ["--verbose=2", "--file-logging", f"--logfile={路径}"]
+
     def __init__(self, 窗口句柄: int = 0, 日志回调: Optional[Callable] = None,
                  基础选项: list[str] | None = None,
                  静音: bool = False,
@@ -517,7 +531,8 @@ class VLC:
         库 = VLC库.取()
         self._lib = 库.lib
         self.路径 = 库.路径
-        参数 = list(self.实例参数) + list(基础选项 or [])
+        参数 = (list(self.实例参数) + self._排查日志参数()
+              + list(基础选项 or []))
         # ⚠️ 视频输出**必须**是 libvlc 实例级选项（``--vout=``）。
         #    实测（cvlc -vvv，2026-09-21）：
         #      ``cvlc --vout=xcb_x11 …``   → using vout display module "xcb_x11" ✓
