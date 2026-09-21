@@ -131,11 +131,72 @@ class _媒体统计结构(ctypes.Structure):
     ]
 
 
+#: 包内自带 VLC 的位置（发布包里就有，用户不必自己装）
+#: Windows 版**必须内置**：那边不像桌面 Linux 自带 VLC，用户报过
+#: "libvlc 不可用：找不到 libvlc（VLC 的运行库）" —— 播放直接不能用。
+自带VLC目录名 = "vlc"
+自带VLC候选 = (
+    Path("运行环境") / 自带VLC目录名,       # 发布包里的位置
+    Path(自带VLC目录名),                   # 源码树里手放一份也能用
+)
+
+
+def _项目根() -> Path:
+    """项目根（发布包里就是解压出来的那个目录）。"""
+    return Path(__file__).resolve().parents[2]
+
+
+def 自带库目录() -> Optional[Path]:
+    """包内自带的 VLC 目录（没有就返回 None）。"""
+    for 相对 in 自带VLC候选:
+        目录 = _项目根() / 相对
+        名字 = "libvlc.dll" if os.name == "nt" else "libvlc.so.5"
+        if (目录 / 名字).is_file():
+            return 目录
+    return None
+
+
+def _用自带库(目录: Path) -> str:
+    """把包内自带的 libvlc 挂上：加 DLL 搜索目录 + 告诉 VLC 插件在哪。
+
+    两个坑（Windows 上必须都做）：
+    * ``libvlc.dll`` 还要找 ``libvlccore.dll`` —— Windows 的 DLL 搜索**不含**
+      被加载 DLL 自己的目录，所以先把该目录加进搜索路径（Python 3.8+ 用
+      ``os.add_dll_directory``，老办法 PATH 前置也一起做上，双保险）；
+    * VLC 起来之后要按 ``VLC_PLUGIN_PATH`` 找解码/HTTP/输出等插件，
+      不设就是"能加载、不能播"。
+    """
+    目录 = Path(目录)
+    插件 = 目录 / "plugins"
+    try:
+        if os.name == "nt" and hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(str(目录))            # noqa: S301 - 自家目录
+        os.environ["PATH"] = str(目录) + os.pathsep + os.environ.get("PATH", "")
+    except Exception:  # noqa: BLE001
+        pass
+    if 插件.is_dir():
+        # 用户自己设过就别抢（方便排查问题时指向系统 VLC）
+        os.environ.setdefault("VLC_PLUGIN_PATH", str(插件))
+    return str(目录 / ("libvlc.dll" if os.name == "nt" else "libvlc.so.5"))
+
+
 def _找库() -> str:
-    """按优先级找 libvlc：环境变量 → ctypes 查找 → 常见 soname。"""
+    """按优先级找 libvlc：环境变量 → **包内自带** → ctypes 查找 → 常见 soname。
+
+    自带优先于系统：包里的版本是我们测过的（Windows 上更是唯一能用的来源 ——
+    系统里通常没装 VLC）。
+    """
     指定 = os.environ.get("V8_3_LIBVLC") or ""
     if 指定 and Path(指定).exists():
         return 指定
+    自带 = 自带库目录()
+    if 自带 is not None:
+        路径 = _用自带库(自带)
+        try:
+            ctypes.CDLL(路径)
+            return 路径
+        except OSError:
+            pass                       # 自带这份坏了就继续往下找系统的
     候选 = [ctypes.util.find_library("vlc"),
           "libvlc.so.5", "libvlc.so"]
     for 名 in 候选:
@@ -235,7 +296,9 @@ class VLC库:
         路径 = _找库()
         if not 路径:
             raise 库不可用(
-                "找不到 libvlc（VLC 的运行库）。请先安装 VLC：\n"
+                "找不到 libvlc（VLC 的运行库）。\n"
+                "  发布包本应自带一份（运行环境/vlc），若缺失请重新解压完整包；\n"
+                "  源码运行的话，自行安装 VLC 即可：\n"
                 "  Arch/Tea Linux: sudo pacman -S vlc\n"
                 "  Debian/Ubuntu:  sudo apt install libvlc5 vlc-plugin-base\n"
                 "或者用环境变量 V8_3_LIBVLC 指向 libvlc.so 的绝对路径。")

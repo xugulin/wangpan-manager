@@ -177,6 +177,34 @@ jobs:
             Write-Host "快捷方式名字与目标都正确：$目标"
           } finally { Pop-Location }
 
+      - name: 内置 VLC 必须能用（用户报过"装完不能播"）
+        shell: pwsh
+        run: |
+          # 用户反馈的致命问题：Windows 版发布出去之后播放页直接报
+          #   "libvlc 不可用：找不到 libvlc（VLC 的运行库）"
+          # —— 因为 Windows 不像桌面 Linux 自带 VLC。现在包内必须自带一份，
+          #    这条检查就是钉住它：**在没装 VLC 的干净 runner 上**必须可用。
+          $app = '${{ steps.fetch.outputs.APP }}'
+          $vlc = Join-Path $app '运行环境\vlc'
+          if (-not (Test-Path -LiteralPath (Join-Path $vlc 'libvlc.dll'))) {
+            throw "包内没有 运行环境\vlc\libvlc.dll —— Windows 版必须内置 VLC"
+          }
+          $插件 = @(Get-ChildItem -Path (Join-Path $vlc 'plugins') -Recurse -Filter '*.dll' -File)
+          Write-Host "包内 VLC：libvlc.dll 有了，插件 $($插件.Count) 个"
+          if ($插件.Count -lt 50) { throw "包内 VLC 插件不全（$($插件.Count) 个）" }
+          if (-not (Test-Path -LiteralPath (Join-Path $vlc 'COPYING.txt'))) {
+            throw "包内 VLC 没有许可证文件（GPL/LGPL 要求随包分发）"
+          }
+          Push-Location $app
+          try {
+            $py = Join-Path $app '运行环境\python\python.exe'
+            if (-not (Test-Path -LiteralPath $py)) { $py = Join-Path $app '运行环境\venv\Scripts\python.exe' }
+            # 注意：这段**不能**依赖系统装没装 VLC —— runner 上本来就没装
+            & $py -c "import sys; sys.path.insert(0,'.'); from v8_3.播放 import vlc绑定 as m; d=m.自带库目录(); print('自带目录：', d); print('可用：', m.可用(), '| 原因：', m.不可用原因()); print('加载：', m.VLC库.取().路径 if m.可用() else '-'); sys.exit(0 if m.可用() else 1)"
+            if ($LASTEXITCODE -ne 0) { throw "内置 VLC 加载失败（播放会不可用）" }
+            Write-Host "内置 VLC 可用 ✓"
+          } finally { Pop-Location }
+
       - name: 启动程序并抓日志
         shell: pwsh
         run: |

@@ -215,6 +215,15 @@ def 拷运行环境(顶层: Path, 平台: str, 含模型: bool) -> None:
                 shutil.copytree(源, 目标 / "本地模型", ignore=_忽略,
                                 dirs_exist_ok=True)
                 break
+        # ★ 内置 VLC（用户报过致命问题：Windows 版没装 VLC 就"无法播放视频"）
+        #   —— 用 构建/取vlc.py 下好的官方 VLC 运行时，放进 运行环境/vlc，
+        #   播放时由 v8_3/播放/vlc绑定.py 优先加载（自带优先于系统）。
+        vlc源 = Windows运行时 / "vlc"
+        if not (vlc源 / "libvlc.dll").is_file():
+            raise SystemExit(
+                "Windows 包缺少内置 VLC：先跑 构建/取vlc.py 下好 构建/windows/vlc。\n"
+                "（用户明确要求：Windows 版必须内置 VLC，不能再让用户自己装）")
+        shutil.copytree(vlc源, 目标 / "vlc", ignore=_忽略, dirs_exist_ok=True)
     # 模型（平台无关）：精简版不带，用户第一次用字幕时会自动下载
     if not 含模型:
         模型目录 = 目标 / "语音识别" / "模型"
@@ -235,6 +244,21 @@ def 清理垃圾(顶层: Path) -> None:
     for 后缀 in ("*.pyc", "*.pyo"):
         for 路径 in 顶层.rglob(后缀):
             路径.unlink(missing_ok=True)
+
+
+def 核对内置VLC(顶层: Path, 平台: str) -> None:
+    """Windows 包必须真的带上了 libvlc（用户报过"装完不能播"的致命问题）。"""
+    if 平台 != "windows":
+        return
+    目录 = 顶层 / "运行环境" / "vlc"
+    核心 = 目录 / "libvlc.dll"
+    插件数 = len(list((目录 / "plugins").rglob("*.dll"))) if (目录 / "plugins").is_dir() else 0
+    if not 核心.is_file():
+        raise SystemExit(f"✗ 包内没有 {核心} —— 不能发布（用户要求内置 VLC）")
+    if 插件数 < 50:
+        raise SystemExit(f"✗ 包内 VLC 插件不全（{插件数} 个）—— 不能发布")
+    print(f"  ✓ 内置 VLC 就位：libvlc.dll {核心.stat().st_size / 1048576:.1f} MB，"
+          f"插件 {插件数} 个", flush=True)
 
 
 def 打包(顶层: Path, 输出: Path) -> Path:
@@ -376,6 +400,7 @@ def main() -> int:
                     说(f"    ⚠️ 精简失败（不影响打包）：{e}")
             else:
                 说("  · 按参数要求：跳过运行环境精简")
+            核对内置VLC(顶层, 平台)      # ★ Windows 包必须带上 libvlc，否则不许发布
             说("  · 压缩")
             zip路径 = 打包(顶层, 发布目录 / f"{包名}.zip")
             shutil.rmtree(目标, ignore_errors=True)

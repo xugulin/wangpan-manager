@@ -1,6 +1,6 @@
 <div align="center">
 
-# 网盘管理 V1.0.10
+# 网盘管理 V1.0.11
 
 **一个绿色免安装的网盘管家：百度网盘 · 夸克网盘 · 光鸭云盘，一个界面全搞定**
 
@@ -25,8 +25,8 @@
 
 | 系统 | 包 | 大小 | 说明 |
 |---|---|---|---|
-| **Windows** | `wangpan-manager-V1.0.10-Windows.zip` | 约 466 MB | 解压即用（x64） |
-| **Linux** | `wangpan-manager-V1.0.10-Linux.zip` | 约 905 MB | 解压即用（x86_64） |
+| **Windows** | `wangpan-manager-V1.0.11-Windows.zip` | 约 466 MB | 解压即用（x64） |
+| **Linux** | `wangpan-manager-V1.0.11-Linux.zip` | 约 905 MB | 解压即用（x86_64） |
 
 > 这两个包**都不含 AI 语音模型**（省 400~500 MB）：AI 字幕第一次用的时候会自动联网下模型；
 > 不想联网可以自己在 AI 页里装一次，之后离线可用。**本地小模型的 ollama 基座（官方便携版
@@ -45,6 +45,31 @@
 > 校验用 `SHA256SUMS.txt`（整包 sha256）。从 V1.0.2 起不再分卷 —— 整包直下即可。
 >
 > 想看到报错信息？Windows 双击 `启动（看报错）.bat`，会在黑窗口里打印日志。
+
+---
+
+## 🆕 V1.0.11 修了什么
+
+**Windows 版内置 VLC —— 修掉"装完不能播放视频"这个致命问题**
+
+Windows 用户解压 V1.0.10 后点播放，页面直接报：
+
+> ❌ libvlc 不可用：找不到 libvlc（VLC 的运行库）。请先安装 VLC…
+
+原因是 Linux 桌面通常自带 VLC，而 **Windows 不会**，发布包也没带 —— 于是"直接在线看 4K 视频"
+这个核心功能在 Windows 上等于没有。现在：
+
+- **包内自带官方 VLC 3.0.23（Windows x64）运行时**：`运行环境/vlc/` 下是
+  `libvlc.dll`、`libvlccore.dll` 与 354 个插件（解码 / HTTP / 输出等，约 131 MB）；
+- 播放时**优先加载包内这一份**（自带优先于系统）：加载前会把该目录加进 DLL 搜索路径、
+  并把 `VLC_PLUGIN_PATH` 指向包内 `plugins`（Windows 的 DLL 搜索**不含**被加载 DLL
+  自己的目录，不设插件路径就会"能加载、不能播"）；
+- 找不到时才回退到系统 VLC / `V8_3_LIBVLC` 环境变量；
+- 随包带上 VLC 的 `COPYING.txt` / `AUTHORS.txt`（GPLv2+ / LGPLv2.1+ 要求随包分发）；
+- **打包脚本强制校验**：Windows 包缺 `libvlc.dll` 或插件少于 50 个就**直接拒绝出包**，
+  不会再发出"装完不能播"的包；CI 里也加了一条"干净 runner（没装 VLC）上必须可用"的检查。
+
+Linux 包维持不变（桌面发行版基本都自带 VLC），需要的话照样能用系统那份。
 
 ---
 
