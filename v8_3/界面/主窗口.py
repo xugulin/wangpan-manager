@@ -1195,6 +1195,21 @@ def _调优应用(应用):
     所有开关都是"失败就跳过"，不影响功能。
     """
     try:
+        # Windows：**基样式换成 Fusion**。
+        # 为什么：QSS + 原生 windows11 样式会让每次样式计算走两套引擎
+        # （QStyleSheetStyle 先问原生样式再叠自己的规则）。真机 windows-latest 实测
+        # （原生窗口，非离屏）：建主窗口 54.5 秒、播放页 36.2 秒、AI 页 24.3 秒 ——
+        # 而在同一个进程里建同样多的控件只要几十毫秒，说明贵的就是这层样式计算。
+        # Fusion 是纯 Qt 实现，与 QSS 搭配快得多；外观本来就由主题 QSS 决定，
+        # 视觉上几乎无差别。可用 V8_3_保留原生样式=1 关掉对比。
+        import os as _os2
+        import sys as _sys2
+        if (_sys2.platform.startswith("win")
+                and _os2.environ.get("V8_3_保留原生样式", "") not in ("1", "true", "True")):
+            应用.setStyle("Fusion")
+    except Exception:
+        pass
+    try:
         # Windows：把"中文 + emoji"字体族**显式**列给 Qt。
         # 不列的话，每个 emoji 都要走一遍"字体回退查找"（彩色字体更贵），
         # 而本项目界面里 emoji 上千个 —— 真机 windows-latest 实测：
