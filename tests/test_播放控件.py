@@ -1223,8 +1223,12 @@ class 工具栏自适应测试(unittest.TestCase):
         if 栏.当前模式 in ("精简", "完整"):
             self.assertIn("面板", 栏.侧栏动作.text())
         else:
-            self.assertTrue(栏.侧栏动作.isVisibleTo(栏),
+            # QAction 没有 isVisibleTo（那是 QWidget 的方法）——
+            # 在 CI 上被这条自己写错的断言绊了一跤，留个记号。
+            self.assertTrue(栏.侧栏动作.isVisible(),
                             "图标档下「🗂 面板」也必须在工具栏上")
+            self.assertTrue(栏.侧栏动作.text().strip(),
+                            "图标档下按钮至少要显示图标")
         栏.按宽度自适应(1183)
         self.assertIn(栏.当前模式, ("精简", "完整"),
                       "1183px 的窗口应该还能显示文字（不要掉到纯图标）")
