@@ -44,6 +44,7 @@ mp3/wav/flv/ts…）不受影响。
 """
 from __future__ import annotations
 
+from ..进程 import 起, 起并等待
 import json
 import os
 import queue
@@ -299,7 +300,7 @@ def 发(数据):
 
 def 取时长(路径):
     try:
-        结果 = subprocess.run(
+        结果 = 起并等待(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", 路径],
             capture_output=True, text=True, timeout=120)
         return float((结果.stdout or "").strip() or 0.0)
@@ -313,7 +314,7 @@ def 抽音轨(路径):
     os.close(句柄)
     if not shutil_which("ffmpeg"):
         raise RuntimeError("系统里找不到 ffmpeg，无法对直链/怪格式抽音轨")
-    结果 = subprocess.run(
+    结果 = 起并等待(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", 路径,
          "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav", 临时],
         capture_output=True, text=True)
@@ -468,7 +469,7 @@ class _工作进程:
         环境.setdefault("PYTHONIOENCODING", "utf-8")
         环境.setdefault("PYTHONUNBUFFERED", "1")
         try:
-            self.进程 = subprocess.Popen(
+            self.进程 = 起(
                 [self.解释器, "-u", "-c", _工作进程源码],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace", env=环境,
@@ -644,7 +645,7 @@ def _取时长(路径: str) -> float:
     if not shutil.which("ffprobe"):
         return 0.0
     try:
-        结果 = subprocess.run(
+        结果 = 起并等待(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", 路径],
             capture_output=True, text=True, timeout=120)
         return float((结果.stdout or "").strip() or 0.0)
@@ -658,7 +659,7 @@ def _抽音轨(路径: str) -> str:
         raise 识别失败("系统里找不到 ffmpeg，无法对 http 直链抽音轨。请先装 ffmpeg。")
     句柄, 临时 = tempfile.mkstemp(suffix=".wav", prefix="v8_3_asr_")
     os.close(句柄)
-    结果 = subprocess.run(
+    结果 = 起并等待(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", 路径,
          "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav", 临时],
         capture_output=True, text=True)

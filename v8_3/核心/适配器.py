@@ -18,6 +18,7 @@ V8_3 不重写三家网盘的协议，而是把工作区里已经 100% 自研的
 
 from __future__ import annotations
 
+from ..进程 import 起
 import os
 import re
 import sys
@@ -175,14 +176,13 @@ class 适配器规格:
         return True, "目录可用"
 
     def 启动适配器GUI(self):
-        import subprocess
         启动 = self.启动脚本()
         if not 启动.is_file():
             raise FileNotFoundError(f"找不到适配器启动脚本：{启动}")
         环境 = os.environ.copy()
         环境.setdefault("PYTHONIOENCODING", "utf-8")
         环境.setdefault("PYTHONUTF8", "1")
-        subprocess.Popen(
+        起(
             [self.Python解释器, str(启动)],
             cwd=str(self.路径),
             env=环境,

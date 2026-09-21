@@ -30,6 +30,8 @@ import os
 import re
 import shutil
 import subprocess
+
+from ..进程 import 起, 起并等待
 import threading
 import time
 from dataclasses import dataclass, field
@@ -274,7 +276,7 @@ def _跑版本(可执行: Path, 超时秒: float = 15.0) -> str:
     没有再退回第一个版本号（没有服务端时只有一行 ``ollama version is X``）。
     """
     try:
-        子 = subprocess.run([str(可执行), "--version"], capture_output=True,
+        子 = 起并等待([str(可执行), "--version"], capture_output=True,
                             text=True, timeout=超时秒)
     except Exception:  # noqa: BLE001 - 缺依赖/无执行权限/超时都算"取不到"
         return ""
@@ -1202,7 +1204,7 @@ class 本地模型客户端:
             # 模型权重放项目里：整个文件夹可搬走、删掉不留残留。
             # 用 模型环境() 保证 CLI 与服务端看到同一个仓库。
             环境 = 模型环境()
-            self._进程 = subprocess.Popen(
+            self._进程 = 起(
                 [可执行, "serve"], stdout=句柄, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, env=环境,
                 start_new_session=True)
@@ -1237,7 +1239,7 @@ class 本地模型客户端:
         if not 可执行:
             return False, "没找到 ollama 可执行文件：\n" + self.安装指引()
         try:
-            进程 = subprocess.run([可执行, "pull", 模型],
+            进程 = 起并等待([可执行, "pull", 模型],
                                 capture_output=True, text=True,
                                 timeout=超时秒, encoding="utf-8",
                                 errors="replace")
@@ -1296,7 +1298,7 @@ class 本地模型客户端:
         可执行 = _找可执行文件()
         if 可执行:
             try:
-                进程 = subprocess.run([可执行, "list"], capture_output=True,
+                进程 = 起并等待([可执行, "list"], capture_output=True,
                                     text=True, timeout=30, encoding="utf-8",
                                     errors="replace", env=模型环境())
                 if 进程.returncode == 0:
@@ -1356,7 +1358,7 @@ class 本地模型客户端:
         if not 可执行:
             return False, "没找到 ollama 可执行文件（也没检测到正在运行的 ollama 服务）"
         try:
-            进程 = subprocess.run([可执行, "rm", 模型], capture_output=True,
+            进程 = 起并等待([可执行, "rm", 模型], capture_output=True,
                                 text=True, timeout=120, encoding="utf-8",
                                 errors="replace", env=模型环境())
         except Exception as e:  # noqa: BLE001
@@ -1400,7 +1402,7 @@ class 本地模型客户端:
             return False, f"本地服务起不来：{说明}"
         环境 = 模型环境()
         try:
-            进程 = subprocess.Popen(
+            进程 = 起(
                 [可执行, "pull", 模型], stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 text=True, encoding="utf-8", errors="replace",
@@ -1432,7 +1434,7 @@ class 本地模型客户端:
                     pass
             time.sleep(1.5 * 尝试)
             try:
-                进程 = subprocess.Popen(
+                进程 = 起(
                     [可执行, "pull", 模型], stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                     text=True, encoding="utf-8", errors="replace",

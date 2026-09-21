@@ -1,6 +1,6 @@
 <div align="center">
 
-# 网盘管理 V1.0.11
+# 网盘管理 V1.0.12
 
 **一个绿色免安装的网盘管家：百度网盘 · 夸克网盘 · 光鸭云盘，一个界面全搞定**
 
@@ -25,8 +25,8 @@
 
 | 系统 | 包 | 大小 | 说明 |
 |---|---|---|---|
-| **Windows** | `wangpan-manager-V1.0.11-Windows.zip` | 约 466 MB | 解压即用（x64） |
-| **Linux** | `wangpan-manager-V1.0.11-Linux.zip` | 约 905 MB | 解压即用（x86_64） |
+| **Windows** | `wangpan-manager-V1.0.12-Windows.zip` | 约 466 MB | 解压即用（x64） |
+| **Linux** | `wangpan-manager-V1.0.12-Linux.zip` | 约 905 MB | 解压即用（x86_64） |
 
 > 这两个包**都不含 AI 语音模型**（省 400~500 MB）：AI 字幕第一次用的时候会自动联网下模型；
 > 不想联网可以自己在 AI 页里装一次，之后离线可用。**本地小模型的 ollama 基座（官方便携版
@@ -45,6 +45,32 @@
 > 校验用 `SHA256SUMS.txt`（整包 sha256）。从 V1.0.2 起不再分卷 —— 整包直下即可。
 >
 > 想看到报错信息？Windows 双击 `启动（看报错）.bat`，会在黑窗口里打印日志。
+
+---
+
+## 🆕 V1.0.12 修了什么
+
+**下载 AI 模型不再弹两个大黑框**（VIP 用户实测反馈）
+
+Windows 版点「下载模型 / 安装本地模型」时，屏幕上会冒出**两个关不掉的大黑框**，
+标题是 `…\运行环境\本地模型\ollama.exe` —— 一个是后台的 `ollama serve`，
+一个是 `ollama pull`。它们是控制台程序，而 GUI 程序（`启动.exe`）起控制台程序时
+**Windows 默认给它新开一个控制台窗口**；关掉那个窗口就等于中断下载，所以很难受。
+
+修法：新增 `v8_3/进程.py`，所有起子进程的地方统一走它 —— 带上
+`CREATE_NO_WINDOW`（不创建控制台）+ `STARTUPINFO(SW_HIDE)` 双保险：
+
+- `ollama serve` / `ollama pull` / `ollama list` / `ollama rm` / `ollama --version`；
+- 适配器桥（`运行环境\python\python.exe`）、ffprobe/ffmpeg（媒体信息、字幕）、
+  语音识别子进程、一键更新的拉起脚本 —— 全项目**没有裸 `subprocess.Popen/run`** 了
+  （有单测做静态检查，防止以后又写回去）。
+
+真机验证（CI 的 Windows runner，判据是"子进程有没有被分到控制台窗口"）：
+用 GUI 子系统的 `pythonw.exe` 当父进程，裸起 → 子进程拿到控制台（= 黑框）；
+走我们的 `v8_3.进程.起` → 子进程 `GetConsoleWindow()==0`，没有黑框。
+
+顺便把上一版（V1.0.11）的内置 VLC 也带在这一版里：Windows 包自带官方 VLC 3.0.23
+运行时（354 个插件），解压即用、不用自己装 VLC。
 
 ---
 

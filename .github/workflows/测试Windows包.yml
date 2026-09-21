@@ -207,6 +207,22 @@ jobs:
             Write-Host "内置 VLC 可用 ✓"
           } finally { Pop-Location }
 
+      - name: 下载模型不许弹黑框（VIP 用户反馈）
+        shell: pwsh
+        run: |
+          # 用户实测：点"下载 AI 模型"会弹出两个关不掉的大黑框（ollama serve / pull）。
+          # 判据：用 GUI 子系统的 pythonw 当父进程，分别裸起 / 用 v8_3.进程.起 各起一个
+          # 控制台子进程，看子进程有没有被分到控制台窗口。
+          $app = '${{ steps.fetch.outputs.APP }}'
+          Push-Location $app
+          try {
+            $pyw = Join-Path $app '运行环境\python\pythonw.exe'
+            if (-not (Test-Path -LiteralPath $pyw)) { $pyw = Join-Path $app '运行环境\venv\Scripts\pythonw.exe' }
+            if (-not (Test-Path -LiteralPath $pyw)) { throw "包内找不到 pythonw.exe（GUI 子系统解释器）" }
+            & $pyw (Join-Path $app '工具\检查不弹黑框.py')
+            if ($LASTEXITCODE -ne 0) { throw "起子进程会弹黑框（下载模型时会冒出黑窗口）" }
+          } finally { Pop-Location }
+
       - name: 启动程序并抓日志
         shell: pwsh
         run: |

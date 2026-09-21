@@ -192,3 +192,69 @@ class 路径可移植性测试(unittest.TestCase):
             self.assertTrue(
                 str(路径.resolve()).startswith(str(项目根.resolve())),
                 f"{路径} 不在项目内")
+
+
+class 子进程不弹黑框测试(unittest.TestCase):
+    """VIP 用户实测：Windows 版"下载 AI 模型"时弹出**两个大黑框**
+    （`…\\运行环境\\本地模型\\ollama.exe`）—— 一个是 `ollama serve`、
+    一个是 `ollama pull`。GUI 程序起控制台程序时 Windows 默认给新控制台窗口，
+    关掉它等于中断下载，体验很差。所有起子进程的地方都必须带上 CREATE_NO_WINDOW。
+    """
+
+    def test_windows_上带不创建控制台的标志(self):
+        from unittest import mock
+        import v8_3.进程 as 进程
+        with mock.patch.object(进程.os, "name", "nt"):
+            参数 = 进程.无窗口参数()
+        self.assertIn("creationflags", 参数)
+        self.assertTrue(参数["creationflags"] & 0x08000000,
+                        "必须带 CREATE_NO_WINDOW(0x08000000)，否则会弹黑框")
+        # STARTUPINFO 只有真 Windows 上才存在（Linux 上模拟不出来），
+        # 所以这半条在 Windows runner 上才断言 —— 那边的 CI 会跑到。
+        import sys as _sys
+        if _sys.platform == "win32":
+            self.assertIn("startupinfo", 参数, "再配 SW_HIDE 双保险")
+            self.assertTrue(参数["startupinfo"].dwFlags & 0x00000001,  # STARTF_USESHOWWINDOW
+                            "startupinfo 要置 STARTF_USESHOWWINDOW")
+            self.assertEqual(参数["startupinfo"].wShowWindow, 0)      # SW_HIDE
+
+    def test_非windows不加多余参数(self):
+        from unittest import mock
+        import v8_3.进程 as 进程
+        with mock.patch.object(进程.os, "name", "posix"):
+            self.assertEqual(进程.无窗口参数(), {})
+
+    def test_起子进程真的把标志传下去(self):
+        from unittest import mock
+        import v8_3.进程 as 进程
+        记录 = {}
+
+        def 假Popen(命令, **关键字):
+            记录["命令"] = 命令
+            记录["关键字"] = 关键字
+            return "进程对象"
+
+        with mock.patch.object(进程.subprocess, "Popen", 假Popen), \
+             mock.patch.object(进程.os, "name", "nt"):
+            self.assertEqual(进程.起(["ollama.exe", "pull", "m"]), "进程对象")
+        self.assertIn("creationflags", 记录["关键字"])
+        self.assertTrue(记录["关键字"]["creationflags"] & 0x08000000)
+
+    def test_ollama与桥都走统一入口(self):
+        """静态检查：这几个模块里不许再出现裸 subprocess.Popen/run。"""
+        from pathlib import Path
+        项目根 = Path(__file__).resolve().parents[1]
+        要查 = ("v8_3/AI/本地模型.py", "v8_3/核心/子进程客户端.py",
+              "v8_3/核心/适配器.py", "v8_3/播放/媒体信息.py",
+              "v8_3/播放/语音识别.py", "v8_3/更新.py")
+        坏: list[str] = []
+        for 相对 in 要查:
+            文本 = (项目根 / 相对).read_text(encoding="utf-8")
+            for 行号, 行 in enumerate(文本.splitlines(), start=1):
+                纯 = 行.strip()
+                if 纯.startswith("#") or "``" in 纯:
+                    continue          # 注释/文档里提到不算
+                for 记号 in ("subprocess.Popen(", "subprocess.run("):
+                    if 记号 in 纯:
+                        坏.append(f"{相对}:{行号} 有裸 {记号}")
+        self.assertEqual(坏, [], "起子进程要统一走 v8_3/进程.py（否则 Windows 会弹黑框）")

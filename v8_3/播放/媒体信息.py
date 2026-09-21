@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+from ..进程 import 起, 起并等待
 import json
 import logging
 import os
@@ -180,7 +181,7 @@ def 探测媒体(地址: str, 请求头: dict | None = None,
         命令 += ["-headers", 头文本]
     命令 += [str(地址)]
     try:
-        进程 = subprocess.run(命令, capture_output=True, text=True,
+        进程 = 起并等待(命令, capture_output=True, text=True,
                             timeout=max(5.0, 超时秒), encoding="utf-8",
                             errors="replace")
     except subprocess.TimeoutExpired:

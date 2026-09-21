@@ -24,6 +24,8 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+from .进程 import 起, 起并等待
 from typing import Any, Callable, Optional
 
 __all__ = [
@@ -348,12 +350,11 @@ def 拉起更新脚本(脚本: str | Path) -> int:
     if not 脚本.is_file():
         raise FileNotFoundError(f"更新脚本不存在：{脚本}")
     if os.name == "nt":
-        进程 = subprocess.Popen(
+        进程 = 起(
             ["cmd", "/c", "start", "", "/min", str(脚本)],
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             cwd=str(脚本.parent), close_fds=True)
         return int(进程.pid)
-    进程 = subprocess.Popen(
+    进程 = 起(
         ["/bin/bash", str(脚本)],
         cwd=str(脚本.parent), start_new_session=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

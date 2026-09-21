@@ -69,6 +69,16 @@ def main() -> int:
         print(f"⚠️ 加载的不是包内那份（{路径}）—— 系统里也装了 VLC？"
               "自带优先的查找链可能没生效")
     print("✅ 内置 VLC 可用")
+    # 顺手体检：Windows 上起子进程必须带 CREATE_NO_WINDOW（否则会弹黑框 ——
+    # VIP 用户实测"下载模型时弹出两个大黑框"，就是 ollama serve/pull）。
+    from v8_3.进程 import 无窗口参数
+    参数 = 无窗口参数()
+    if sys.platform == "win32":
+        标志 = int(参数.get("creationflags", 0))
+        if not (标志 & 0x08000000):
+            print(f"✗ Windows 上起子进程没带 CREATE_NO_WINDOW（{标志}）：下载模型会弹黑框")
+            return 1
+        print(f"✅ 起子进程不弹黑框（creationflags={hex(标志)}）")
     return 0
 
 

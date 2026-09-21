@@ -6,6 +6,8 @@ import itertools
 import json
 import os
 import subprocess
+
+from ..进程 import 起
 import threading
 import time
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
@@ -105,7 +107,7 @@ class 子进程适配器(云盘适配器):
             "--project-root", str(self.规格.路径),
             "--threads", str(max(1, int(self.规格.线程数))),
         ]
-        self._进程 = subprocess.Popen(
+        self._进程 = 起(
             命令,
             cwd=str(工作脚本.parent),
             stdin=subprocess.PIPE,
