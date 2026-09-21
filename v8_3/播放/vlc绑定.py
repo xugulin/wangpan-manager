@@ -467,29 +467,28 @@ class VLC:
         实例视频输出 = str(实例视频输出 or "").strip()
         if 实例视频输出:
             参数.append(f"--vout={实例视频输出}")
-        # ⚠️⚠️ 嵌入必须用**实例级** ``--drawable-xid``，而且**不能再调 set_xwindow**。
-        #      实测（本机 VLC 3.0.23，Xvfb 真 X11，2026-09-21）：
+        # ⚠️ 嵌入**只有一条路**：``libvlc_media_player_set_xwindow(窗口号)``。
+        #    真机矩阵实测（用户这台机器，光鸭 4K60 HEVC 直链 + vaapi，2026-09-21）：
         #
-        #      ============================================  ==========================
-        #      做法                                          VLC 实际用的输出
-        #      ============================================  ==========================
-        #      `--vout=xcb_x11` + `set_xwindow(id)`          matching "any" → **gl** ✗
-        #      `--vout=xcb_x11` + `--drawable-xid=id`        matching "xcb_x11" → xcb_x11 ✓
-        #      `--drawable-xid=id`（不钉）                    matching "any" → **gl** ✗
-        #      ============================================  ==========================
+        #    ==================================================  ==================  ========
+        #    做法                                                vout window 模块    游离窗口
+        #    ==================================================  ==================  ========
+        #    set_xwindow(窗口)                                   "embed-xid,any" ✓   无 ✓
+        #    set_xwindow(窗口) + 软件解码                          "embed-xid,any" ✓   无 ✓
+        #    set_xwindow(窗口) + 不钉 vout（VLC 自选 gl+vaapi）     "embed-xid,any" ✓   无 ✓
+        #    实例级 --drawable-xid + --embedded-video（不调上面那个） "any" ✗           **有** ✗
+        #    ==================================================  ==================  ========
         #
-        #      **``libvlc_media_player_set_xwindow()`` 会把实例级 ``--vout`` 重置回
-        #      "any"**，于是 libvlc 自己挑到 GL 系输出；开了硬解（VAAPI）时 GL 要
-        #      ``glconv_vaapi_x11`` + 自己的 GL 画布，建不到就**自己开一个顶层窗口**
-        #      放画面 —— 用户看到的 "VLC media player" 窗口就是这么来的。
-        #      这就是三轮都没治好的真正病根：钉是钉了，紧接着又被 set_xwindow 抹掉。
+        #    结论：实例级 ``--drawable-xid`` **不会**触发嵌入（VLC 会自己开一个顶层窗口，
+        #    也就是用户反复看到的 "VLC media player"）；而 ``set_xwindow`` 一定能嵌。
+        #    V1.0.9 我一度改成"实例级 drawable"，那正好把嵌入关掉了 —— 用户反馈的"更严重"
+        #    就是这个。现在起播前**一定**走 set_xwindow。
+        #
+        #    另外：set_xwindow 会把实例级 ``--vout`` 重置回 "any"，所以"钉死视频输出"在
+        #    嵌入路径上是**无效**的（VLC 自己挑 gl + glconv_vaapi_x11，实测能正常嵌住）。
+        #    真正需要钉 vout 的只有"没有 drawable、VLC 自己开窗口"的场景。
         嵌入窗口号 = int(嵌入窗口号 or 0)
         self.用实例drawable = False
-        if 嵌入窗口号 and os.name != "nt":
-            # ``--embedded-video`` 告诉 VLC"这个 drawable 是嵌进来的窗口"，
-            # 它才会走 embed-xid 那条路（否则 xcb_window 会自己开一个顶层窗口 —— 实测）。
-            参数 += [f"--drawable-xid={嵌入窗口号}", "--embedded-video"]
-            self.用实例drawable = True
         if 静音:
             参数 += ["--no-audio"]
         文本 = [a.encode("utf-8") for a in 参数]
@@ -627,6 +626,28 @@ class VLC:
             except Exception:
                 pass
             self._媒体 = None
+
+    def 等vout消失(self, 超时秒: float = 3.0) -> bool:
+        """等视频输出（vout）真的没了；返回是否等到。
+
+        为什么必须等这个：``停止`` 只是请求，vout 是**异步**释放的。
+        如果这时就把旧的 drawable（比如要关掉的独立窗口）销毁掉，
+        VLC 的 vout 线程会踩到已销毁的窗口 —— 实测：整个进程卡死在事件循环里，
+        或者 VLC 干脆另开一个顶层窗口把画面丢进去（用户反复看到的
+        "关掉独立窗口又冒出 VLC media player"）。
+        ``libvlc_media_player_has_vout()`` 是 libvlc 的公开 API，拿它轮询最可靠。
+        """
+        if not self._播放器:
+            return True
+        截止 = time.time() + max(0.1, float(超时秒))
+        while time.time() < 截止:
+            try:
+                if not self._lib.libvlc_media_player_has_vout(self._播放器):
+                    return True
+            except Exception:  # noqa: BLE001
+                return True
+            time.sleep(0.05)
+        return False
 
     def 停止并等待(self, 超时秒: float = 3.0) -> bool:
         """停止播放并**等它真的停下来**（vout 释放是异步的）。

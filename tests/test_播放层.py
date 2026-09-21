@@ -24,8 +24,24 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+
+def _确保离屏() -> None:
+    """没有显示环境时强制离屏平台（本机环境变量是 "wayland;xcb"，直接起 Qt 会崩）。"""
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+
+def _有Qt() -> bool:
+    """本机能不能用 PySide6（没装就跳过真 X11 那两条）。"""
+    try:
+        import PySide6.QtWidgets  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
 
 项目根 = Path(__file__).resolve().parents[1]
 if str(项目根) not in sys.path:
@@ -958,81 +974,205 @@ class 嵌入播放输出测试(unittest.TestCase):
         self.assertFalse(会话.安全回退画面())
 
 
-class 嵌入宿主测试(unittest.TestCase):
-    """画面要交给**我们自己建的朴素 X11 子窗口**（不是 Qt 控件的窗口）。
+@unittest.skipUnless(_有Qt(), "没装 PySide6")
+class 主线程归口测试(unittest.TestCase):
+    """libvlc 不是线程安全的：真机 coredump 显示 ``播放AI决策`` 线程在
+    ``libvlc_media_add_option_flag`` 里 SIGSEGV（界面线程同时在起播）。
 
-    用户反馈过三次"多出一个 VLC media player 窗口"。三轮才挖到的病根：
-
-    * libvlc 嵌入只有 ``set_xwindow(窗口号)`` 一条路，给了句柄后它会找
-      "embed-xid,any" 的 **vout window** 模块 —— 优先嵌进我们给的窗口，
-      **尝试失败就退到 "any"（自己开一个顶层窗口），而且不报错**；
-    * 那个"尝试"失败的常见原因：窗口还没真的映射（Qt 说可见 ≠ X 已 map）、
-      或者 Qt 的那个窗口 visual 不寻常（合成器/主题下常是 ARGB/depth 32）；
-    * 我们自己建一个 24 位 TrueColor 的朴素子窗口、自己 map 并等到 ``IsViewable``
-      再交出去，VLC 的 embed 就几乎不可能失败 → ``,any`` 那条自开窗口的路走不到。
-
-    真机/真 X11 实测（Xvfb）：交 Qt 窗口 → 落到 "any" 自开窗口；
-    交自建子窗口 → 3/3 嵌住、缩放后也不游离。
+    所以会话里所有碰播放器的方法，都必须"不在界面线程就排队给界面线程执行"。
     """
 
-    def test_没有DISPLAY时不硬来(self):
-        """没有 X11 时：不建窗口、不报错，老实退回（交给调用方决定用不用 winId）。"""
-        from unittest import mock
-        from v8_3.播放 import 嵌入窗口
-        with mock.patch.dict("os.environ", {"DISPLAY": ""}, clear=False):
-            with mock.patch.object(嵌入窗口, "_库", None), \
-                 mock.patch.object(嵌入窗口, "_加载错误", ""), \
-                 mock.patch.object(嵌入窗口, "_显示", None):
-                self.assertFalse(嵌入窗口.可以自建())
-                self.assertTrue(嵌入窗口.不可用原因())
-                self.assertEqual(嵌入窗口.建子窗口(12345), 0)
+    def _会话(self):
+        from v8_3.播放.播放核心 import 播放会话
+        会话 = 播放会话(取适配器=lambda *_: None, 日志回调=None,
+                    探测直链开关=False, 探测媒体开关=False)
+        会话.装主线程泵()
+        return 会话
 
-    def test_自建失败时退回控件窗口(self):
+    def test_后台线程调用会排队到界面线程(self):
+        import threading
+        _确保离屏()
+        from PySide6.QtWidgets import QApplication
+        应用 = QApplication.instance() or QApplication([])
+        会话 = self._会话()
+        记录: list = []
+
+        def 假跳转(秒):
+            记录.append((秒, threading.current_thread().name))
+
+        会话.跳转 = 假跳转
+        会话._归口装好 = False          # 覆盖掉 __init__ 里那次，让假方法也被套壳
+        会话._装界面线程归口()
+        线程 = threading.Thread(target=lambda: 会话.跳转(42.0), name="测试后台")
+        线程.start()
+        time.sleep(0.3)                # 后台线程此刻正"等界面线程"（这里没有事件循环）
+        self.assertEqual(记录, [], "界面线程还没排空之前不该执行")
+        会话.排空主线程队列()          # 界面线程排空（真程序里是 25ms 定时器在做）
+        线程.join(2.0)
+        self.assertFalse(线程.is_alive(), "排空后后台线程就该继续往下走")
+        self.assertEqual(len(记录), 1)
+        self.assertEqual(记录[0][0], 42.0)
+        self.assertIn("MainThread", 记录[0][1], "必须真的在界面线程里执行")
+
+    def test_界面线程调用直接执行不排队(self):
+        import threading
+        会话 = self._会话()
+        记录: list = []
+        会话.跳转 = lambda 秒: 记录.append(threading.current_thread().name)
+        会话._归口装好 = False
+        会话._装界面线程归口()
+        会话.跳转(9.0)
+        self.assertEqual(len(记录), 1, "界面线程里应该直接执行")
+        self.assertEqual(会话.排空主线程队列(), 0)
+
+    def test_拿不到窗口号时拒绝起播(self):
+        """有出口却拿不到窗口号 → 宁可不起播，也不能把 0 交给 libvlc
+        （那会让 VLC 自己开一个 "VLC media player" 窗口放画面）。"""
         from unittest import mock
-        from v8_3.播放.嵌入窗口 import 嵌入宿主
+        会话 = self._会话()
+
+        class 空出口:
+            def 句柄(self):
+                return 0
+
+            def 建播放器(self, **_k):        # 不该被调用
+                raise AssertionError("拿不到窗口号就不该建播放器")
+        会话.出口 = 空出口()
+        会话.直链信息 = {"url": "http://127.0.0.1/假.mp4", "headers": {}}
+        with mock.patch("v8_3.播放.播放核心.vlc可用", lambda: True):
+            self.assertFalse(会话.起播(0), "必须拒绝起播")
+
+
+class 播放出口测试(unittest.TestCase):
+    """画面往哪里画：**唯一出口**（v8_3/播放/播放出口.py）。
+
+    用户反馈过四次"多出一个 VLC media player 窗口 / 画面没对齐"。真机矩阵实测
+    （用户这台机器：KDE Wayland + XWayland + Intel vaapi + 光鸭 4K60 HEVC 直链）：
+
+    ==================================================  ==================  ========
+    做法                                                 vout window 模块    游离窗口
+    ==================================================  ==================  ========
+    set_xwindow(视频控件自己的 X11 窗口)                  "embed-xid,any" ✓   无 ✓
+    实例级 --drawable-xid + --embedded-video              "any" ✗            **有** ✗
+    媒体级 :vout=xxx                                     不生效
+    ==================================================  ==================  ========
+
+    几条不能再犯的规矩：
+    * 只有 ``set_xwindow`` 会触发嵌入（实例级 drawable 不会）；
+    * 交给它的必须是**控件自己的** X11 子窗口（``WA_NativeWindow``），
+      自己另建窗口再算偏移 → 画面歪到右下角还被裁（用户实测）；
+    * **永远不要**销毁那个窗口（VLC 可能还在画；拆了它会另开一个窗口）。
+    """
+
+    def test_不可嵌入平台返回0(self):
+        from unittest import mock
+        from v8_3.播放.播放出口 import 播放出口
+        出口 = 播放出口(控件=None)
+        with mock.patch.object(出口, "可以嵌入", lambda: False):
+            self.assertEqual(出口.句柄(), 0, "没有 X11 窗口号时绝不能给 libvlc 递句柄")
+
+    def test_句柄来自控件自己的原生窗口(self):
+        """非原生控件的 winId() 是顶层窗口号 —— 必须先把控件设成原生窗口。"""
+        from unittest import mock
+        from v8_3.播放.播放出口 import 播放出口
+        设过属性 = []
+
         class 假控件:
+            def __init__(self):
+                self.原生 = False
+            def setAttribute(self, 属性, 值):
+                设过属性.append((属性, 值))
+                self.原生 = True
+            def testAttribute(self, 属性):   # noqa: N802
+                return self.原生
             def winId(self):            # noqa: N802
                 return 4242
-            def width(self): return 100
-            def height(self): return 50
-            def devicePixelRatio(self): return 1.0
-            def installEventFilter(self, _f): pass
-        宿主 = 嵌入宿主(假控件())
-        with mock.patch("v8_3.播放.嵌入窗口.可以自建", lambda: True), \
-             mock.patch("v8_3.播放.嵌入窗口.建子窗口", lambda *a, **k: 0):
-            self.assertEqual(宿主.句柄(), 4242, "自建失败必须退回控件自己的窗口号")
-        with mock.patch("v8_3.播放.嵌入窗口.可以自建", lambda: True), \
-             mock.patch("v8_3.播放.嵌入窗口.建子窗口", lambda *a, **k: 777):
-            self.assertEqual(宿主.句柄(), 777, "建成了就用自建窗口号")
-            self.assertEqual(宿主.句柄(), 777, "第二次拿句柄不该重复建窗口")
+            def window(self):
+                return self
 
-    def test_销毁会清掉窗口号(self):
+        控件 = 假控件()
+        出口 = 播放出口(控件=控件)
+        with mock.patch.object(出口, "可以嵌入", lambda: True), \
+             mock.patch("PySide6.QtCore.Qt") as 假Qt:
+            假Qt.WidgetAttribute.WA_NativeWindow = "WA_NativeWindow"
+            self.assertEqual(出口.句柄(), 4242)
+        self.assertTrue(设过属性, "必须把控件设成 WA_NativeWindow（否则窗口号是顶层窗口）")
+
+    def test_句柄可重入且只设一次原生属性(self):
+        """真机 SEGV 的第二个现场：`setAttribute(WA_NativeWindow)` 会立刻建原生窗口，
+        这个过程派发的事件可能再次走到 ``句柄()`` —— 标志位若在调用后才置位就会
+        无限递归（coredump 里正是 createWinId 层层嵌套），必须先置位 + testAttribute。"""
         from unittest import mock
-        from v8_3.播放.嵌入窗口 import 嵌入宿主
-        class 假控件:
-            def winId(self): return 1
-            def width(self): return 10
-            def height(self): return 10
-            def devicePixelRatio(self): return 1.0
-            def installEventFilter(self, _f): pass
-        次数 = []
-        宿主 = 嵌入宿主(假控件())
-        with mock.patch("v8_3.播放.嵌入窗口.可以自建", lambda: True), \
-             mock.patch("v8_3.播放.嵌入窗口.建子窗口", lambda *a, **k: 555), \
-             mock.patch("v8_3.播放.嵌入窗口.销毁子窗口",
-                       lambda 号: 次数.append(号)):
-            self.assertEqual(宿主.句柄(), 555)
-            宿主.销毁()
-            self.assertEqual(次数, [555])
-            self.assertEqual(宿主.句柄(), 555, "销毁后应能重新建（句柄缓存在宿主里）")
+        from v8_3.播放.播放出口 import 播放出口
+        设过: list = []
 
+        class 重入控件:
+            def __init__(self):
+                self.原生 = False
+                self.出口 = None
+            def setAttribute(self, 属性, 值):
+                设过.append(值)
+                self.原生 = True
+                if self.出口 is not None:          # 模拟"建窗口时事件回调又进来问句柄"
+                    self.出口.句柄()
+            def testAttribute(self, 属性):           # noqa: N802
+                return self.原生
+            def winId(self):                    # noqa: N802
+                return 777
+            def window(self):
+                return self
 
-def _有Qt() -> bool:
-    try:
-        import PySide6.QtWidgets  # noqa: F401
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+        控件 = 重入控件()
+        出口 = 播放出口(控件=控件)
+        控件.出口 = 出口
+        with mock.patch.object(出口, "可以嵌入", lambda: True), \
+             mock.patch("PySide6.QtCore.Qt") as 假Qt:
+            假Qt.WidgetAttribute.WA_NativeWindow = "WA_NativeWindow"
+            self.assertEqual(出口.句柄(), 777)      # 不递归、不炸栈
+            self.assertEqual(出口.句柄(), 777)
+        self.assertEqual(len(设过), 1, "原生属性只该设一次")
+
+    def test_销毁不拆窗口(self):
+        """销毁只能清引用：拆窗口会把 VLC 正在画的 drawable 抽走 → 它另开一个窗口。"""
+        from unittest import mock
+        from v8_3.播放.播放出口 import 播放出口
+        出口 = 播放出口(控件=None)
+        with mock.patch.object(出口, "可以嵌入", lambda: True):
+            出口._已绑句柄 = 123
+            出口.销毁()
+            self.assertEqual(出口._已绑句柄, 0)
+
+    def test_交接先把出口换过来再起播(self):
+        """交接纪律：**先** 会话.出口 = 自己，再起播（否则起播会用旧窗口的句柄）。
+
+        这正是"关掉独立窗口又冒出 VLC 窗口"的原因：一边往新窗口起播，
+        一边句柄还指着那个即将被销毁的旧窗口。
+        """
+        from unittest import mock
+        from v8_3.播放.播放出口 import 播放出口
+        顺序: list[str] = []
+
+        class 假播放器:
+            def 停止并等待(self, _秒):
+                顺序.append("停止并等待")
+
+        class 假会话:
+            出口 = "旧出口"
+            播放器 = 假播放器()
+            def 起播(self, 号):
+                顺序.append(f"起播({号})，此时出口={self.出口}")
+                return True
+            def 跳转(self, _秒):
+                顺序.append("跳转")
+        会话 = 假会话()
+        出口 = 播放出口(控件=None)
+        with mock.patch.object(出口, "可以嵌入", lambda: True), \
+             mock.patch.object(出口, "句柄", lambda: 777):
+            self.assertTrue(出口.交接(会话, 42.0, 理由="测试"))
+        self.assertEqual(顺序[0], "停止并等待", "换绑前必须先停干净（旧 vout 要释放）")
+        self.assertIs(会话.出口, 出口, "交接第一步就必须把会话的出口换成自己")
+        self.assertIn("起播(777)", 顺序[1])
+        self.assertEqual(顺序[-1], "跳转", "起播后要跳回原位置")
 
 
 @unittest.skipUnless(_有Qt() and bool(os.environ.get("DISPLAY")),
@@ -1043,84 +1183,64 @@ class 真X11嵌入不游离测试(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from v8_3.播放.游离窗口 import 可用 as X可用
-        from v8_3.播放.嵌入窗口 import 可以自建
         if not X可用():
             raise unittest.SkipTest("没有可用的 X11")
-        if not 可以自建():
-            raise unittest.SkipTest("自建 X11 子窗口不可用")
         import shutil, subprocess, tempfile
         if not (shutil.which("vlc") or shutil.which("cvlc")):
             raise unittest.SkipTest("没装 VLC")
         if not shutil.which("ffmpeg"):
             raise unittest.SkipTest("没有 ffmpeg")
-        cls.目录 = Path(tempfile.mkdtemp(prefix="v83嵌入_"))
-        cls.视频 = cls.目录 / "嵌入.mp4"
+        cls.目录 = Path(tempfile.mkdtemp(prefix="v83出口_"))
+        cls.视频 = cls.目录 / "出口.mp4"
         subprocess.run([shutil.which("ffmpeg"), "-y", "-loglevel", "error",
                         "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=20:duration=20",
                         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt",
                         "yuv420p", str(cls.视频)], capture_output=True, timeout=180)
 
-    def test_连播三次与缩放都不出现游离窗口(self):
-        import time
-        from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
-        from v8_3.播放.嵌入窗口 import 嵌入宿主
-        from v8_3.播放.播放核心 import 播放会话, 播放设置
-        from v8_3.播放.游离窗口 import 找游离窗口
-        应用 = QApplication.instance() or QApplication([])
-        窗 = QWidget(); 窗.resize(640, 360)
-        区 = QWidget(); QVBoxLayout(窗).addWidget(区); 窗.show()
-        self.addCleanup(窗.close)
-        for _ in range(40):
-            应用.processEvents(); time.sleep(0.02)
-        宿主 = 嵌入宿主(区)
-        self.addCleanup(宿主.销毁)
-        self.assertNotEqual(宿主.句柄(), int(区.winId()),
-                            "必须交自建的子窗口，而不是 Qt 控件的窗口")
-        会话 = 播放会话(取适配器=lambda *_: None, 日志回调=None,
-                    探测直链开关=False, 探测媒体开关=False)
-        会话.直链信息 = {"url": str(self.视频), "headers": {}}
-        for 轮 in range(3):
-            会话.设置 = 播放设置(网络缓存毫秒=800 + 轮 * 300, 硬解="auto")
-            self.assertTrue(会话.起播(宿主.句柄()), "起播应成功")
-            for _ in range(15):
-                应用.processEvents(); time.sleep(0.1)
-            游离 = 找游离窗口(排除窗口号=宿主.句柄())
-            self.assertFalse(游离, f"第 {轮 + 1} 次起播出现游离窗口：{游离}")
-        区.resize(420, 240); 宿主.同步()
-        for _ in range(15):
-            应用.processEvents(); time.sleep(0.1)
-        self.assertFalse(找游离窗口(排除窗口号=宿主.句柄()), "缩放后出现游离窗口")
-        会话.关闭()
-
-    def test_画面落在视频控件的位置上(self):
-        """自建子窗口必须**对齐视频控件**的位置与尺寸。
-
-        为什么专门测：子窗口挂在**顶层** X 窗口上（非原生 Qt 控件没有自己的 X 窗口），
-        子窗口的 (0,0) 是整个窗口的左上角。不算偏移的话，画面会跑到窗口左上角去盖住
-        左侧导航 —— 那比"多一个窗口"还难看。
-        """
+    def test_连播三次与交接都不出现游离窗口(self):
         import time
         from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel,
                                      QVBoxLayout, QWidget)
-        from v8_3.播放.嵌入窗口 import 嵌入宿主, 子窗口位置
+        from v8_3.播放.播放出口 import 播放出口
+        from v8_3.播放.播放核心 import 播放会话, 播放设置
+        from v8_3.播放.游离窗口 import 找游离窗口
         应用 = QApplication.instance() or QApplication([])
         窗 = QWidget(); 窗.resize(900, 560)
-        行 = QHBoxLayout(窗); 行.setContentsMargins(50, 30, 20, 20); 行.setSpacing(16)
+        行 = QHBoxLayout(窗); 行.setContentsMargins(40, 30, 20, 20)
         行.addWidget(QLabel("左侧导航"))
-        区 = QWidget(); 区.setMinimumSize(500, 300); 行.addWidget(区, 1)
+        区 = QWidget(); 区.setMinimumSize(420, 260); 行.addWidget(区, 1)
         窗.show()
         self.addCleanup(窗.close)
         for _ in range(40):
             应用.processEvents(); time.sleep(0.02)
-        宿主 = 嵌入宿主(区)
-        self.addCleanup(宿主.销毁)
-        句柄 = 宿主.句柄()
+        页出口 = 播放出口(控件=区, 日志回调=None)
+        句柄 = 页出口.句柄()
         self.assertTrue(句柄)
-        期望 = 宿主._像素位置()
-        实际 = 子窗口位置(句柄)
-        self.assertLessEqual(abs(实际[0] - 期望[0]), 2, f"x 没对齐：{实际} vs {期望}")
-        self.assertLessEqual(abs(实际[1] - 期望[1]), 2, f"y 没对齐：{实际} vs {期望}")
-        self.assertGreater(期望[0], 10, "这个用例本身要能体现偏移（左边留了 50px）")
+        会话 = 播放会话(出口=页出口, 取适配器=lambda *_: None, 日志回调=None,
+                    探测直链开关=False, 探测媒体开关=False)
+        会话.直链信息 = {"url": str(self.视频), "headers": {}}
+        for 轮 in range(3):
+            会话.设置 = 播放设置(网络缓存毫秒=800 + 轮 * 300, 硬解="auto")
+            self.assertTrue(会话.起播(句柄), "起播应成功")
+            for _ in range(15):
+                应用.processEvents(); time.sleep(0.1)
+            游离 = 找游离窗口(排除窗口号=句柄)
+            self.assertFalse(游离, f"第 {轮 + 1} 次起播出现游离窗口：{游离}")
+        # 交接：换到"另一个窗口的出口"再回来（对应 独立窗口 ⇄ 播放页）
+        别处 = QWidget(); 别处.resize(500, 300); 别处.show()
+        self.addCleanup(别处.close)
+        for _ in range(30):
+            应用.processEvents(); time.sleep(0.02)
+        别出口 = 播放出口(控件=别处, 日志回调=None)
+        self.assertTrue(别出口.交接(会话, 3.0, 理由="测试交接过去"))
+        for _ in range(12):
+            应用.processEvents(); time.sleep(0.1)
+        self.assertFalse(找游离窗口(排除窗口号=别出口.句柄()), "交给别处时出现游离窗口")
+        self.assertTrue(页出口.交接(会话, 4.0, 理由="测试交接回来"))
+        for _ in range(12):
+            应用.processEvents(); time.sleep(0.1)
+        self.assertFalse(找游离窗口(排除窗口号=页出口.句柄()), "收回播放页时出现游离窗口")
+        会话.关闭()
 
 
 class 守护不再破坏性处理测试(unittest.TestCase):

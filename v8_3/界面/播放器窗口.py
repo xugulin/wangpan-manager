@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QRect
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QLabel, QSplitter, QTabWidget, QVBoxLayout,
                                QWidget)
@@ -35,6 +35,7 @@ from ..播放.显示环境 import (可嵌入窗口, 允许VLC自带窗口, 是�
                           无窗口原因)
 from .AI播放面板 import AI播放面板, AI字幕动作
 from .播放控件 import 播放控制条, 视频窗, 时间文本
+from .定时 import 安全单发
 from .播放清单 import 播放项, 播放清单
 from .vlc风格 import 构建菜单栏, 构建工具栏, 构建右键菜单
 
@@ -59,8 +60,20 @@ class 播放器窗口(QWidget):
     def __init__(self, 会话: Optional[播放会话] = None, 标题: str = "",
                  父窗口=None, 日志回调=None, AI动作: Optional[AI字幕动作] = None,
                  自动调优: bool = True, 接管: bool = False):
-        super().__init__(None)          # 顶层窗口：不挂父窗口，才能真正独立
+        # ⚠️ **必须是真正的顶层窗口**（parent=None）。
+        #    一度为了让合成器"听话"改成挂在主窗口下，结果它变成了主窗口里的
+        #    原生**子控件**：没有标题栏/最小化/最大化/关闭，而且被父窗口边界裁掉
+        #    （实测：底部的进度条那一排、播放暂停那一排、状态栏全被裁没了）。
+        #    独立播放器就该是独立窗口 —— 摆位问题由 贴合屏幕()/落点收紧 解决，
+        #    不靠"当别人的子窗口"。
+        super().__init__(None)
+        self._父窗口参考 = 父窗口        # 只留个引用（父窗口关了要跟着收），不改父子关系
         self.会话 = 会话
+        if 会话 is not None:
+            try:                        # 会话跟着本窗口的出口走（统一出口）
+                会话.出口 = self._出口()
+            except Exception:  # noqa: BLE001
+                pass
         self._外部日志 = 日志回调 or (lambda _t: None)
         self.AI动作 = AI动作
         #: True = 本窗口**接管**别处（播放页）已经在播的那个会话：
@@ -78,11 +91,17 @@ class 播放器窗口(QWidget):
         self._允许自带窗口 = 允许VLC自带窗口()   # 用户显式同意才让 VLC 自己开窗
         self._守护 = None                        # 游离窗口巡检（懒创建）
         self._等待映射中 = False                  # 正在等窗口映射（不是失败）
+        #: 观察到"合成器坚持把窗口放在哪"（取最右/最下的落点）。尺寸按这个落点收，
+        #: 保证不管它把我们放哪，窗口都完整可见（上限取屏幕的 35%，免得越收越小）。
+        self._落点记忆: tuple[int, int] | None = None
+        self._落点记忆上限 = 0.35
         self._右栏手动隐藏 = False               # 用户点按钮藏了右侧面板（别自动弹回）
         self.setWindowTitle(f"🎬 {标题 or 'V8_3 播放器（VLC 风格）'}")
-        # 最小尺寸别太大：竖屏视频（9:16）的合理窗口比这窄得多，卡在 480 宽
-        # 会让视频区比例对不上、出现左右黑边（实测踩过）
-        self.setMinimumSize(360, 260)
+        # 最小尺寸：**必须放得下菜单栏 + 视频区 + 进度条那排 + 播放暂停那排 + 状态栏**
+        # —— 用户反馈过"进度条那排、播放暂停那排没了"，窗口被压太矮时它们就是被裁掉的。
+        # 高度按各行实测值算：菜单 29 + 视频最小 240 + 控制条 62 + 状态栏 20 ≈ 351，
+        # 留点余量取 380；宽度 360 与视频容器的最小宽度一致（也够竖屏视频算比例）。
+        self.setMinimumSize(360, 380)
         self.resize(1180, 720)
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -92,6 +111,7 @@ class 播放器窗口(QWidget):
         # （4K 片源在 1080p/小屏上也不会跑到屏幕外）
         self.适应屏幕(移动窗口=False)
         self._居中到屏幕()
+        self._装主线程泵()
         self.定时器 = QTimer(self)
         self.定时器.setInterval(500)
         self.定时器.timeout.connect(self._刷新状态)
@@ -148,6 +168,9 @@ class 播放器窗口(QWidget):
         # —— 实测过视频控件被挤成 **0 宽**，libvlc 无处可画 → 窗口一片黑
         self.右栏.setMaximumWidth(380)
         视频容器.setMinimumWidth(360)
+        # 挂到 self 上：按视频比例算窗口尺寸时要读**布局的真实下限**
+        # （控件自己的 minimumWidth() 常是 0，真正卡住视频区的是这个容器）
+        self.视频容器 = 视频容器
         布局.addWidget(主体, 1)
 
         # 控制条两行：上面**加粗**进度条（紧贴视频），下面按钮行：
@@ -184,9 +207,9 @@ class 播放器窗口(QWidget):
     def resizeEvent(self, 事件):  # noqa: N802
         super().resizeEvent(事件)
         try:
-            宿主 = getattr(self, "_嵌入宿主", None)
-            if 宿主 is not None:
-                宿主.同步()
+            出口 = getattr(self, "_播放出口", None)
+            if 出口 is not None:
+                出口.同步()
         except Exception:  # noqa: BLE001
             pass
         # 视频上方那行已撤销，这里不再需要工具栏宽度自适应
@@ -198,11 +221,12 @@ class 播放器窗口(QWidget):
             super().showEvent(事件)
             if not self._全屏:
                 区域 = self.屏幕几何()
-                if 区域 is not None and (self.width() > 区域.width()
-                                    or self.height() > 区域.height()
-                                    or not 区域.contains(self.frameGeometry())):
+                if 区域 is not None and not 区域.contains(self.frameGeometry()):
+                    # 显示后装饰尺寸才算得准：用真实几何再夹一次（否则标题栏/边框
+                    # 会把窗口顶出屏幕 —— 用户实测"超出屏幕侧边缘"）
                     self.适应屏幕()
                 self._延迟适应视频比例(30)   # 显示后按视频比例校准一次
+                self._延迟贴合屏幕()          # 显示后再贴几次（WM 摆位可能顶掉我们的位置）
         except Exception:  # noqa: BLE001
             pass
 
@@ -303,8 +327,80 @@ class 播放器窗口(QWidget):
 
     # ==================== 起播 / 会话 ====================
 
+    def _排空播放操作(self) -> None:
+        """界面线程里执行后台线程排队的播放操作（碰 libvlc 的活只能在这里做）。"""
+        会话 = getattr(self, "会话", None)
+        if 会话 is None:
+            return
+        try:
+            会话.排空主线程队列()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _截图提示(self):
+        """截图提示浮层（懒建）：透明、贴视频区右下角、自动淡出。"""
+        提示 = getattr(self, "_截图提示层", None)
+        if 提示 is None:
+            from .截图提示 import 截图提示 as _截图提示
+            提示 = _截图提示(self, 视频控件=getattr(self, "视频", None))
+            self._截图提示层 = 提示
+        return 提示
+
+    def 同步全屏图标(self) -> None:
+        """按钮文字跟着全屏状态走（Esc / 助手退出时也要复位）。"""
+        try:
+            self.控制条.设置全屏图标(self._全屏助手().是全屏())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _装主线程泵(self) -> None:
+        """给本窗口的会话装"后台线程 → 界面线程"的队列泵（libvlc 非线程安全）。"""
+        try:
+            会话 = getattr(self, "会话", None)
+            if 会话 is None or not hasattr(会话, "装主线程泵"):
+                return
+            会话.装主线程泵()
+            if getattr(self, "_泵定时器", None) is None:
+                self._泵定时器 = QTimer(self)
+                self._泵定时器.setInterval(25)
+                self._泵定时器.timeout.connect(self._排空播放操作)
+                self._泵定时器.start()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def 写日志(self, 文本: str) -> None:
+        """写一条界面日志（有外部回调就走回调，否则只更新状态栏）。"""
+        try:
+            self._外部日志(文本)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.状态标签.setText(文本.split("] ", 1)[-1][:80])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def 跟着父窗口退出(self, 父) -> None:
+        """主窗口关掉时把独立窗口也关掉（它本身是顶层窗口，不会自动跟着走）。"""
+        def _关自己(*_):
+            try:
+                self.close()
+            except Exception:  # noqa: BLE001 - 控件可能已经被销毁
+                pass
+        try:
+            if 父 is not None:
+                父.destroyed.connect(_关自己)
+        except Exception:  # noqa: BLE001
+            pass
+
     def 换会话(self, 会话: 播放会话, 标题: str = "") -> None:
         self.会话 = 会话
+        self._装主线程泵()
+        # 会话是共享的（接管模式）：把它切到**本窗口的出口**，
+        # 这样"画面往哪画"始终只有一处实现（见 播放/播放出口.py）
+        try:
+            会话.出口 = self._出口()
+        except Exception:  # noqa: BLE001
+            pass
         if 标题:
             self.setWindowTitle(f"🎬 {标题}")
 
@@ -368,6 +464,100 @@ class 播放器窗口(QWidget):
             self.状态标签.setText("❌ 起播失败（VLC 拒绝了这条直链）")
         return 成功
 
+    #: **硬上限**：窗口最多占屏幕可用区的比例（超过就一定往回收，留出任务栏/标题栏的余地）。
+    #: 0.96 = 左右各留 2%：既保证"完整可见"，又不会把竖屏视频逼到"比例算不出来"
+    #: （0.92 时 800x800 的屏上竖屏视频差 2% 就放不下 —— 老测试逮到过）。
+    屏幕占比 = 0.96
+
+    #: **舒适默认**：按视频比例开窗时占屏幕可用区的比例。
+    #: 用户反馈"启动时太大了" —— 4K 片源按"铺满屏幕"算出来会占 88%，
+    #: 看着像全屏；这里给一个舒服的默认（用户想更大可以自己拉/全屏）。
+    初始占比 = 0.78
+
+    def 贴合屏幕(self, 目标宽: int = 0, 目标高: int = 0,
+              居中: bool = True, 留边: float = 0.0,
+              按落点收紧: bool = False,
+              落点: tuple[int, int] | None = None) -> tuple[int, int]:
+        """把窗口**按当前屏幕分辨率**压到合适大小并摆进屏幕内（唯一的尺寸决策处）。
+
+        用户实测反馈："独立窗口启动时太大了，超过了屏幕侧边缘"。原因有两个：
+
+        1. 位置是按 ``self.width()`` 算的，而 ``resize()`` 是**异步生效**的 ——
+           刚算完"居中的 x"用的是**旧宽度**，等 Qt 真的把窗口放大后，右边就伸到屏幕外了；
+        2. 只夹了尺寸、没夹位置：多屏/左侧面板/任务栏让 ``availableGeometry()`` 的
+           原点不是 (0,0) 时，居中算出来的 x 也可能为负。
+
+        所以这里一次做全：**先夹尺寸（≤ 屏幕可用区 × 屏幕占比，且不小于最小尺寸），
+        再用"目标尺寸"算位置并夹进屏幕**。任何屏幕分辨率下窗口都完整可见 ——
+        没有任何写死的像素尺寸。
+
+        :param 目标宽/目标高: 想要的尺寸（0 = 用当前尺寸）
+        :param 居中: 是否摆到屏幕中央（False = 只夹位置，不动用户摆好的位置）
+        """
+        区域 = self.屏幕几何()
+        if 区域 is None:
+            return (int(self.width()), int(self.height()))
+        比例 = float(留边 or self.屏幕占比)
+        最小宽 = max(200, int(self.minimumWidth() or 360))
+        最小高 = max(160, int(self.minimumHeight() or 260))
+        宽 = int(目标宽 or self.width() or 1180)
+        高 = int(目标高 or self.height() or 720)
+
+        # ① 先按"屏幕占比"夹一次
+        上限宽 = max(最小宽, int(区域.width() * 比例))
+        上限高 = max(最小高, int(区域.height() * 比例))
+
+        # ①' **落点记忆**：真机实测 COSMIC 会忽略客户端 move()，而且是在我们 move
+        #     之后**再**搬一次 —— 于是"按当前几何算，明明在屏幕里"，它一搬就出屏
+        #     （用户反馈："退出全屏播放 4K 时窗口过长超出屏幕"，就是这样来的）。
+        #     对策：把它坚持的落点记下来，**任何一次尺寸计算都按这个落点收**，
+        #     这样不管它把我们放哪、什么时候搬，窗口都完整可见。
+        记忆 = getattr(self, "_落点记忆", None)
+        if 记忆:
+            记x = min(max(区域.x(), int(记忆[0])),
+                    区域.x() + int(区域.width() * self._落点记忆上限))
+            记y = min(max(区域.y(), int(记忆[1])),
+                    区域.y() + int(区域.height() * self._落点记忆上限))
+            剩余宽 = max(1, 区域.x() + 区域.width() - 记x)
+            剩余高 = max(1, 区域.y() + 区域.height() - 记y)
+            上限宽 = max(最小宽, min(上限宽, 剩余宽))
+            上限高 = max(最小高, min(上限高, 剩余高))
+
+        # ② `按落点收紧`：给 COSMIC 这类**忽略客户端 move()** 的合成器兜底
+        #    （实测 xdotool windowmove 都搬不动它，我们算好的"居中"全白算，
+        #    窗口右边就伸到屏幕外）。这时位置它说了算，我们就**把尺寸收到
+        #    "从它放的位置到屏幕边"以内**，保证完整可见。
+        #    默认不开：会听话的合成器（以及离屏/无 WM 环境）只要摆正位置就够，
+        #    照它收紧反而会把竖屏视频挤成最小宽度、比例全乱（老测试逮到过）。
+        if 按落点收紧:
+            if 落点 is None:
+                实际 = self.frameGeometry()
+                落点 = (实际.x(), 实际.y())
+            落点x = max(区域.x(), int(落点[0]))
+            落点y = max(区域.y(), int(落点[1]))
+            剩余宽 = max(1, 区域.x() + 区域.width() - 落点x)
+            剩余高 = max(1, 区域.y() + 区域.height() - 落点y)
+            # ⚠️ **等比**缩（不能分别夹宽和高）：分别夹会把视频区比例搞坏 ——
+            # 面板一藏一显之后自带自检量到 0.07/0.14 的误差就是这么做出来的。
+            缩放 = min(1.0, 剩余宽 / max(1, 宽), 剩余高 / max(1, 高))
+            if 缩放 < 1.0:
+                宽 = max(最小宽, int(宽 * 缩放))
+                高 = max(最小高, int(高 * 缩放))
+
+        宽 = max(最小宽, min(宽, 上限宽, 区域.width()))
+        高 = max(最小高, min(高, 上限高, 区域.height()))
+        if (宽, 高) != (self.width(), self.height()):
+            self.resize(宽, 高)
+        if 居中:
+            # 用**目标尺寸**算位置（不能用 self.width()：resize 还没生效），再夹进屏幕。
+            # 尊重客户端的合成器会听这一句；不听的那类（COSMIC）靠上面的尺寸收紧兜底。
+            x = 区域.x() + max(0, (区域.width() - 宽) // 2)
+            y = 区域.y() + max(0, (区域.height() - 高) // 2)
+            x = min(max(区域.x(), x), 区域.x() + max(0, 区域.width() - 宽))
+            y = min(max(区域.y(), y), 区域.y() + max(0, 区域.height() - 高))
+            self.move(x, y)
+        return (宽, 高)
+
     def 屏幕几何(self):
         """当前窗口所在屏幕的**可用**区域（扣掉任务栏/顶栏）。"""
         屏幕 = (QGuiApplication.screenAt(self.frameGeometry().center())
@@ -386,15 +576,11 @@ class 播放器窗口(QWidget):
         区域 = self.屏幕几何()
         if 区域 is None:
             return False
-        宽 = min(self.width() or 1180, int(区域.width() * 0.92))
-        高 = min(self.height() or 720, int(区域.height() * 0.92))
-        宽 = max(480, 宽)
-        高 = max(300, 高)
-        改了 = (宽 != self.width()) or (高 != self.height())
-        if 改了:
-            self.resize(宽, 高)
-        if 移动窗口:
-            self._居中到屏幕()
+        原宽, 原高 = int(self.width()), int(self.height())
+        目标宽 = min(原宽 or 1180, int(区域.width() * self.屏幕占比))
+        目标高 = min(原高 or 720, int(区域.height() * self.屏幕占比))
+        宽, 高 = self.贴合屏幕(目标宽, 目标高, 居中=bool(移动窗口))
+        改了 = (宽, 高) != (原宽, 原高)
         try:
             if self.会话 and self.会话.播放器:
                 self.会话.播放器.设置缩放(0.0)      # 0 = 自动适应窗口
@@ -479,16 +665,49 @@ class 播放器窗口(QWidget):
         装饰高 = max(0, self.height() - self.视频.height())
         if self.width() <= 0 or self.视频.width() <= 0:
             装饰宽, 装饰高 = 0, 0
-        可用宽 = max(240, int(区域.width() * 0.94) - 装饰宽)
-        可用高 = max(180, int(区域.height() * 0.94) - 装饰高)
+        # 两级预算：先按"舒适默认"（初始占比）；要是连视频区自己的最小尺寸都放不下
+        # （小屏 + 竖屏就是这种），就放宽到硬上限 —— 否则比例一定对不上、出黑边。
+        舒适宽 = max(240, int(区域.width() * self.初始占比) - 装饰宽)
+        舒适高 = max(180, int(区域.height() * self.初始占比) - 装饰高)
+        硬宽 = max(240, int(区域.width() * self.屏幕占比) - 装饰宽)
+        硬高 = max(180, int(区域.height() * self.屏幕占比) - 装饰高)
+        # 视频区的**真实**下限：控件自己的 minimumWidth() 常是 0，真正卡住它的是
+        # 布局树（视频容器 setMinimumWidth(360)）。用 minimumSizeHint 拿到布局算出来的值。
+        最小视宽 = 240
+        最小视高 = 180
+        for 候选 in (getattr(self, "视频容器", None), getattr(self, "视频", None)):
+            if 候选 is None:
+                continue
+            try:
+                最小视宽 = max(最小视宽, int(候选.minimumWidth() or 0),
+                            int(候选.minimumSizeHint().width() or 0))
+                最小视高 = max(最小视高, int(候选.minimumHeight() or 0),
+                            int(候选.minimumSizeHint().height() or 0))
+            except Exception:  # noqa: BLE001
+                continue
+        最小视宽 = min(最小视宽, int(区域.width() * self.屏幕占比))
+        最小视高 = min(最小视高, int(区域.height() * self.屏幕占比))
         媒体 = getattr(self.会话, "媒体", None) if self.会话 is not None else None
         原生宽 = int(getattr(媒体, "宽", 0) or 0) or 1280
+        可用宽, 可用高 = 舒适宽, 舒适高
         目标视频宽, 目标视频高 = self.算视频区尺寸(比例, 可用宽, 可用高, 原生宽)
+        if 目标视频宽 + 2 < 最小视宽 or 目标视频高 + 2 < 最小视高:
+            可用宽, 可用高 = 硬宽, 硬高
+            目标视频宽, 目标视频高 = self.算视频区尺寸(比例, 可用宽, 可用高, 原生宽)
         新宽 = 目标视频宽 + 装饰宽
         新高 = 目标视频高 + 装饰高
-        if (新宽, 新高) != (self.width(), self.height()):
-            self.resize(新宽, 新高)
-        self._居中到屏幕()
+        # 尺寸与位置一次做完（按屏幕分辨率自适应 + 保证完整可见）
+        宽, 高 = self.贴合屏幕(新宽, 新高, 居中=True)
+        # ⚠️ 夹完要**复核比例**：窗口的"最小宽度"（360）或屏幕上限可能把宽度顶大/压小，
+        #    那样视频区比例就跟视频对不上了（竖屏视频实测：视频区 360x509，
+        #    比例误差 0.14 —— 老测试逮到过）。宽度定下来之后，按比例把高度补上。
+        try:
+            视宽 = max(1, int(宽) - int(装饰宽))
+            目标高2 = int(round(视宽 / float(比例))) + int(装饰高)
+            if abs(目标高2 - int(高)) > 2 and 目标高2 <= int(区域.height() * self.屏幕占比):
+                self.贴合屏幕(宽, 目标高2, 居中=True)
+        except Exception:  # noqa: BLE001
+            pass
         self.保证视频区可见()
         try:
             if self.会话 is not None and self.会话.播放器 is not None:
@@ -510,6 +729,15 @@ class 播放器窗口(QWidget):
             self.状态标签.setText(
                 f"🖼 窗口已按视频比例调整：{目标视频宽}×{目标视频高}"
                 f"（比例 {比例:.3f}，无黑边）")
+        # ⚠️ 收尾必须**再贴合一次**：上面的尺寸是按"我们以为的位置"算的，而
+        # COSMIC 这类合成器会把窗口异步搬到它自己的位置（实测连 xdotool 都搬不动），
+        # 于是右边就伸到屏幕外。每次重排都收一次尾，尺寸才会收敛到
+        # "在它给的位置上也装得下"。
+        try:
+            if self.isVisible():
+                self._再贴合一次()
+        except Exception:  # noqa: BLE001
+            pass
         return True
 
     def _延迟适应视频比例(self, 毫秒: int = 0) -> None:
@@ -521,8 +749,8 @@ class 播放器窗口(QWidget):
         """
         if self._全屏:
             return
-        QTimer.singleShot(毫秒, self.适应视频比例)
-        QTimer.singleShot(毫秒 + 90, self.适应视频比例)
+        安全单发(self, 毫秒, self.适应视频比例)
+        安全单发(self, 毫秒 + 90, self.适应视频比例)
 
     def 视频区比例误差(self) -> float:
         """视频区"实际宽高比"与"视频比例"的偏差（自检/测试用；越小越没黑边）。"""
@@ -532,13 +760,97 @@ class 播放器窗口(QWidget):
         return abs(self.视频.width() / self.视频.height() - 比例)
 
     def _居中到屏幕(self) -> None:
-        区域 = self.屏幕几何()
-        if 区域 is None:
-            return
-        宽, 高 = self.width(), self.height()
-        x = 区域.x() + max(0, (区域.width() - 宽) // 2)
-        y = 区域.y() + max(0, (区域.height() - 高) // 2)
-        self.move(x, y)
+        """居中并保证完整可见（统一走 贴合屏幕，别再自己算一遍）。"""
+        self.贴合屏幕(居中=True)
+
+    def _延迟贴合屏幕(self, *毫秒们: int) -> None:
+        """窗口显示后再贴几次。
+
+        ⚠️ 为什么非要有这个：**窗口管理器会在窗口 map 那一刻自己摆位**（KWin 的
+        智能放置会把新窗口摆在当前窗口旁边），把我们 show() 之前算好的位置顶掉 ——
+        实测：独立窗口 1996 宽被摆到 x=848，右边直接超出屏幕 284px。
+        所以显示后 0/150/400 毫秒各再贴一次（幂等：只在真的超出去时才动）。
+        """
+        from PySide6.QtCore import QTimer
+        # 时机要分几档：合成器（COSMIC 实测）会在窗口 map 之后**才**把它摆到自己的位置，
+        # 太早检查会看到"还没被摆过"的假几何、以为没问题就早退了。0.9/1.6/2.6 秒这几档
+        # 是留给它的（幂等：已经在屏幕里就什么都不做）。
+        for 毫秒 in (毫秒们 or (0, 150, 400, 900, 1600, 2600, 4000, 6000)):
+            try:
+                安全单发(self, int(毫秒), self._再贴合一次)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _用户或WM弄大了(self) -> bool:
+        """窗口是不是被用户/合成器弄大了（最大化/平铺/接近满屏）。
+
+        为什么要问：用户点了最大化，我们过一会儿又"按视频比例"缩回去 —— 那是
+        最招人烦的一类行为（而且 COSMIC 这种合成器**不会**把状态同步给 Qt，
+        `isMaximized()` 一直是 False，只能按"尺寸接近屏幕"来判断）。
+        """
+        try:
+            if self.isMaximized() or self.isFullScreen() or self._全屏:
+                return True
+        except Exception:  # noqa: BLE001
+            return False
+        try:
+            区域 = self.屏幕几何()
+            if 区域 is None:
+                return False
+            # ① 大到接近满屏
+            if (self.width() >= 区域.width() * 0.95
+                    and self.height() >= 区域.height() * 0.90):
+                return True
+            # ② 或者**贴着屏幕边**（平铺/最大化后就是这种：左边贴左、右边贴右），
+            #    这时也别按比例缩回去 —— 那是跟用户/合成器抢窗口。
+            框 = self.frameGeometry()
+            if (abs(框.x() - 区域.x()) <= 8
+                    and abs(框.x() + 框.width() - (区域.x() + 区域.width())) <= 8):
+                return True
+            return (abs(框.y() - 区域.y()) <= 8
+                    and abs(框.y() + 框.height() - (区域.y() + 区域.height())) <= 8
+                    and 框.height() >= 区域.height() * 0.6)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _再贴合一次(self) -> None:
+        """显示后复核：窗口要是没完整落在屏幕里 —— 先摆位，再按落点把尺寸收进去。
+
+        为什么分两步（COSMIC 实测：它自己决定新窗口位置、**忽略客户端 move()**，
+        而且是在我们 move 之后**再**搬一次）：
+        ① 先按它给的位置把尺寸收进去（居中=False，不动位置）；
+        ② 再礼貌地请求居中 —— 听话的合成器会挪过去；不听的那类保持原位，
+           而尺寸已经保证"在它给的落点上也装得下"。
+        """
+        try:
+            if self._全屏 or not self.isVisible() or self._用户或WM弄大了():
+                return
+            区域 = self.屏幕几何()
+            if 区域 is None:
+                return
+            框 = self.frameGeometry()
+            if 区域.contains(框):
+                return                      # 已经完整可见：什么都不做
+            # 它把我们放在了屏幕外 → 记下这个落点，之后所有尺寸都按它收
+            落点 = (框.x(), 框.y())
+            旧记忆 = getattr(self, "_落点记忆", None)
+            if 旧记忆 is None:
+                self._落点记忆 = 落点
+            else:
+                self._落点记忆 = (max(int(旧记忆[0]), 框.x()),
+                               max(int(旧记忆[1]), 框.y()))
+            self.写日志(f"[显示] 窗口 {框.width()}x{框.height()}@{框.x()},{框.y()} "
+                     f"超出屏幕 {区域.width()}x{区域.height()}：按落点收紧尺寸")
+            宽, 高 = self.贴合屏幕(居中=False, 按落点收紧=True, 落点=落点)
+            self.贴合屏幕(居中=True)
+            self.写日志(f"[显示] 已收紧到 {宽}x{高}"
+                     + ("（窗口管理器不理会摆位，保持它给的位置）"
+                        if not 区域.contains(self.frameGeometry()) else "（并已回到屏幕中央）"))
+        except Exception as 错误:  # noqa: BLE001
+            try:
+                self.写日志(f"[显示] 贴合屏幕出错（忽略）：{错误}")
+            except Exception:  # noqa: BLE001
+                pass
 
     def 接管播放(self) -> bool:
         """把**已经在播的**会话接到本窗口：只把画面挪过来，不重新起播。
@@ -553,6 +865,7 @@ class 播放器窗口(QWidget):
             return False
         self.show()
         self._置顶()
+        self._延迟贴合屏幕()      # 显示后再贴（WM 摆位会顶掉我们算好的位置）
         self._起守护()          # 起播前就盯着（VLC 是在 set_xwindow 那刻自开窗口的）
         if not self._已映射():
             self._等待映射中 = True
@@ -565,17 +878,17 @@ class 播放器窗口(QWidget):
             self._写日志("[显示] ⚠️ 没有可用的 X11 窗口号，独立窗口无法接管播放")
             return False
         # ⚠️ 关键：**播放中**改 set_xwindow 在 VLC 3 里不会真的把 vout 搬过去
-        # （实测：句柄记下了、画面还是留在原来的窗口/自开窗口里）。所以这里是
-        # "绑窗口 → 重开媒体 → 跳回原位置" —— 注意仍然是**同一个播放器/会话**，
-        # 不会出现第二路声音（那才是用户遇到的问题）。
+        # （实测：句柄记下了、画面还是留在原来的窗口/自开窗口里）。所以交接仪式是
+        # "停干净 → 换出口 → 换绑 → 重开 → 跳回原位置"，统一实现在
+        # `播放出口.交接()`（页面 ⇄ 独立窗口都走它，不再各写一套）。
+        self._等待映射中 = False
+        self.保证视频区可见()
         位置 = 0.0
         try:
             位置 = float(self.会话.播放器.进度秒())
         except Exception:  # noqa: BLE001
             位置 = 0.0
-        self._等待映射中 = False
-        self.保证视频区可见()
-        成功 = self.会话.起播(句柄)
+        成功 = self._出口().交接(self.会话, 位置, 理由="画面已交给独立窗口")
         if not 成功:
             self.状态标签.setText("❌ 接管播放失败（直链可能已过期，请重新播放）")
             self._写日志("[播放] 独立窗口接管失败：直链可能过期")
@@ -587,8 +900,8 @@ class 播放器窗口(QWidget):
                         self.会话.跳转(秒)
                 except Exception:  # noqa: BLE001
                     pass
-            QTimer.singleShot(900, _跳)
-            QTimer.singleShot(1800, _跳)
+            安全单发(self, 900, _跳)
+            安全单发(self, 1800, _跳)
         self.适应视频比例()              # 需求：按视频分辨率调窗口，避免黑边
         self.定时器.start()
         self._重置隐藏计时()
@@ -733,24 +1046,25 @@ class 播放器窗口(QWidget):
                 return 0
         except Exception:  # noqa: BLE001
             pass
-        # 与播放页同源：优先交**我们自己建的朴素 X11 子窗口**（见 播放/嵌入窗口.py）。
-        # 直接把 Qt 窗口号交出去时，只要它还没映射或 visual 不寻常，VLC 的 embed
-        # 尝试就会失败 → 它自己开一个顶层窗口放画面（标题 "VLC media player"）。
+        # 与播放页**同一个出口**（v8_3/播放/播放出口.py）——独立窗口也是"嵌进本窗口"，
+        # 规矩必须一致：自建画布 + set_xwindow。以前这里各写一套，所以同一类 bug
+        # （VLC 自己开窗口）在换条路径后又复发。
         try:
-            宿主 = getattr(self, "_嵌入宿主", None)
-            if 宿主 is None:
-                from ..播放.嵌入窗口 import 嵌入宿主 as _嵌入宿主
-                宿主 = _嵌入宿主(self.视频)
-                self._嵌入宿主 = 宿主
-            号 = int(宿主.句柄() or 0)
-            if 号:
-                return 号
-        except Exception:  # noqa: BLE001 - 自建失败就退回老做法
-            pass
-        try:
-            return int(self.视频.winId())
+            return int(self._出口().句柄())
         except Exception:  # noqa: BLE001
             return 0
+
+    def _出口(self):
+        """本窗口的播放出口（懒建）。"""
+        出口 = getattr(self, "_播放出口", None)
+        if 出口 is None:
+            from ..播放.播放出口 import 播放出口 as _播放出口
+            出口 = _播放出口(控件=self.视频, 日志回调=self._写日志
+                          if hasattr(self, "_写日志") else None)
+            self._播放出口 = 出口
+            if getattr(self, "会话", None) is not None:
+                self.会话.出口 = 出口
+        return 出口
 
     # ==================== 播放控制 ====================
 
@@ -957,8 +1271,10 @@ class 播放器窗口(QWidget):
         if self.会话 and self.会话.截图(str(路径)):
             self.状态标签.setText(f"📷 已保存 {路径}")
             self._写日志(f"[播放] 截图：{路径}")
+            self._截图提示().显示已保存(路径)      # ★ 与播放页同一个透明浮层
         else:
             self.状态标签.setText("📷 截图失败（可能还没出画面）")
+            self._截图提示().显示失败("可能还没出画面")
 
     # ---- 清单 ----
 
@@ -1199,14 +1515,15 @@ class 播放器窗口(QWidget):
         self._全屏 = 全屏
         if 全屏:
             self._全屏前几何 = self.geometry()
-            self.showFullScreen()
-            # 让窗口管理器先处理；只有它没铺满时才自己铺（无 WM 的 Xvfb 就是这种）
-            QTimer.singleShot(0, self._全屏兜底铺满)
-            QTimer.singleShot(250, self._全屏兜底铺满)
+            # 统一走 全屏助手（合成器忽略 showFullScreen 时它自己铺满）
+            self._全屏助手().进入()
             self._重置隐藏计时()
         else:
-            self.showNormal()
+            self._全屏助手().退出()
             self.显示控件()
+            # 退出全屏后：**先夹一次屏幕**（全屏时窗口是满屏的，装饰/面板尺寸都不准），
+            # 再按比例重排 —— 否则算出来的窗口会偏大、下边伸出屏幕（用户实测过）。
+            self.适应屏幕(移动窗口=False)
             self._延迟适应视频比例(120)     # 退出全屏后恢复"无黑边"的窗口比例
         self.控制条.设置全屏图标(全屏)
         self._置顶()
@@ -1227,6 +1544,29 @@ class 播放器窗口(QWidget):
             self.保证视频区可见()
             self.会话.播放器.绑定窗口(self._安全句柄())
             self.定时器.start()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _全屏助手(self):
+        """本窗口的全屏助手（与播放页同一个实现）。"""
+        助手 = getattr(self, "_全屏助手实例", None)
+        if 助手 is None:
+            from .全屏助手 import 全屏助手 as _全屏助手
+            助手 = _全屏助手(self, 退出回调=self._退出全屏后的收尾)
+            self._全屏助手实例 = 助手
+        return 助手
+
+    def _退出全屏后的收尾(self) -> None:
+        """不管是按钮、菜单还是 Esc 退出全屏，都走这里复位（真机实测：
+        Esc 退出后按钮还写着"退出全屏" —— 因为那条路没经过 设置全屏()）。"""
+        self._全屏 = False
+        try:
+            self.显示控件()
+        except Exception:  # noqa: BLE001
+            pass
+        self.同步全屏图标()
+        try:
+            self._延迟适应视频比例(120)     # 退出全屏后恢复"无黑边"的窗口比例
         except Exception:  # noqa: BLE001
             pass
 
@@ -1436,7 +1776,7 @@ class 播放器窗口(QWidget):
             交接 = dict(交接 or {})
             交接.update({"类型": "独立窗口关闭", "接管": True})
             self.状态更新.emit(交接)
-            self._拆掉嵌入宿主()
+            self._清掉出口()
             super().closeEvent(事件)
             return
         交接 = self.交接信息()
@@ -1446,15 +1786,20 @@ class 播放器窗口(QWidget):
         except Exception:  # noqa: BLE001
             pass
         self.状态更新.emit(交接 or {"类型": "独立窗口关闭"})
-        self._拆掉嵌入宿主()
+        self._清掉出口()
         super().closeEvent(事件)
 
-    def _拆掉嵌入宿主(self) -> None:
-        """拆掉我们自己建的视频子窗口（否则它会一直挂在屏幕上）。"""
+    def _清掉出口(self) -> None:
+        """清掉本窗口的出口引用（**不拆窗口** —— 那是 Qt 的窗口，VLC 可能还在画）。
+
+        以前这里是"拆掉自建画布"（XDestroyWindow）：把 VLC 正在渲染的 drawable
+        从底下抽走，VLC 就另开一个顶层窗口放画面 —— 用户实测的
+        "关掉独立窗口又冒出 VLC media player" 就是这么来的。
+        """
         try:
-            宿主 = getattr(self, "_嵌入宿主", None)
-            if 宿主 is not None:
-                宿主.销毁()
-                self._嵌入宿主 = None
+            出口 = getattr(self, "_播放出口", None)
+            if 出口 is not None:
+                出口.销毁()
+                self._播放出口 = None
         except Exception:  # noqa: BLE001
             pass

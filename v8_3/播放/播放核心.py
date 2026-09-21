@@ -40,6 +40,29 @@ from .直链探测 import 探测直链, 探测头, 探测结果, 格式化带宽
 
 logger = logging.getLogger(__name__)
 
+class _主线程调用:
+    """后台线程交给界面线程执行的一次调用（带结果/异常回传）。"""
+
+    __slots__ = ("函数", "参数", "关键字", "完成", "结果", "异常")
+
+    def __init__(self, 函数, 参数: tuple, 关键字: dict):
+        import threading as _threading
+        self.函数 = 函数
+        self.参数 = 参数
+        self.关键字 = 关键字
+        self.完成 = _threading.Event()
+        self.结果 = None
+        self.异常: BaseException | None = None
+
+    def 执行(self) -> None:
+        try:
+            self.结果 = self.函数(*self.参数, **self.关键字)
+        except BaseException as 错误:  # noqa: BLE001 - 回传给调用线程
+            self.异常 = 错误
+        finally:
+            self.完成.set()
+
+
 __all__ = ["播放设置", "播放会话", "规则参数", "硬解能力"]
 
 
@@ -291,6 +314,7 @@ class 播放会话:
     def __init__(self, 取适配器: Callable[[str], object] | None = None,
                  日志回调: Callable | None = None, *, 顾问=None,
                  探测直链开关: bool = True, 探测媒体开关: bool = True,
+                 出口=None,
                  自动调优: bool = True, 本地模型=None, 下载分段: int = 0,
                 AI决策后台: bool = True):
         self._取适配器 = 取适配器
@@ -309,6 +333,14 @@ class 播放会话:
         self._子线程: list = []       # 后台线程（AI 决策/跳转），关闭时只做记录
 
         self.播放器: Optional[VLC] = None
+        #: **播放出口**（画面往哪里画）：由界面注入（见 播放出口.py）。
+        #: 统一走它以后，"嵌窗口"的规矩只有一处实现，不会再出现某条路径漏约束。
+        self.出口 = 出口
+        #: **主线程队列**：libvlc 的 API 不是线程安全的（真机崩溃现场就是
+        #: "播放AI决策"线程在 libvlc_media_add_option 里 SEGV，界面线程同时在起播）。
+        #: 后台线程要碰播放器，一律把活儿丢进这个队列，由界面线程的定时器执行。
+        self._主线程队列: "queue.Queue | None" = None
+        self._装界面线程归口()
         self.设置 = 播放设置()
         self.媒体 = 媒体信息()
         self.探测 = 探测结果()
@@ -398,6 +430,85 @@ class 播放会话:
             摘要["参数"] = self.设置.to_dict()
         return 摘要
 
+    # ---------------- 主线程归口（libvlc 不是线程安全的） ----------------
+
+    #: 这些方法会碰 libvlc / Qt 窗口，**必须在界面线程执行**（见 在主线程）
+    界面线程方法 = ("起播", "应用新参数", "暂停", "设置暂停", "跳转", "停止",
+                "截图", "设置音量", "设置速率", "切换字幕", "设置缩放",
+                "设置宽高比", "绑定窗口", "清掉游离窗口", "上报效果")
+
+    def _装界面线程归口(self) -> None:
+        """给上面那些方法套一层"不在界面线程就排队"的壳（防漏，见 coredump 教训）。
+
+        为什么在会话内部再兜一层：光靠调用方自觉不够 —— 真机实测有路径漏了
+        （AI 顾问线程直接进来调参），结果是"非界面线程请求播放窗口号被拒" →
+        句柄变 0 → 画面跑到 VLC 自己开的窗口里。这里兜住，谁调都安全。
+        """
+        if getattr(self, "_归口装好", False):
+            return
+        self._归口装好 = True
+        for 名 in self.界面线程方法:
+            原 = getattr(self, 名, None)
+            if 原 is None or getattr(原, "_已归口", False):
+                continue
+
+            def 壳(*参数, _原=原, _名=名, **关键字):
+                if (self._主线程队列 is None
+                        or threading.current_thread() is threading.main_thread()):
+                    return _原(*参数, **关键字)
+                return self.在主线程(_原, *参数, **关键字)
+
+            壳._已归口 = True          # type: ignore[attr-defined]
+            壳.__name__ = 名           # type: ignore[attr-defined]
+            setattr(self, 名, 壳)
+
+    def 装主线程泵(self) -> None:
+        """准备"后台线程 → 界面线程"的队列（界面每隔几十毫秒排空一次）。"""
+        if self._主线程队列 is None:
+            import queue as _queue
+            self._主线程队列 = _queue.Queue()
+
+    def 在主线程(self, 函数, *参数, 等: bool = True, 超时秒: float = 8.0,
+              **关键字):
+        """**把碰 libvlc 的活交给界面线程执行**（已在界面线程就直接做）。
+
+        为什么必须有这个：真机崩溃现场（coredump）显示
+        ``播放AI决策`` 线程在 ``libvlc_media_add_option_flag`` 里 SIGSEGV，
+        而界面线程同时在起播 —— libvlc 的 media/player 对象**不能被两个线程同时用**。
+        以前 AI 顾问线程直接调 ``应用新参数``（内部会重开媒体、加选项），画面自检
+        线程也会直接重载 —— 都是崩溃源。现在一律排到界面线程。
+
+        :param 等: 是否等界面线程做完（后台线程改参数时要等，避免"改到一半"）
+        """
+        if self._主线程队列 is None or threading.current_thread() is threading.main_thread():
+            return 函数(*参数, **关键字)
+        盒子 = _主线程调用(函数, 参数, 关键字)
+        self._主线程队列.put(盒子)
+        if not 等:
+            return None
+        if not 盒子.完成.wait(max(0.1, float(超时秒))):
+            self._日志(f"[播放] ⚠️ 界面线程 {超时秒:.1f} 秒没处理播放操作"
+                     f"（{getattr(函数, '__name__', 函数)}），本次跳过")
+            return None
+        if 盒子.异常 is not None:
+            raise 盒子.异常
+        return 盒子.结果
+
+    def 排空主线程队列(self, 最多: int = 40) -> int:
+        """界面线程定时调用：执行后台线程排队的播放操作（**只能在界面线程调**）。"""
+        if self._主线程队列 is None:
+            return 0
+        import queue as _queue
+        做了 = 0
+        while 做了 < max(1, int(最多)):
+            try:
+                盒子 = self._主线程队列.get_nowait()
+            except _queue.Empty:
+                break
+            盒子.执行()
+            做了 += 1
+        return 做了
+
     # ---------------- 适配器访问 ----------------
 
     def 取适配器(self, 网盘标识: str = ""):
@@ -467,7 +578,8 @@ class 播放会话:
                       f"{旧.网络缓存毫秒}→{新.网络缓存毫秒}ms，硬解 "
                       f"{旧.硬解}→{新.硬解}")
         self._日志(f"[播放] {self.AI决策状态}；自动重载到当前位置")
-        self.应用新参数(新.to_dict(), 自动重载=True)
+        # ⚠️ 这里跑在"播放AI决策"后台线程里，**不能直接碰 libvlc**（会 SEGV）
+        self.在主线程(self.应用新参数, 新.to_dict(), 自动重载=True)
 
     def _决策参数(self, 摘要: dict) -> 播放设置:
         硬解 = self._探测本机硬解()
@@ -526,6 +638,31 @@ class 播放会话:
         地址 = str(self.直链信息.get("url") or "")
         if not 地址:
             raise RuntimeError("还没准备直链（先调用 准备()）")
+        出口 = getattr(self, "出口", None)
+        if 出口 is not None and not int(窗口句柄 or 0):
+            # 有出口却拿不到窗口号（非界面线程 / 非 X11 / Qt 还没建窗口）：
+            # **宁可不起播**，也不能把 0 交出去 —— 那样 VLC 会自己开一个
+            # "VLC media player" 窗口放画面（用户反复反馈过的游离窗口）。
+            try:
+                句柄_出口 = int(出口.句柄() or 0)
+            except Exception:  # noqa: BLE001
+                句柄_出口 = 0
+            if not 句柄_出口:
+                self._日志("[显示] ❌ 拿不到可嵌入的窗口号，已阻止起播（避免画面跑到 "
+                         "VLC 自己的窗口里）；请确认是在界面线程里、且平台是 X11/xcb")
+                return False
+            窗口句柄 = 句柄_出口
+        if 出口 is not None:
+            try:
+                句柄_出口 = int(出口.句柄() or 0)
+                if 句柄_出口 and int(窗口句柄 or 0) and 句柄_出口 != int(窗口句柄):
+                    # 交接纪律：换窗口前必须先 会话.出口 = 目标窗口的出口
+                    # （见 播放出口.交接）。这里吵一声，免得又是"一边起播一边指向旧窗口"。
+                    self._日志(f"[播放] ⚠️ 调用方给的窗口 {窗口句柄} 与出口的 "
+                             f"{句柄_出口} 不一致 —— 按出口走（交接前请先换出口）")
+                窗口句柄 = 句柄_出口 or int(窗口句柄 or 0)
+            except Exception:  # noqa: BLE001 - 出口异常就按调用方给的句柄走
+                pass
         想要输出 = self._想要的实例输出(窗口句柄)
         想要句柄 = int(窗口句柄 or 0)
         当前 = self.播放器
@@ -538,14 +675,27 @@ class 播放会话:
             self._日志(f"[播放] 播放目标变化（输出 {想要输出 or '默认'}、"
                      f"窗口 {想要句柄 or '无'}），重建播放器实例")
             try:
+                # ⚠️ 关闭旧实例前必须**等 vout 真的消失**：``关闭()`` 的释放是异步的
+                #    （丢给后台线程，免得卡界面），这时旧窗口要是被销毁，
+                #    vout 线程会踩到已销毁的 drawable → 卡死或 VLC 另开一个窗口。
+                当前.停止并等待(2.0)
+                当前.等vout消失(2.0)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
                 当前.关闭()
             except Exception:  # noqa: BLE001
                 pass
             self.播放器 = None
             self._已报硬解 = False
         if self.播放器 is None:
-            self.播放器 = VLC(窗口句柄=想要句柄, 日志回调=self._日志,
-                          实例视频输出=想要输出, 嵌入窗口号=想要句柄)
+            if 出口 is not None:
+                # **统一出口**：窗口怎么给、怎么嵌，全在 播放出口 里决定
+                self.播放器 = 出口.建播放器(日志回调=self._日志,
+                                       实例视频输出=想要输出)
+            else:
+                self.播放器 = VLC(窗口句柄=想要句柄, 日志回调=self._日志,
+                              实例视频输出=想要输出)
         else:
             # ⚠️ **不管句柄变没变，都要先真的停住**（以前只在句柄变化时才停 —— 那是
             #    个想当然的优化：``set_xwindow`` 换绑不会搬走已有 vout，而**重播**
@@ -775,7 +925,8 @@ class 播放会话:
                  f"{参数.get('理由')}并重载（第 {级 + 1}/{len(self.画面回退阶梯)} 级，"
                  f"从当前位置继续）")
         try:
-            return bool(self.应用新参数(参数, 自动重载=True))
+            # ⚠️ 这段跑在"画面自检"后台线程里：重载必须交给界面线程做
+            return bool(self.在主线程(self.应用新参数, 参数, 自动重载=True))
         except Exception as e:  # noqa: BLE001
             self._日志(f"[显示] 回退失败：{e}")
             return False
@@ -1092,6 +1243,7 @@ class 播放会话:
             return 0
 
     def 关闭(self) -> None:
+        """收尾：停在播的画面、清游离窗口、拆掉自建画布（出口归口管理）。"""
         # 收尾上报：把这次播放的参数与效果写进学习库（下次这键就能直接复用）
         try:
             if self.播放器 is not None and self.开始时间:

@@ -40,6 +40,7 @@ from ..播放.显示环境 import 是桌面平台
 from ..播放.vlc绑定 import 可用 as vlc可用, 不可用原因
 from .AI播放面板 import AI播放面板, AI字幕动作
 from .路径选择对话框 import 路径选择对话框
+from .定时 import 安全单发
 from .播放控件 import 播放控制条, 视频窗
 from .播放清单 import 播放清单, 播放项
 from .vlc风格 import 构建菜单栏, 构建工具栏
@@ -353,8 +354,8 @@ class 播放页面(QWidget):
 
     def _延迟按视频比例调整窗口(self, 毫秒: int = 0) -> None:
         """等 Qt 把布局跑完再按视频比例重排（藏/显示面板、切页签后调用）。"""
-        QTimer.singleShot(毫秒, self.按视频比例调整窗口)
-        QTimer.singleShot(毫秒 + 90, self.按视频比例调整窗口)
+        安全单发(self, 毫秒, self.按视频比例调整窗口)
+        安全单发(self, 毫秒 + 90, self.按视频比例调整窗口)
 
     def _同步侧栏勾选(self):
         # 面板开关挂在**菜单栏**（那行工具栏已撤销）
@@ -719,9 +720,15 @@ class 播放页面(QWidget):
         super().resizeEvent(事件)
         # 视频上方那行（工具栏）已撤销，不再需要宽度自适应
         try:
-            宿主 = getattr(self, "_嵌入宿主", None)
-            if 宿主 is not None:
-                宿主.同步()          # 自建的视频子窗口跟着控件尺寸走
+            出口 = getattr(self, "_播放出口", None)
+            if 出口 is not None:
+                出口.同步()          # 自建画布跟着控件尺寸走
+        except Exception:  # noqa: BLE001
+            pass
+        try:                          # 截图提示跟着视频区走
+            层 = getattr(self, "_截图提示层", None)
+            if 层 is not None and 层.isVisible():
+                层.调整大小与位置()
         except Exception:  # noqa: BLE001
             pass
 
@@ -823,9 +830,22 @@ class 播放页面(QWidget):
         if self.会话 is not None:
             return self.会话
         self.会话 = 播放会话(
+            出口=getattr(self, "_播放出口", None) or self._出口(),
             取适配器=self.动作.适配器,
             日志回调=self._AI写, 顾问=self.顾问,
             自动调优=True)
+        # ⚠️ libvlc 不是线程安全的：后台线程（AI 决策 / 画面自检）要碰播放器的操作，
+        #    全部排进会话的队列，由这个定时器在**界面线程**里执行（真机 coredump 证明
+        #    不这么做会在 libvlc_media_add_option 里 SEGV 崩溃）。
+        try:
+            self.会话.装主线程泵()
+            if getattr(self, "_主线程泵", None) is None:
+                self._主线程泵 = QTimer(self)
+                self._主线程泵.setInterval(25)
+                self._主线程泵.timeout.connect(self._排空播放操作)
+                self._主线程泵.start()
+        except Exception:  # noqa: BLE001
+            pass
         return self.会话
 
     def _播放(self, 本地: bool = False, 独立窗口: bool = False) -> None:
@@ -949,26 +969,41 @@ class 播放页面(QWidget):
                 return 0
         except Exception:
             pass
-        # ⚠️ 优先交**我们自己建的朴素 X11 子窗口**（见 v8_3/播放/嵌入窗口.py）：
-        #    把 Qt 控件的窗口号直接给 libvlc 时，只要映射没到位、或 Qt 那个窗口的
-        #    visual 不寻常（合成器/主题下常是 ARGB），VLC 的 embed 尝试就会失败，
-        #    然后**自己开一个顶层窗口**放画面（"VLC media player"，还不报错）。
-        #    自建窗口的映射与 visual 都由我们保证，这条路就走不通了。
+        # **统一出口**（v8_3/播放/播放出口.py）：窗口怎么给、怎么嵌，只有一处实现。
         try:
-            宿主 = getattr(self, "_嵌入宿主", None)
-            if 宿主 is None:
-                from ..播放.嵌入窗口 import 嵌入宿主 as _嵌入宿主
-                宿主 = _嵌入宿主(self.视频)
-                self._嵌入宿主 = 宿主
-            号 = int(宿主.句柄() or 0)
-            if 号:
-                return 号
-        except Exception:  # noqa: BLE001 - 自建失败就退回老做法
-            pass
-        try:
-            return int(self.视频.winId())
-        except Exception:
+            return int(self._出口().句柄())
+        except Exception:  # noqa: BLE001
             return 0
+
+    def _截图提示(self):
+        """截图提示浮层（懒建；透明、贴视频区右下角、自动淡出）。"""
+        提示 = getattr(self, "_截图提示层", None)
+        if 提示 is None:
+            from .截图提示 import 截图提示 as _截图提示
+            提示 = _截图提示(self, 视频控件=getattr(self, "视频", None))
+            self._截图提示层 = 提示
+        return 提示
+
+    def _排空播放操作(self) -> None:
+        """界面线程里执行后台线程排队的播放操作（碰 libvlc 的活只能在这里做）。"""
+        会话 = getattr(self, "会话", None)
+        if 会话 is None:
+            return
+        try:
+            会话.排空主线程队列()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _出口(self):
+        """本页的播放出口（懒建；所有播放路径共用它）。"""
+        出口 = getattr(self, "_播放出口", None)
+        if 出口 is None:
+            from ..播放.播放出口 import 播放出口 as _播放出口
+            出口 = _播放出口(控件=self.视频, 日志回调=self._AI写)
+            self._播放出口 = 出口
+            if self.会话 is not None:
+                self.会话.出口 = 出口
+        return 出口
 
     def _已映射(self) -> bool:
         """播放页的视频窗是不是**真的在屏幕上**（交给 libvlc 之前必须为真）。
@@ -1159,7 +1194,7 @@ class 播放页面(QWidget):
                         self.会话.跳转(秒)
                 except Exception:  # noqa: BLE001
                     pass
-            QTimer.singleShot(900, _跳)
+            安全单发(self, 900, _跳)
             self._AI写(f"[显示] 画面已收回播放页（从 {位置:.0f}s 继续）")
         self.定时器.start()
 
@@ -1246,7 +1281,7 @@ class 播放页面(QWidget):
         if 续 > 1.0:
             self._续播位置 = 0.0
             # 刚起播就 seek 可能被忽略，等一会儿再跳
-            QTimer.singleShot(1200, lambda 秒=续: self._跳到续播位置(秒))
+            安全单发(self, 1200, self._跳到续播位置, 续)
         设置 = 会话.设置
         媒体 = 会话.媒体
         后台 = getattr(会话, "AI决策状态", "")
@@ -1373,6 +1408,10 @@ class 播放页面(QWidget):
             self._独立窗口.activateWindow()
             return
         窗口 = self._建独立窗口(会话.标题)
+        try:                          # ★ 交接纪律：先换成独立窗口的出口
+            self.会话.出口 = 窗口._出口()
+        except Exception:  # noqa: BLE001
+            pass
         if not 窗口.接管播放():
             self.状态标签.setText("❌ 独立窗口接管播放失败")
             try:
@@ -1396,6 +1435,9 @@ class 播放页面(QWidget):
         # 的状态盖掉（顺序上 destroyed 在 closeEvent 之后）
         窗口.destroyed.connect(lambda *_: setattr(self, "_独立窗口", None))
         self._接好独立窗口(窗口)
+        # 独立窗口是**真正的顶层窗口**（不是主窗口的子控件：那样会被裁掉底部控件、
+        # 还会丢掉标题栏/最小化/最大化/关闭），所以主窗口关掉时要显式带上它。
+        窗口.跟着父窗口退出(self.主窗口)
         self._独立窗口 = 窗口
         return 窗口
 
@@ -1416,19 +1458,14 @@ class 播放页面(QWidget):
         if 句柄 == 0 and 是桌面平台() and not getattr(self, "_允许自带窗口", False):
             self.状态标签.setText("❌ 无法把画面收回播放页（窗口号不是 X11 的）")
             return
-        if not self.会话.起播(句柄):
+        # 与"交给独立窗口"走**同一个交接仪式**（播放出口.交接）：
+        # 先停干净 → 换出口 → 换绑 → 重开 → 跳回原位置。
+        # 以前这里和接管那边各写一套，结果就是"关掉独立窗口又冒出 VLC 窗口"
+        # （起播用着旧出口的句柄，一边起播一边指向即将销毁的窗口）。
+        if not self._出口().交接(self.会话, 位置, 理由="画面已收回播放页"):
             self.状态标签.setText("⚠️ 收回播放失败（直链可能已过期，请重新播放）")
-            self._AI写("[播放] 回合播放失败：直链可能过期")
+            self._AI写("[播放] 收回播放失败：直链可能过期")
             return
-        if 位置 > 1.0:
-            def _跳(秒=位置):
-                try:
-                    if self.会话 is not None and self.会话.播放器 is not None:
-                        self.会话.跳转(秒)
-                except Exception:  # noqa: BLE001
-                    pass
-            QTimer.singleShot(900, _跳)
-            QTimer.singleShot(1800, _跳)
         self.定时器.start()
         self.状态标签.setText(f"▶ 已回到播放页继续播放（从 {位置:.0f}s 接着放）")
         self._AI写("[播放] 独立窗口已关闭，画面已收回播放页继续播放")
@@ -1577,33 +1614,82 @@ class 播放页面(QWidget):
             return
         self._播放(独立窗口=True)
 
+    def _分隔(self):
+        """本页的分割器（**属性名是 主体**）。
+
+        ⚠️ 以前全屏那几行写的是 ``self.分隔`` —— 页面上根本没这个名字，于是点
+        「⛶ 全屏」时槽函数直接 AttributeError（被 Qt 吞掉），按钮"完全没有反应"。
+        用户报的就是这个。这里统一成一个入口，名字写错也只会退化成"不动分割器"。
+        """
+        件 = getattr(self, "主体", None)
+        if 件 is not None:
+            return 件
+        return getattr(self, "分隔", None)
+
+    def _恢复分隔(self) -> None:
+        件 = self._分隔()
+        if 件 is not None and self._全屏前状态:
+            try:
+                件.setSizes(self._全屏前状态)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _全屏助手(self):
+        """本页所在窗口的全屏助手（**唯一实现**，见 界面/全屏助手.py）。
+
+        为什么要绕一层：真机上点「⛶ 全屏」**什么都没发生** —— COSMIC 会直接忽略
+        ``showFullScreen()``（``isFullScreen()`` 仍为 False、几何不变）。助手会在
+        几拍之后复核，"没真全屏就自己铺满"，按钮这才真的有效。
+        """
+        助手 = getattr(self, "_全屏助手实例", None)
+        if 助手 is None:
+            from .全屏助手 import 全屏助手 as _全屏助手
+            助手 = _全屏助手(self.window(), 退出回调=self._退出全屏后的收尾)
+            self._全屏助手实例 = 助手
+        return 助手
+
+    def _退出全屏后的收尾(self) -> None:
+        try:                                  # 按钮文字跟着复位
+            self.控制条.设置全屏图标(False)
+        except Exception:  # noqa: BLE001
+            pass
+        if self._全屏前状态:
+            self._恢复分隔()
+
+        同步 = getattr(getattr(self, "工具栏", None), "全屏动作", None)
+        if 同步 is not None:
+            try:
+                同步.setChecked(False)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _设置全屏(self, 全屏: bool):
         """菜单/工具栏的「全屏」勾选项（VLC 的 视频→全屏）。"""
-        窗口 = self.window()
-        if bool(全屏) == bool(窗口.isFullScreen()):
+        助手 = self._全屏助手()
+        if bool(全屏) == bool(助手.是全屏()):
             return
         if not 全屏:
-            窗口.showNormal()
-            if self._全屏前状态:
-                self.分隔.setSizes(self._全屏前状态)
+            助手.退出()
             return
-        self._全屏前状态 = self.分隔.sizes()
-        self.分隔.setSizes([self.分隔.height(), 0])
-        窗口.showFullScreen()
+        self._全屏前状态 = self._分隔().sizes()
+        self._分隔().setSizes([self._分隔().height(), 0])
+        助手.进入()
         同步 = getattr(getattr(self, "工具栏", None), "全屏动作", None)
         if 同步 is not None:
             同步.setChecked(True)
 
     def _切换全屏(self) -> None:
-        窗口 = self.window()
-        if 窗口.isFullScreen():
-            窗口.showNormal()
-            if self._全屏前状态:
-                self.分隔.setSizes(self._全屏前状态)
+        助手 = self._全屏助手()
+        if 助手.是全屏():
+            助手.退出()
             return
-        self._全屏前状态 = self.分隔.sizes()
-        self.分隔.setSizes([self.分隔.height(), 0])
-        窗口.showFullScreen()
+        self._全屏前状态 = self._分隔().sizes()
+        self._分隔().setSizes([self._分隔().height(), 0])
+        助手.进入()
+        try:
+            self.控制条.设置全屏图标(True)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _截图(self) -> None:
         if self.会话 is None or self.会话.播放器 is None:
@@ -1617,8 +1703,10 @@ class 播放页面(QWidget):
         if self.会话.截图(str(目标)):
             self.状态标签.setText(f"📷 已保存 {目标}")
             self._AI写(f"[播放] 截图：{目标}")
+            self._截图提示().显示已保存(目标)      # ★ 透明浮层：位置 + 图片名
         else:
             self.状态标签.setText("📷 截图失败（可能还没画面）")
+            self._截图提示().显示失败("可能还没出画面")
 
     # ==================== AI 面板动作（实现搬到 AI播放面板.AI字幕动作） ====================
 
@@ -1868,11 +1956,11 @@ class 播放页面(QWidget):
         except Exception:
             pass
         self.会话 = None
-        # 我们自己建的视频子窗口要拆掉（否则它会一直挂在屏幕上）
+        # 自建画布由出口归口拆掉（否则它会一直挂在屏幕上）
         try:
-            宿主 = getattr(self, "_嵌入宿主", None)
-            if 宿主 is not None:
-                宿主.销毁()
-                self._嵌入宿主 = None
+            出口 = getattr(self, "_播放出口", None)
+            if 出口 is not None:
+                出口.销毁()
+                self._播放出口 = None
         except Exception:  # noqa: BLE001
             pass

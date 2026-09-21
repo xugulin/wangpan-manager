@@ -44,6 +44,7 @@ from ..配置 import (
     网盘实例列表, 新增网盘实例, 更新网盘实例, 删除网盘实例, 适配器规格表,
     项目根,
 )
+from .定时 import 安全单发
 from .控件样式 import 安装控件样式
 from .主题管理器 import (主题管理器, 应用全局外观, 高度_管理按钮,
                     高度_功能按钮, 高度_网盘按钮)
@@ -1065,6 +1066,29 @@ class 主窗口(QMainWindow):
 
     # ==================== 日志 / 状态 ====================
 
+    def keyPressEvent(self, 事件):  # noqa: N802 - Qt 命名
+        """Esc：正在全屏就先退出全屏（需求：Esc 退全屏）。
+
+        为什么还要这里兜一手：全屏助手装的 QShortcut 走的是应用级快捷键分发，
+        某些合成器/焦点情况下不一定到得了；而 keyPressEvent 一定收得到。
+        """
+        try:
+            from PySide6.QtCore import Qt as _Qt
+            if 事件.key() == _Qt.Key.Key_Escape:
+                页 = getattr(self, "_播放页面", None)
+                助手 = getattr(页, "_全屏助手实例", None) if 页 is not None else None
+                if 助手 is not None and 助手.是全屏():
+                    助手.退出()
+                    if 页 is not None:
+                        try:
+                            页.控制条.设置全屏图标(False)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    return
+        except Exception:  # noqa: BLE001
+            pass
+        super().keyPressEvent(事件)
+
     def 追加日志(self, 消息: str, 级别: str = "信息"):
         """线程安全：任何线程都可以调用。
 
@@ -1088,7 +1112,7 @@ class 主窗口(QMainWindow):
     def 状态消息(self, 消息: str, 毫秒: int = 6000):
         self.状态标签.setText(str(消息))
         if 毫秒:
-            QTimer.singleShot(毫秒, lambda: self.状态标签.setText("就绪"))
+            安全单发(self, 毫秒, lambda: self.状态标签.setText("就绪"))
 
     def 设置网盘状态(self, 标识: str, 已登录: bool):
         """网盘页刷新到登录状态后，顺手更新导航按钮的提示（绿点/灰点）。"""

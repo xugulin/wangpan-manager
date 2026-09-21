@@ -105,6 +105,13 @@ class 假会话:
         self.起播次数 = getattr(self, "起播次数", 0) + 1
         return True
 
+    def 跳转(self, 秒):
+        """交接后要跳回原位置（真会话有这个方法，假会话也得有）。"""
+        try:
+            self.播放器.跳转(秒)
+        except Exception:  # noqa: BLE001
+            pass
+
     def 状态快照(self):
         return {"状态": "播放中", "进度秒": 10.0, "时长秒": 100.0, "丢帧": 0,
                 "已解码视频": 250, "已播秒": 10.0, "输入码率bps": 0.0,
@@ -131,6 +138,29 @@ class 假会话:
 
     def 关闭(self):
         self.关闭次数 += 1
+
+
+class _假出口:
+    """假播放出口：只记录"交接被调了几次、位置是多少"，并替它起播/跳回。"""
+
+    def __init__(self):
+        self.交接过: list[tuple] = []
+
+    def 句柄(self):
+        return 1234
+
+    def 交接(self, 会话, 位置=-1.0, 理由=""):
+        self.交接过.append((会话, 位置, 理由))
+        好 = bool(会话.起播(1234))
+        if 好 and float(位置 or 0) > 1.0:
+            会话.跳转(float(位置))
+        return 好
+
+    def 同步(self):
+        return
+
+    def 销毁(self):
+        return
 
 
 @unittest.skipUnless(Qt可用, "没装 PySide6")
@@ -902,6 +932,11 @@ class 单播放器架构测试(unittest.TestCase):
         self.窗口 = 播放器窗口(self.会话, 标题="样片.mp4", 接管=True)
         # X11 下起播会先等"窗口已映射"（真机需要），测试里固定为真以免断言被时序干扰
         self.窗口._已映射 = lambda: True
+        # 交接现在统一走"播放出口"（真机上它是"控件自己的 X11 窗口 + set_xwindow"）。
+        # 单测跑在离屏环境里没有 X11，所以换成一个假出口 —— 验的是**窗口这一侧的
+        # 交接纪律**：只调一次 出口.交接()，由它去起播/跳回位置。
+        self.出口 = _假出口()
+        self.窗口._播放出口 = self.出口
         self.归还 = []
         self.窗口.宿主回调 = {"归还播放": lambda w: self.归还.append(w)}
 
@@ -913,6 +948,8 @@ class 单播放器架构测试(unittest.TestCase):
         self.assertTrue(self.窗口.接管播放())
         self.assertIs(self.窗口.会话, self.会话, "接管不能换会话")
         self.assertEqual(self.会话.起播次数, 1, "接管只应起播一次（同一个播放器）")
+        self.assertEqual(len(self.出口.交接过), 1,
+                         "交接必须走统一的 播放出口.交接()，不能自己再拼一套")
 
     def test_接管会跳回原位置(self):
         self.会话.播放器.进度秒 = lambda: 42.0
@@ -1156,6 +1193,193 @@ class 侧栏开关测试(unittest.TestCase):
         self.窗.切换清单(False)
         泵(0.05)
         self.assertFalse(self.窗.右栏.isVisible())
+
+
+# ==================== 独立窗口的屏幕自适应（用户：启动时太大、超出屏幕边缘） ====================
+
+
+@unittest.skipUnless(Qt可用, "没装 PySide6")
+class 独立窗口贴合屏幕测试(unittest.TestCase):
+    """独立播放窗口必须**按屏幕分辨率**自适应，任何分辨率下都完整可见。
+
+    用户实测反馈："独立窗口启动时太大了，超过了屏幕侧边缘"。
+    两个原因（都已修，这里钉住）：
+      ① 摆位用的是 ``self.width()``，而 ``resize()`` 是**异步**生效的 ——
+         等 Qt 真把窗口放大，右边就伸到屏幕外；
+      ② 只夹尺寸不夹位置 —— 多屏/左侧面板让 availableGeometry 原点不是 (0,0) 时，
+         居中算出来的 x 可能为负。
+    """
+
+    def _造窗口(self, 区域):
+        from PySide6.QtCore import QRect
+        窗 = 播放器窗口(假会话(), 标题="样片.mp4", 接管=True)
+        self.addCleanup(窗.close)
+        # 屏幕几何打桩：不用真的换显示器也能验各种分辨率
+        窗.屏幕几何 = lambda: QRect(*区域)
+        return 窗
+
+    def test_各种分辨率都完整落在屏幕内(self):
+        """1366x768 / 1920x1080 / 2560x1440 / 4K / 1024x600 / HiDPI 逻辑分辨率。"""
+        for 区域 in ((0, 0, 1366, 768), (0, 0, 1920, 1080), (0, 0, 2560, 1440),
+                   (0, 0, 3840, 2160), (0, 0, 1024, 600),
+                   (0, 0, 1280, 720),          # HiDPI 缩放后的逻辑分辨率
+                   (1920, 0, 1920, 1080)):     # 第二块屏（原点不是 0,0）
+            窗 = self._造窗口(区域)
+            窗.适应视频比例() if False else None
+            宽, 高 = 窗.贴合屏幕(2500, 1400, 居中=True)   # 故意要一个超大的尺寸
+            x, y = 窗.x(), 窗.y()
+            左, 上, 屏宽, 屏高 = 区域
+            self.assertLessEqual(宽, 屏宽, f"{区域}：宽 {宽} 超屏")
+            self.assertLessEqual(高, 屏高, f"{区域}：高 {高} 超屏")
+            self.assertGreaterEqual(x, 左, f"{区域}：x={x} 跑到屏幕左边外面")
+            self.assertGreaterEqual(y, 上, f"{区域}：y={y} 跑到屏幕上边外面")
+            self.assertLessEqual(x + 宽, 左 + 屏宽, f"{区域}：右边超出（{x}+{宽}）")
+            self.assertLessEqual(y + 高, 上 + 屏高, f"{区域}：下边超出（{y}+{高}）")
+
+    def test_按视频比例开窗不会顶到屏幕边(self):
+        """4K 片源（宽高比 2.354）在 2560x1440 上开窗：要舒适、且完整可见。"""
+        from PySide6.QtCore import QRect
+        窗 = self._造窗口((0, 0, 2560, 1440))
+        窗.resize(1180, 720)
+        窗.show()
+        泵(0.2)
+        窗.适应视频比例()
+        泵(0.2)
+        self.assertLessEqual(窗.x() + 窗.width(), 2560, "右边超出屏幕")
+        self.assertLessEqual(窗.width(), int(2560 * 窗.屏幕占比), "宽超过硬上限")
+        # 舒适默认：不该一上来就占满大半个屏幕（用户反馈"太大"）
+        self.assertLessEqual(窗.width(), int(2560 * 0.85),
+                            f"开窗宽度 {窗.width()} 太大（应≤ 0.85 屏宽）")
+
+    def test_合成器不听话时按实际落点收尺寸(self):
+        """合成器（COSMIC 就是）自己决定新窗口位置、**忽略客户端的 move()**。
+
+        实测：xdotool windowmove 都搬不动它 —— 我们算好的"居中 x"全白算，
+        窗口右边伸到屏幕外 284px。对策：位置你说了算，但尺寸收到
+        "从你放的位置到屏幕右边"以内，保证完整可见。
+        """
+        from PySide6.QtCore import QRect
+        窗 = self._造窗口((0, 0, 2560, 1440))
+        窗.resize(1996, 800)
+        窗.show()                      # 只有"可见"时才按实际落点算
+        泵(0.2)
+        窗.move(848, 287)              # 模拟合成器把它摆在 848（我们说了不算）
+        泵(0.2)
+        宽, 高 = 窗.贴合屏幕(1996, 800, 居中=True)
+        self.assertLessEqual(窗.x() + 宽, 2560,
+                             f"合成器摆到 {窗.x()} 时，我们的尺寸必须收到屏幕内"
+                             f"（现在 {宽} 宽 → 右边 {窗.x() + 宽}）")
+        self.assertGreaterEqual(宽, 200, "不能收成看不见")
+
+    def test_小屏上也留得住最小尺寸(self):
+        """1024x600 这种小屏：缩到装得下，但不能缩成看不见。"""
+        窗 = self._造窗口((0, 0, 1024, 600))
+        宽, 高 = 窗.贴合屏幕(3000, 2000)
+        self.assertLessEqual(宽, 1024)
+        self.assertLessEqual(高, 600)
+        self.assertGreaterEqual(宽, 200)
+        self.assertGreaterEqual(高, 160)
+
+
+# ==================== 全屏：合成器忽略 showFullScreen 时也必须真的全屏 ====================
+
+
+@unittest.skipUnless(Qt可用, "没装 PySide6")
+class 全屏助手测试(unittest.TestCase):
+    """用户实测：点播放页的「⛶ 全屏」**完全没反应**。两个原因都要钉住：
+
+    ① 页面里的分割器叫 ``主体``，全屏那几行却写 ``self.分隔`` → 槽函数 AttributeError
+       （被 Qt 吞掉，界面毫无反应）；
+    ② 这台机器的合成器（COSMIC）**忽略** ``showFullScreen()``：``isFullScreen()``
+       仍是 False、几何一点不变 —— 所以必须有"没铺满就自己铺"的兜底。
+    """
+
+    def test_分割器名字写错也不抛异常(self):
+        """全屏路径不能再因为属性名不存在而整条挂掉。"""
+        会话 = 假会话()
+        页 = 播放页面.__new__(播放页面)          # 只测这一个方法，不建整页
+        页.主体 = None
+        self.assertIsNone(页._分隔())
+        页._全屏前状态 = [1, 2]
+        页._恢复分隔()                          # 不该抛
+
+    def test_合成器忽略全屏时自己铺满(self):
+        from PySide6.QtCore import QRect
+        from PySide6.QtWidgets import QWidget
+        from v8_3.界面.全屏助手 import 全屏助手
+
+        class 倔窗口(QWidget):
+            """模拟"忽略 showFullScreen"的合成器：状态与几何都不变。"""
+            def showFullScreen(self):           # noqa: N802
+                pass
+            def showNormal(self):               # noqa: N802
+                pass
+            def isFullScreen(self):             # noqa: N802
+                return False
+
+        窗 = 倔窗口(); 窗.resize(800, 500); 窗.show()
+        self.addCleanup(窗.close)
+        泵(0.2)
+        助手 = 全屏助手(窗)
+        助手.进入()
+        泵(0.6)                                 # 等 0/120/400ms 三次复核
+        框 = 窗.frameGeometry()
+        屏 = 窗.screen().geometry() if 窗.screen() else None
+        self.assertTrue(助手.是全屏(), "合成器不配合时也该认定已全屏（自己铺的）")
+        if 屏 is not None:
+            self.assertGreaterEqual(框.width(), 屏.width() - 4, "没铺满屏幕宽度")
+            self.assertGreaterEqual(框.height(), 屏.height() - 4, "没铺满屏幕高度")
+        助手.退出()
+        泵(0.4)
+        self.assertFalse(助手.是全屏())
+        self.assertEqual((窗.width(), 窗.height()), (800, 500), "退出全屏要还原原尺寸")
+
+    def test_安全单发不会回调到已销毁对象(self):
+        """``QTimer.singleShot`` 不持有宿主 —— 宿主销毁后回调落到已析构的 C++ 对象上
+        会直接 SEGV（真机 coredump：``QTimerInfoList::activateTimers`` → notifyInternal2）。
+        ``安全单发`` 把定时器挂在宿主名下，宿主一没，定时器跟着没。
+        """
+        from PySide6.QtWidgets import QWidget
+        from v8_3.界面.定时 import 安全单发
+        记 = []
+        宿主 = QWidget(); 宿主.show()
+        泵(0.1)
+        安全单发(宿主, 80, lambda: 记.append(1))
+        import shiboken6
+        shiboken6.delete(宿主)                  # 立刻销毁 C++ 对象（崩溃现场就是这样）
+        泵(0.6)                                 # 远超 80ms：定时器应已随宿主一起没了
+        self.assertEqual(记, [], "宿主销毁后不该再回调（否则就是崩溃源）")
+
+    def test_退出全屏后按钮文字复位(self):
+        """用户实测：Esc 退出全屏后按钮还写着「退出全屏」。"""
+        from v8_3.界面.播放器窗口 import 播放器窗口 as _窗
+        窗 = _窗(假会话(), 标题="样片.mp4", 接管=True)
+        self.addCleanup(窗.close)
+        窗.show(); 泵(0.2)
+        self.assertIn("全屏", 窗.控制条.全屏按钮.text())
+        窗.设置全屏(True); 泵(1.2)
+        self.assertIn("退出", 窗.控制条.全屏按钮.text())
+        窗._全屏助手().退出(); 泵(1.5)          # Esc 走的就是这条路
+        self.assertNotIn("退出", 窗.控制条.全屏按钮.text(),
+                        "退出全屏后按钮要变回「⛶ 全屏」")
+
+    def test_落点记忆让窗口永远装得下(self):
+        """（用户实测：退出全屏播 4K 时窗口过长超出屏幕）
+
+        COSMIC 会忽略客户端 move()，而且在我们 move 之后再搬一次 —— 所以"按当前
+        几何算明明在屏里"，它一搬就出屏。对策：记住它坚持的落点，任何一次尺寸计算
+        都按那个落点收，保证不管它把我们放哪都完整可见。
+        """
+        from PySide6.QtCore import QRect
+        窗 = 播放器窗口(假会话(), 标题="样片.mp4", 接管=True)
+        self.addCleanup(窗.close)
+        区域 = QRect(0, 0, 2560, 1440)
+        窗.屏幕几何 = lambda: 区域
+        窗._落点记忆 = (848, 287)             # 合成器坚持放这里
+        宽, 高 = 窗.贴合屏幕(1996, 800, 居中=True)
+        self.assertLessEqual(848 + 宽, 2560,
+                             f"按落点 848 收紧后右边不许出屏（现在 {848 + 宽}）")
+        self.assertGreater(宽, 200, "不能收成看不见")
 
 
 # ==================== 工具栏宽度自适应（「🗂 面板」被裁掉的回归） ====================
