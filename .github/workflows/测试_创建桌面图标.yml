@@ -91,6 +91,8 @@ jobs:
           Write-Host "== cscript 诊断（ASCII 名 / 中文名各试一次）=="
           & cscript.exe //nologo 'D:\a\_temp\diag.vbs' '网盘管理'
           Write-Host "exit=$LASTEXITCODE"
+          # 诊断留下的 AsciiTestName.lnk 会干扰下面的断言，删掉
+          Remove-Item "$env:USERPROFILE\Desktop\AsciiTestName.lnk" -Force -ErrorAction SilentlyContinue
 
       - name: 跑包里的 创建桌面图标.bat（中文 + 空格路径）
         shell: pwsh
@@ -109,17 +111,23 @@ jobs:
         shell: pwsh
         run: |
           $desktop = [Environment]::GetFolderPath('Desktop')
-          $lnk = Get-ChildItem $desktop -Filter '*.lnk' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $lnk) {
-            Write-Host "::error::桌面没有 .lnk（快捷方式没建出来，只做了复制兜底）"
+          Write-Host "桌面内容："
+          Get-ChildItem $desktop | Select-Object Name, Length | Format-Table -AutoSize
+          $lnk = Join-Path $desktop '网盘管理.lnk'
+          if (-not (Test-Path -LiteralPath $lnk)) {
+            Write-Host "::error::桌面没有 网盘管理.lnk（快捷方式没建出来，只做了兜底）"
             exit 1
           }
-          Write-Host "生成：$($lnk.Name)"
           $sh = New-Object -ComObject WScript.Shell
-          $sc = $sh.CreateShortcut($lnk.FullName)
+          $sc = $sh.CreateShortcut($lnk)
+          Write-Host "生成：网盘管理.lnk"
           Write-Host "目标：$($sc.TargetPath)"
-          if ($lnk.BaseName -ne '网盘管理') {
-            Write-Host "::error::快捷方式名字不对（期望 网盘管理，实际 $($lnk.BaseName)）"
+          if (-not $sc.TargetPath) {
+            Write-Host "::error::快捷方式里没有目标（空壳 .lnk，双击没反应）"
+            exit 1
+          }
+          if ($sc.TargetPath -notmatch '启动') {
+            Write-Host "::error::快捷方式目标不像启动器：$($sc.TargetPath)"
             exit 1
           }
           Write-Host "✅ 快捷方式名与目标都正确"
