@@ -69,7 +69,14 @@ jobs:
           Write-Host "runner : $env:ImageOS / $env:RUNNER_OS / $env:RUNNER_ARCH"
           python -c "import sys, PySide6; print('Python', sys.version.split()[0], '| PySide6', PySide6.__version__)"
 
-      - name: 界面逐项计时（真 Windows）
+      - name: 界面逐项计时（真 Windows · 原生窗口）
+        env:
+          QT_QPA_PLATFORM: ''          # 空 = 用原生 windows 平台（跟用户实际一样）
+        run: python 工具/界面测速.py
+
+      - name: 界面逐项计时（真 Windows · 离屏）
+        env:
+          QT_QPA_PLATFORM: offscreen   # 离屏是纯软件渲染，数字通常更难看，用来对照
         run: python 工具/界面测速.py
 
       - name: 单测（Windows 上跑一遍）

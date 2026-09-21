@@ -72,16 +72,14 @@ class AI状态页面(QWidget):
         self._本地模型忙 = False          # 检测/测速/启动/拉取进行中：按钮先禁用
         # 逐段计时：AI 页在个别机器上会莫名卡很久（真机 CI 上量到过 60 秒），
         # 只记"慢"的分段，正常启动不刷屏 —— 出问题时日志里能直接看到卡在哪一段。
-        慢段: list[str] = []
+        self._慢段: list[str] = []
 
         def 量(名字: str, 动作):
             t0 = time.time()
             try:
                 return 动作()
             finally:
-                耗毫秒 = (time.time() - t0) * 1000
-                if 耗毫秒 >= 300:
-                    慢段.append(f"{名字} {耗毫秒:.0f}ms")
+                self._记慢段(名字, (time.time() - t0) * 1000)
 
         量("构建", self._构建)
         量("刷新", self.刷新)
@@ -90,8 +88,8 @@ class AI状态页面(QWidget):
         # 本地模型检测是阻塞操作（要戳本机端口），**不能在构建/刷新里同步做**，
         # 否则切到 AI 页就会卡住（用户反馈过）。这里改成后台跑，结果回来再填界面。
         量("本地模型后台检测", self.延迟检测本地模型)
-        if 慢段:
-            self.主窗口.追加日志("[AI页] 构建耗时：" + "、".join(慢段))
+        if self._慢段:
+            self.主窗口.追加日志("[AI页] 构建耗时：" + "、".join(self._慢段))
 
     # ==================== 便捷访问 ====================
 
@@ -107,6 +105,21 @@ class AI状态页面(QWidget):
         return getattr(运行时, "价格抓取器", None) if 运行时 else None
 
     # ==================== 界面 ====================
+
+    #: 慢于这个毫秒数就记进日志（正常启动不刷屏）
+    慢段阈值毫秒 = 300
+
+    def _记慢段(self, 名字: str, 毫秒: float) -> None:
+        if 毫秒 >= self.慢段阈值毫秒:
+            self._慢段.append(f"{名字} {毫秒:.0f}ms")
+
+    def 量(self, 名字: str, 动作):
+        """量一个子步骤；≥300ms 就记进 [AI页] 那一行（真机 Windows 上定位卡点用）。"""
+        t0 = time.time()
+        try:
+            return 动作()
+        finally:
+            self._记慢段(名字, (time.time() - t0) * 1000)
 
     def _构建(self):
         # 整页放进滚动区：AI 页控件多，按设计高度排下来要 ~1040px；窗口一矮，
@@ -205,11 +218,11 @@ class AI状态页面(QWidget):
         状态页布局.setSpacing(10)
         三列 = QHBoxLayout()
         三列.setSpacing(12)
-        三列.addWidget(self._建预算区())
-        三列.addWidget(self._建状态区())
+        三列.addWidget(self.量("预算区", self._建预算区))
+        三列.addWidget(self.量("状态区", self._建状态区))
         右侧 = QVBoxLayout()
-        右侧.addWidget(self._建价格区())
-        右侧.addWidget(self._建详情区(), 1)
+        右侧.addWidget(self.量("价格区", self._建价格区))
+        右侧.addWidget(self.量("详情区", self._建详情区), 1)
         右容器 = QWidget()
         右容器.setLayout(右侧)
         三列.addWidget(右容器, 1)
@@ -225,7 +238,7 @@ class AI状态页面(QWidget):
         self.调度摘要标签.setWordWrap(True)
         底部.addWidget(self.调度摘要标签, 1)
         状态页布局.addLayout(底部)
-        self.状态滚动区 = _包滚动(状态页)
+        self.状态滚动区 = self.量("状态页包滚动", lambda: _包滚动(状态页))
         self.AI页签堆叠.addWidget(self.状态滚动区)
 
         # ---------------- 页②：AI 设置（云端密钥 / 本地模型 / 运行详情）----------------
@@ -234,13 +247,13 @@ class AI状态页面(QWidget):
         设置页布局.setContentsMargins(0, 0, 0, 0)
         设置页布局.setSpacing(10)
         # ---- 云端密钥（在页面上直接填，不用再手改 配置.json）----
-        设置页布局.addWidget(self._建密钥区())
+        设置页布局.addWidget(self.量("密钥区", self._建密钥区))
         # ---- 本地 DeepSeek 模型（免费、离线）----
-        设置页布局.addWidget(self._建本地模型区())
+        设置页布局.addWidget(self.量("本地模型区", self._建本地模型区))
         # 用户要求：设置页**不放**"AI 运行详情"（它已经在「AI状态」页右侧）；
         # 末尾留一点弹性，两张卡片不会被顶到最上面显得空。
         设置页布局.addStretch(1)
-        self.设置滚动区 = _包滚动(设置页)
+        self.设置滚动区 = self.量("设置页包滚动", lambda: _包滚动(设置页))
         self.AI页签堆叠.addWidget(self.设置滚动区)
 
         # ---------------- 页③：模型商店（本地小模型市场）----------------
@@ -248,8 +261,8 @@ class AI状态页面(QWidget):
         商店页布局 = QVBoxLayout(商店页)
         商店页布局.setContentsMargins(0, 0, 0, 0)
         商店页布局.setSpacing(10)
-        商店页布局.addWidget(self._建模型市场区(), 1)
-        self.商店滚动区 = _包滚动(商店页)
+        商店页布局.addWidget(self.量("市场区", self._建模型市场区), 1)
+        self.商店滚动区 = self.量("商店页包滚动", lambda: _包滚动(商店页))
         self.AI页签堆叠.addWidget(self.商店滚动区)
 
         布局.addWidget(self.AI页签堆叠, 1)
@@ -2175,7 +2188,7 @@ class AI状态页面(QWidget):
     def 刷新(self):
         # 密钥卡片先刷：AI 层就算没起来，也要能看出密钥配没配、能不能填
         try:
-            self._刷新密钥区()
+            self.量("刷新密钥区", self._刷新密钥区)
         except Exception:  # noqa: BLE001
             pass
         运行时 = self.运行时
@@ -2195,15 +2208,15 @@ class AI状态页面(QWidget):
         开启 = bool(调度.get("自适应并发", True))
         self.用AI框.setChecked(开启)
         self.用AI框.setText(f"🧠 传输时用 AI 调整并发：{'开' if 开启 else '关'}")
-        self._填充模型下拉()
+        self.量("填充模型下拉", self._填充模型下拉)
         try:
-            self.刷新本地模型()
+            self.量("刷新本地模型", self.刷新本地模型)
         except Exception as e:  # noqa: BLE001
             self.本地状态标签.setText(f"🏠 本地模型刷新失败：{e}")
-        self._刷新价格表()
-        self._刷新横幅()
-        self._刷新状态UI()
-        self._刷新详情()
+        self.量("刷新价格表", self._刷新价格表)
+        self.量("刷新横幅", self._刷新横幅)
+        self.量("刷新状态UI", self._刷新状态UI)
+        self.量("刷新详情", self._刷新详情)
 
     def _刷新状态UI(self):
         运行时 = self.运行时
