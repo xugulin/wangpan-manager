@@ -447,16 +447,55 @@ class VLC:
 
     def __init__(self, 窗口句柄: int = 0, 日志回调: Optional[Callable] = None,
                  基础选项: list[str] | None = None,
-                 静音: bool = False):
+                 静音: bool = False,
+                 实例视频输出: str = "",
+                 嵌入窗口号: int = 0):
         self._日志 = 日志回调 or (lambda *_: None)
         库 = VLC库.取()
         self._lib = 库.lib
         self.路径 = 库.路径
         参数 = list(self.实例参数) + list(基础选项 or [])
+        # ⚠️ 视频输出**必须**是 libvlc 实例级选项（``--vout=``）。
+        #    实测（cvlc -vvv，2026-09-21）：
+        #      ``cvlc --vout=xcb_x11 …``   → using vout display module "xcb_x11" ✓
+        #      ``cvlc ":vout=xcb_x11" …``  → looking for vout display module matching "any"
+        #                                     → using vout display module "gl" ✗
+        #    也就是说**媒体级**的 ``:vout=`` 根本不生效（VLC 在 media scope 之外
+        #    就把输出模块定下来了）。这正是"多出一个 VLC media player 窗口"
+        #    反复治不好的原因：以前不管是规则给的 ``:vout=gl`` 还是兜底把它删掉，
+        #    都在改一个**没人看**的选项。
+        实例视频输出 = str(实例视频输出 or "").strip()
+        if 实例视频输出:
+            参数.append(f"--vout={实例视频输出}")
+        # ⚠️⚠️ 嵌入必须用**实例级** ``--drawable-xid``，而且**不能再调 set_xwindow**。
+        #      实测（本机 VLC 3.0.23，Xvfb 真 X11，2026-09-21）：
+        #
+        #      ============================================  ==========================
+        #      做法                                          VLC 实际用的输出
+        #      ============================================  ==========================
+        #      `--vout=xcb_x11` + `set_xwindow(id)`          matching "any" → **gl** ✗
+        #      `--vout=xcb_x11` + `--drawable-xid=id`        matching "xcb_x11" → xcb_x11 ✓
+        #      `--drawable-xid=id`（不钉）                    matching "any" → **gl** ✗
+        #      ============================================  ==========================
+        #
+        #      **``libvlc_media_player_set_xwindow()`` 会把实例级 ``--vout`` 重置回
+        #      "any"**，于是 libvlc 自己挑到 GL 系输出；开了硬解（VAAPI）时 GL 要
+        #      ``glconv_vaapi_x11`` + 自己的 GL 画布，建不到就**自己开一个顶层窗口**
+        #      放画面 —— 用户看到的 "VLC media player" 窗口就是这么来的。
+        #      这就是三轮都没治好的真正病根：钉是钉了，紧接着又被 set_xwindow 抹掉。
+        嵌入窗口号 = int(嵌入窗口号 or 0)
+        self.用实例drawable = False
+        if 嵌入窗口号 and os.name != "nt":
+            # ``--embedded-video`` 告诉 VLC"这个 drawable 是嵌进来的窗口"，
+            # 它才会走 embed-xid 那条路（否则 xcb_window 会自己开一个顶层窗口 —— 实测）。
+            参数 += [f"--drawable-xid={嵌入窗口号}", "--embedded-video"]
+            self.用实例drawable = True
         if 静音:
             参数 += ["--no-audio"]
         文本 = [a.encode("utf-8") for a in 参数]
         数组 = (ctypes.c_char_p * len(文本))(*文本)
+        #: 这个实例在 ``libvlc_new`` 时钉死的视频输出模块（"" = 没钉）
+        self.实例视频输出 = str(实例视频输出 or "")
         self._实例 = self._lib.libvlc_new(len(文本), 数组)
         if not self._实例:
             raise 库不可用("libvlc_new 失败（参数不合法或资源不足）")
@@ -466,19 +505,32 @@ class VLC:
             self._实例 = None
             raise 库不可用("libvlc_media_player_new 失败")
         self._媒体 = None
-        self.窗口句柄 = int(窗口句柄 or 0)
+        #: 视频要画到哪个窗口号（X11 上是实例级 --drawable-xid 生效；Windows 走 set_hwnd）
+        self.窗口句柄 = int(嵌入窗口号 or 窗口句柄 or 0)
         self.当前地址 = ""
         self.已用选项: list[str] = []
         self._已关闭 = False
         self.起播时间 = 0.0
-        if self.窗口句柄:
+        if self.窗口句柄 and not self.用实例drawable:
             self.绑定窗口(self.窗口句柄)
 
     # ---------------- 基础 ----------------
 
     def 绑定窗口(self, 句柄: int) -> None:
-        """把视频输出挂到已有窗口（X11 的 window id）。"""
-        self.窗口句柄 = int(句柄 or 0)
+        """把视频输出挂到已有窗口（X11 的 window id）。
+
+        ⚠️ 这个方法会**抹掉实例级 ``--vout`` 钉死**（VLC 内部把 vout 重置成 "any"），
+        所以嵌入播放走的是实例级 ``--drawable-xid``（见 :meth:`__init__`），
+        不调这里。句柄真的变了要重新起播（``播放会话.起播`` 会重建实例）。
+        """
+        句柄 = int(句柄 or 0)
+        if self.用实例drawable and 句柄 == self.窗口句柄:
+            return                      # 已经由实例级 drawable 绑好了，别再抹掉钉死
+        if self.用实例drawable and 句柄 != self.窗口句柄:
+            self._日志("[播放] 嵌入窗口变了：实例级 --drawable-xid 是建实例时定下的，"
+                     "这里只能退回 set_xwindow —— 视频输出的钉死会被 VLC 重置，"
+                     "建议重新起播（会自动重建实例）")
+        self.窗口句柄 = 句柄
         if self.窗口句柄 and self._播放器:
             # VLC 3.x：X11 用 set_xwindow；失败也不致命（可能还没起 vout）
             try:
@@ -499,10 +551,18 @@ class VLC:
 
     def 播放(self, 地址: str, 选项: list[str] | None = None,
             请求头: dict | None = None) -> bool:
-        """开始播放一个 URL（含网盘直链需要的请求头）。"""
+        """开始播放一个 URL（含网盘直链需要的请求头）。
+
+        ⚠️ 真起播前**一定先"停止并等待"**（不是只发一个 stop 就算了）：
+        旧的 vout 还活着就起新的，libvlc 会因为 drawable 正忙而改成
+        **自己开一个顶层窗口**放画面 —— 用户看到的就是"又多出来一个 VLC 窗口"。
+        放在这里（而不是各个调用方）是**结构性**保证：不管谁调 ``播放()``
+        （首次起播、AI 换参数重载、换片、接管、画面自愈）都不会踩这个竞态。
+        首次起播时它没有任何东西要停，几乎不花时间。
+        """
         if self._已关闭:
             return False
-        self.停止()
+        self.停止并等待(3.0)
         文本地址 = str(地址)
         # 带 scheme（http/https/rtsp/…）走 new_location；本地路径走 new_path
         有协议 = "://" in 文本地址 or 文本地址.startswith(("rtsp:", "rtmp:"))

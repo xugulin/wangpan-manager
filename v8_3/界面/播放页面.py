@@ -718,6 +718,12 @@ class 播放页面(QWidget):
     def resizeEvent(self, 事件):  # noqa: N802
         super().resizeEvent(事件)
         # 视频上方那行（工具栏）已撤销，不再需要宽度自适应
+        try:
+            宿主 = getattr(self, "_嵌入宿主", None)
+            if 宿主 is not None:
+                宿主.同步()          # 自建的视频子窗口跟着控件尺寸走
+        except Exception:  # noqa: BLE001
+            pass
 
     def 刷新网盘列表(self) -> None:
         当前 = self.网盘框.currentData()
@@ -942,6 +948,22 @@ class 播放页面(QWidget):
                 # 会段错误（实测闪退），所以一律退回无窗口模式
                 return 0
         except Exception:
+            pass
+        # ⚠️ 优先交**我们自己建的朴素 X11 子窗口**（见 v8_3/播放/嵌入窗口.py）：
+        #    把 Qt 控件的窗口号直接给 libvlc 时，只要映射没到位、或 Qt 那个窗口的
+        #    visual 不寻常（合成器/主题下常是 ARGB），VLC 的 embed 尝试就会失败，
+        #    然后**自己开一个顶层窗口**放画面（"VLC media player"，还不报错）。
+        #    自建窗口的映射与 visual 都由我们保证，这条路就走不通了。
+        try:
+            宿主 = getattr(self, "_嵌入宿主", None)
+            if 宿主 is None:
+                from ..播放.嵌入窗口 import 嵌入宿主 as _嵌入宿主
+                宿主 = _嵌入宿主(self.视频)
+                self._嵌入宿主 = 宿主
+            号 = int(宿主.句柄() or 0)
+            if 号:
+                return 号
+        except Exception:  # noqa: BLE001 - 自建失败就退回老做法
             pass
         try:
             return int(self.视频.winId())
@@ -1846,3 +1868,11 @@ class 播放页面(QWidget):
         except Exception:
             pass
         self.会话 = None
+        # 我们自己建的视频子窗口要拆掉（否则它会一直挂在屏幕上）
+        try:
+            宿主 = getattr(self, "_嵌入宿主", None)
+            if 宿主 is not None:
+                宿主.销毁()
+                self._嵌入宿主 = None
+        except Exception:  # noqa: BLE001
+            pass

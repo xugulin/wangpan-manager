@@ -183,6 +183,12 @@ class 播放器窗口(QWidget):
 
     def resizeEvent(self, 事件):  # noqa: N802
         super().resizeEvent(事件)
+        try:
+            宿主 = getattr(self, "_嵌入宿主", None)
+            if 宿主 is not None:
+                宿主.同步()
+        except Exception:  # noqa: BLE001
+            pass
         # 视频上方那行已撤销，这里不再需要工具栏宽度自适应
 
     def showEvent(self, 事件):  # noqa: N802
@@ -726,6 +732,20 @@ class 播放器窗口(QWidget):
                 # Wayland/离屏平台的 winId() 不是 X11 窗口号：交出去会直接闪退
                 return 0
         except Exception:  # noqa: BLE001
+            pass
+        # 与播放页同源：优先交**我们自己建的朴素 X11 子窗口**（见 播放/嵌入窗口.py）。
+        # 直接把 Qt 窗口号交出去时，只要它还没映射或 visual 不寻常，VLC 的 embed
+        # 尝试就会失败 → 它自己开一个顶层窗口放画面（标题 "VLC media player"）。
+        try:
+            宿主 = getattr(self, "_嵌入宿主", None)
+            if 宿主 is None:
+                from ..播放.嵌入窗口 import 嵌入宿主 as _嵌入宿主
+                宿主 = _嵌入宿主(self.视频)
+                self._嵌入宿主 = 宿主
+            号 = int(宿主.句柄() or 0)
+            if 号:
+                return 号
+        except Exception:  # noqa: BLE001 - 自建失败就退回老做法
             pass
         try:
             return int(self.视频.winId())
@@ -1416,6 +1436,7 @@ class 播放器窗口(QWidget):
             交接 = dict(交接 or {})
             交接.update({"类型": "独立窗口关闭", "接管": True})
             self.状态更新.emit(交接)
+            self._拆掉嵌入宿主()
             super().closeEvent(事件)
             return
         交接 = self.交接信息()
@@ -1425,4 +1446,15 @@ class 播放器窗口(QWidget):
         except Exception:  # noqa: BLE001
             pass
         self.状态更新.emit(交接 or {"类型": "独立窗口关闭"})
+        self._拆掉嵌入宿主()
         super().closeEvent(事件)
+
+    def _拆掉嵌入宿主(self) -> None:
+        """拆掉我们自己建的视频子窗口（否则它会一直挂在屏幕上）。"""
+        try:
+            宿主 = getattr(self, "_嵌入宿主", None)
+            if 宿主 is not None:
+                宿主.销毁()
+                self._嵌入宿主 = None
+        except Exception:  # noqa: BLE001
+            pass

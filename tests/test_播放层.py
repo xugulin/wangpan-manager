@@ -835,18 +835,92 @@ class 嵌入播放输出测试(unittest.TestCase):
         """先把前提钉住：4K60 的规则本来就选 gl（所以必须由起播那边拦掉）。"""
         self.assertEqual(self._会话().设置.视频输出, "gl")
 
-    def test_嵌入时剔掉gl且不动其它选项(self):
-        会话 = self._会话()
-        选项 = 会话._去掉自开窗口的输出模块(
-            [":network-caching=8000", ":vout=gl", ":avcodec-hw=vaapi"], 12345)
-        self.assertNotIn(":vout=gl", 选项, "嵌入播放不能再用 gl 输出")
-        self.assertIn(":network-caching=8000", 选项)
-        self.assertIn(":avcodec-hw=vaapi", 选项, "硬解等其它选项不许被牵连")
+    def test_嵌入时实例级钉死xcb_x11(self):
+        """**根因回归**：视频输出必须钉在 **libvlc 实例**上（媒体级 ``:vout=`` 无效）。
 
-    def test_不嵌入时gl留着(self):
+        实测（cvlc -vvv，2026-09-21）：
+            cvlc --vout=xcb_x11 …   → using vout display module "xcb_x11" ✓
+            cvlc ":vout=xcb_x11" …  → matching "any" → using module "gl" ✗
+        以前规则给的是媒体级 ``:vout=gl``、兜底又是把它删掉 —— 全在改一个没人看的
+        选项；libvlc 自己挑到了 GL 系，硬解（VAAPI）时 GL 建不到画布就**自己开一个
+        顶层窗口**放画面。这就是用户那个 "VLC media player" 窗口的真正来路。
+        """
         会话 = self._会话()
-        选项 = 会话._去掉自开窗口的输出模块([":vout=gl"], 0)
-        self.assertIn(":vout=gl", 选项, "没有嵌入窗口时 gl 是可以用的")
+        self.assertEqual(会话._想要的实例输出(12345), "xcb_x11",
+                         "有嵌入窗口时必须钉死能嵌进去的输出")
+        self.assertEqual(会话._想要的实例输出(0), "",
+                         "无窗口/独立窗口模式不钉（想看 GPU 的 GL 输出走这条）")
+
+    def test_媒体级vout一律丢掉(self):
+        """媒体级 vout 不生效，留着只会误导（规则/AI 都可能给）。"""
+        会话 = self._会话()
+        for 选项 in ([":vout=gl", ":network-caching=8000", ":avcodec-hw=vaapi"],
+                   ["--vout=glx", ":network-caching=2000"],
+                   [":vout=xcb_xv"]):
+            留 = 会话._嵌入播放选项(选项, 12345)
+            self.assertEqual([x for x in 留 if "vout" in x], [],
+                             f"{选项} 里的 vout 是媒体级，必须丢掉")
+        self.assertIn(":avcodec-hw=vaapi", 会话._嵌入播放选项(
+            [":network-caching=8000", ":avcodec-hw=vaapi"], 1),
+            "硬解等其它选项不许被牵连")
+
+    def test_嵌入输出可以按需覆盖或关掉(self):
+        """V8_3_嵌入视频输出 与阶梯覆盖：都能改"钉哪个"，auto/空 = 不钉。"""
+        from unittest import mock
+        from v8_3.播放 import 显示环境
+        会话 = self._会话()
+        with mock.patch.dict("os.environ", {"V8_3_嵌入视频输出": "xcb_xv"}):
+            self.assertEqual(显示环境.嵌入视频输出(), "xcb_xv")
+            self.assertEqual(会话._想要的实例输出(7), "xcb_xv")
+        with mock.patch.dict("os.environ", {"V8_3_嵌入视频输出": "auto"}):
+            self.assertEqual(显示环境.嵌入视频输出(), "")
+            self.assertEqual(会话._想要的实例输出(7), "")
+        会话.设置嵌入输出覆盖("xcb_xv")          # 回退阶梯用
+        self.assertEqual(会话._想要的实例输出(7), "xcb_xv")
+        会话.设置嵌入输出覆盖("auto")
+        self.assertEqual(会话._想要的实例输出(7), "")
+
+    def test_独立窗口模式不钉输出(self):
+        会话 = self._会话()
+        self.assertEqual(会话._想要的实例输出(0), "",
+                         "没有嵌入窗口时不钉 —— 独立窗口就是要让 VLC 自己开窗口")
+
+    def test_起播时总是先停止并等待(self):
+        """**根因回归**：以前只在"句柄变了"时才等 —— 重播（句柄没变）会踩竞态。
+
+        旧 vout 没释放就起新的，新的那个会因为 drawable 正忙而自己开窗口
+        （用户看到的"又多一个 VLC 窗口"）。现在不管句柄变没变都先真的停住。
+        """
+        from unittest import mock
+        会话 = self._会话()
+        假 = mock.MagicMock()
+        假.窗口句柄 = 12345          # 句柄**没变**（重播/AI 换参数重载的典型情况）
+        假.实例视频输出 = "xcb_x11"   # 与"想要"一致 → 不重建实例
+        假.播放.return_value = True
+        假.取音量.return_value = 100
+        会话.播放器 = 假
+        会话.直链信息 = {"url": "http://例子.invalid/x.mp4", "headers": {}}
+        with mock.patch.object(会话, "_日志", lambda *a, **k: None):
+            会话.起播(12345)
+        假.停止并等待.assert_called_once()
+        self.assertEqual(假.绑定窗口.call_args[0][0], 12345)
+
+    def test_换了嵌入模式会重建实例(self):
+        """视频输出是实例级选项：从"独立窗口"切回"嵌入"必须重建 libvlc 实例。"""
+        from unittest import mock
+        会话 = self._会话()
+        旧实例 = mock.MagicMock()
+        旧实例.实例视频输出 = ""          # 独立窗口模式建的（没钉）
+        旧实例.窗口句柄 = 0
+        会话.播放器 = 旧实例
+        会话.直链信息 = {"url": "http://例子.invalid/x.mp4", "headers": {}}
+        with mock.patch.object(会话, "_日志", lambda *a, **k: None), \
+             mock.patch("v8_3.播放.播放核心.VLC") as 新VLC:
+            新VLC.return_value.播放.return_value = True
+            新VLC.return_value.取音量.return_value = 100
+            会话.起播(999)                 # 这次要嵌进窗口
+        旧实例.关闭.assert_called_once()
+        self.assertEqual(新VLC.call_args.kwargs.get("实例视频输出"), "xcb_x11")
 
     def test_应用新参数能把视频输出清空(self):
         """回归：以前重载时 ``视频输出=""`` 被当"没给"过滤掉，等于没改回默认输出。"""
@@ -856,7 +930,11 @@ class 嵌入播放输出测试(unittest.TestCase):
                          "清空视频输出必须真的生效（否则兜底重载还是 gl）")
 
     def test_安全回退按阶梯走且不无限重载(self):
-        """回退是**阶梯**（先去 gl 输出 → 再关 GPU 解码），走完就停，不无限重载。"""
+        """回退是**阶梯**（先关 GPU 解码 → 再换 XVideo 输出），走完就停，不无限重载。
+
+        顺序是按**病因**排的：硬解（VAAPI 要用 GL 系输出）才是"自己开窗口"的诱因，
+        所以第一级就是关硬解，而不是先动输出模块。
+        """
         会话 = self._会话()
         会话.播放器 = _假播放器()
         次数: list = []
@@ -865,13 +943,150 @@ class 嵌入播放输出测试(unittest.TestCase):
         self.assertTrue(会话.安全回退画面("VLC media player"))     # 第 2 级
         self.assertFalse(会话.安全回退画面("VLC media player"))    # 阶梯走完
         self.assertEqual(len(次数), len(会话.画面回退阶梯))
-        self.assertEqual(次数[0].get("视频输出"), "")
-        self.assertEqual(次数[1].get("硬解"), "none")
+        self.assertEqual(次数[0].get("硬解"), "none",
+                         "第一级必须是关硬解（GPU 解码路径才是会自己开窗口的那个）")
+        self.assertEqual(会话._想要的实例输出(1), "xcb_xv",
+                         "第二级要换掉**实例级**输出（媒体级 vout 不生效）")
 
     def test_没有播放器时不回退(self):
         会话 = self._会话()
         会话.播放器 = None
         self.assertFalse(会话.安全回退画面())
+
+
+class 嵌入宿主测试(unittest.TestCase):
+    """画面要交给**我们自己建的朴素 X11 子窗口**（不是 Qt 控件的窗口）。
+
+    用户反馈过三次"多出一个 VLC media player 窗口"。三轮才挖到的病根：
+
+    * libvlc 嵌入只有 ``set_xwindow(窗口号)`` 一条路，给了句柄后它会找
+      "embed-xid,any" 的 **vout window** 模块 —— 优先嵌进我们给的窗口，
+      **尝试失败就退到 "any"（自己开一个顶层窗口），而且不报错**；
+    * 那个"尝试"失败的常见原因：窗口还没真的映射（Qt 说可见 ≠ X 已 map）、
+      或者 Qt 的那个窗口 visual 不寻常（合成器/主题下常是 ARGB/depth 32）；
+    * 我们自己建一个 24 位 TrueColor 的朴素子窗口、自己 map 并等到 ``IsViewable``
+      再交出去，VLC 的 embed 就几乎不可能失败 → ``,any`` 那条自开窗口的路走不到。
+
+    真机/真 X11 实测（Xvfb）：交 Qt 窗口 → 落到 "any" 自开窗口；
+    交自建子窗口 → 3/3 嵌住、缩放后也不游离。
+    """
+
+    def test_没有DISPLAY时不硬来(self):
+        """没有 X11 时：不建窗口、不报错，老实退回（交给调用方决定用不用 winId）。"""
+        from unittest import mock
+        from v8_3.播放 import 嵌入窗口
+        with mock.patch.dict("os.environ", {"DISPLAY": ""}, clear=False):
+            with mock.patch.object(嵌入窗口, "_库", None), \
+                 mock.patch.object(嵌入窗口, "_加载错误", ""), \
+                 mock.patch.object(嵌入窗口, "_显示", None):
+                self.assertFalse(嵌入窗口.可以自建())
+                self.assertTrue(嵌入窗口.不可用原因())
+                self.assertEqual(嵌入窗口.建子窗口(12345), 0)
+
+    def test_自建失败时退回控件窗口(self):
+        from unittest import mock
+        from v8_3.播放.嵌入窗口 import 嵌入宿主
+        class 假控件:
+            def winId(self):            # noqa: N802
+                return 4242
+            def width(self): return 100
+            def height(self): return 50
+            def devicePixelRatio(self): return 1.0
+            def installEventFilter(self, _f): pass
+        宿主 = 嵌入宿主(假控件())
+        with mock.patch("v8_3.播放.嵌入窗口.可以自建", lambda: True), \
+             mock.patch("v8_3.播放.嵌入窗口.建子窗口", lambda *a, **k: 0):
+            self.assertEqual(宿主.句柄(), 4242, "自建失败必须退回控件自己的窗口号")
+        with mock.patch("v8_3.播放.嵌入窗口.可以自建", lambda: True), \
+             mock.patch("v8_3.播放.嵌入窗口.建子窗口", lambda *a, **k: 777):
+            self.assertEqual(宿主.句柄(), 777, "建成了就用自建窗口号")
+            self.assertEqual(宿主.句柄(), 777, "第二次拿句柄不该重复建窗口")
+
+    def test_销毁会清掉窗口号(self):
+        from unittest import mock
+        from v8_3.播放.嵌入窗口 import 嵌入宿主
+        class 假控件:
+            def winId(self): return 1
+            def width(self): return 10
+            def height(self): return 10
+            def devicePixelRatio(self): return 1.0
+            def installEventFilter(self, _f): pass
+        次数 = []
+        宿主 = 嵌入宿主(假控件())
+        with mock.patch("v8_3.播放.嵌入窗口.可以自建", lambda: True), \
+             mock.patch("v8_3.播放.嵌入窗口.建子窗口", lambda *a, **k: 555), \
+             mock.patch("v8_3.播放.嵌入窗口.销毁子窗口",
+                       lambda 号: 次数.append(号)):
+            self.assertEqual(宿主.句柄(), 555)
+            宿主.销毁()
+            self.assertEqual(次数, [555])
+            self.assertEqual(宿主.句柄(), 555, "销毁后应能重新建（句柄缓存在宿主里）")
+
+
+def _有Qt() -> bool:
+    try:
+        import PySide6.QtWidgets  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@unittest.skipUnless(_有Qt() and bool(os.environ.get("DISPLAY")),
+                     "需要真 X11 显示（Xvfb 里跑：xvfb-run -a …）")
+class 真X11嵌入不游离测试(unittest.TestCase):
+    """真 X11 上连播三次（模拟 AI 换参数重载）都不许出现游离的 VLC 窗口。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from v8_3.播放.游离窗口 import 可用 as X可用
+        from v8_3.播放.嵌入窗口 import 可以自建
+        if not X可用():
+            raise unittest.SkipTest("没有可用的 X11")
+        if not 可以自建():
+            raise unittest.SkipTest("自建 X11 子窗口不可用")
+        import shutil, subprocess, tempfile
+        if not (shutil.which("vlc") or shutil.which("cvlc")):
+            raise unittest.SkipTest("没装 VLC")
+        if not shutil.which("ffmpeg"):
+            raise unittest.SkipTest("没有 ffmpeg")
+        cls.目录 = Path(tempfile.mkdtemp(prefix="v83嵌入_"))
+        cls.视频 = cls.目录 / "嵌入.mp4"
+        subprocess.run([shutil.which("ffmpeg"), "-y", "-loglevel", "error",
+                        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=20:duration=20",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt",
+                        "yuv420p", str(cls.视频)], capture_output=True, timeout=180)
+
+    def test_连播三次与缩放都不出现游离窗口(self):
+        import time
+        from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+        from v8_3.播放.嵌入窗口 import 嵌入宿主
+        from v8_3.播放.播放核心 import 播放会话, 播放设置
+        from v8_3.播放.游离窗口 import 找游离窗口
+        应用 = QApplication.instance() or QApplication([])
+        窗 = QWidget(); 窗.resize(640, 360)
+        区 = QWidget(); QVBoxLayout(窗).addWidget(区); 窗.show()
+        self.addCleanup(窗.close)
+        for _ in range(40):
+            应用.processEvents(); time.sleep(0.02)
+        宿主 = 嵌入宿主(区)
+        self.addCleanup(宿主.销毁)
+        self.assertNotEqual(宿主.句柄(), int(区.winId()),
+                            "必须交自建的子窗口，而不是 Qt 控件的窗口")
+        会话 = 播放会话(取适配器=lambda *_: None, 日志回调=None,
+                    探测直链开关=False, 探测媒体开关=False)
+        会话.直链信息 = {"url": str(self.视频), "headers": {}}
+        for 轮 in range(3):
+            会话.设置 = 播放设置(网络缓存毫秒=800 + 轮 * 300, 硬解="auto")
+            self.assertTrue(会话.起播(宿主.句柄()), "起播应成功")
+            for _ in range(15):
+                应用.processEvents(); time.sleep(0.1)
+            游离 = 找游离窗口(排除窗口号=宿主.句柄())
+            self.assertFalse(游离, f"第 {轮 + 1} 次起播出现游离窗口：{游离}")
+        区.resize(420, 240); 宿主.同步()
+        for _ in range(15):
+            应用.processEvents(); time.sleep(0.1)
+        self.assertFalse(找游离窗口(排除窗口号=宿主.句柄()), "缩放后出现游离窗口")
+        会话.关闭()
 
 
 class 守护不再破坏性处理测试(unittest.TestCase):

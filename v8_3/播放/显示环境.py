@@ -25,7 +25,42 @@ import os
 from typing import Optional
 
 __all__ = ["可嵌入窗口", "准备嵌入显示", "显示说明", "禁用强制X11",
-           "允许VLC自带窗口", "是桌面平台", "无窗口原因"]
+           "允许VLC自带窗口", "是桌面平台", "无窗口原因",
+           "嵌入视频输出", "嵌入视频输出默认"]
+
+#: 嵌入播放时**钉死**的视频输出模块（X11）。
+#:
+#: 为什么必须钉（用户反馈三次的"多出 VLC media player 窗口"的根因）：
+#: ``libvlc_media_player_set_xwindow`` 只是"告诉" VLC 一个 drawable，**能不能画进去
+#: 由视频输出模块自己决定**。而 VLC 在"开了硬解 + X11"时会优先挑 GL 系输出
+#: （``gl`` / ``glx`` / ``egl_x11`` 以及 VAAPI 互操作转换器 ``glconv_vaapi_x11``）——
+#: 这些输出要自己建 GLX/EGL 画布，建不到（visual 不兼容、窗口没上屏、DRI3 不可用、
+#: 没有 GPU 直通……）就**退化成自己开一个顶层窗口**，标题正是 "VLC media player"。
+#:
+#: 实测证据（用户截图里的 AI 面板）：附加选项是
+#: ``:network-caching=5000 :clock-jitter=0 :clock-synchro=0 :avcodec-hw=vaapi``
+#: ——**里面根本没有 :vout**，说明输出模块是 libvlc 自己挑的；而它挑的正是 GL 系。
+#: 我们以前只做"不主动要求 gl"，那挡不住 libvlc 自己挑 gl。
+#:
+#: ``xcb_x11`` 是 VLC 在 X11 上"一定画进给定窗口"的那个输出（``--drawable`` 走它）；
+#: ``xcb_xv`` 是另一种（XVideo 覆盖层），留作回退阶梯的第二级。
+嵌入视频输出默认 = "xcb_x11"
+
+
+def 嵌入视频输出() -> str:
+    """嵌入播放时要钉死的视频输出模块；返回空串 = 不钉（让 libvlc 自己挑）。
+
+    可用 ``V8_3_嵌入视频输出`` 覆盖（设成空串/"auto"/"default" 就是不钉）。
+    想看 GPU 的 GL 输出（4K60 省 CPU）请用播放页的「独立窗口」模式：
+    那条路句柄是 0/独立窗口，本来就不钉。
+    """
+    值 = os.environ.get("V8_3_嵌入视频输出")
+    if 值 is None:
+        return 嵌入视频输出默认
+    值 = str(值).strip()
+    if 值.lower() in ("", "auto", "default", "none", "0"):
+        return ""
+    return 值
 
 #: 这些 Qt 平台插件下 ``winId()`` **不是** X11 窗口号，不能交给 libvlc
 不可嵌入平台 = ("wayland", "wayland-egl", "wayland-brcm", "offscreen",
