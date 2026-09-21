@@ -155,16 +155,26 @@ jobs:
             $out = & cmd.exe /c "创建桌面图标.bat" 2>&1 | Out-String
             Write-Host $out
             if ($out -match '不是内部或外部命令|is not recognized') { throw "终端里出现乱码/非法命令（历史 bug 复现）" }
-            $lnk = Get-ChildItem -Path $desktop -Filter '*.lnk' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $lnk) { throw "桌面没有生成快捷方式" }
-            Write-Host "生成：$($lnk.Name)"
-            $sh = New-Object -ComObject WScript.Shell
-            $sc = $sh.CreateShortcut($lnk.FullName)
-            Write-Host "目标：$($sc.TargetPath)"
-            Write-Host "工作目录：$($sc.WorkingDirectory)"
-            if (-not (Test-Path -LiteralPath $sc.TargetPath)) { throw "快捷方式指向的目标不存在：$($sc.TargetPath)" }
-            if ($lnk.BaseName -notmatch '[\u4e00-\u9fa5]') { throw "快捷方式名字没有中文（期望『网盘管理』）：$($lnk.BaseName)" }
-            Write-Host "快捷方式名字与目标都正确"
+            # ⚠️ 只认「网盘管理.lnk」，而且**必须用原生 Unicode 接口（IShellLinkW）读目标**：
+            #    `WScript.Shell.CreateShortcut(...).TargetPath` 跟写入一样按系统 ANSI 代码页
+            #    处理路径，英文版 Windows 上读中文目标返回空串 —— 拿它校验会把**好的**
+            #    快捷方式误判成"目标不存在"（2026-09-21 就是这样误报了一轮）。
+            #    包里自带的「建快捷方式_兜底.ps1 -Read」就是同一套 IShellLinkW。
+            $lnk = Join-Path $desktop '网盘管理.lnk'
+            if (-not (Test-Path -LiteralPath $lnk)) {
+              Write-Host "桌面上的东西："
+              Get-ChildItem -Path $desktop | Select-Object Name | Format-Table -AutoSize
+              throw "桌面没有生成 网盘管理.lnk"
+            }
+            $helper = Join-Path $app '建快捷方式_兜底.ps1'
+            if (-not (Test-Path -LiteralPath $helper)) { throw "包里缺少 建快捷方式_兜底.ps1" }
+            $读 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $helper -Read $lnk 2>&1 | Out-String
+            Write-Host "IShellLinkW 读回：$($读.Trim())"
+            if ($读 -notmatch '\[OK\] target=') { throw "快捷方式里读不到目标（空壳 .lnk）" }
+            $目标 = ($读 -replace '(?s).*\[OK\] target=', '').Trim()
+            if (-not (Test-Path -LiteralPath $目标)) { throw "快捷方式指向的目标不存在：$目标" }
+            if ($目标 -notmatch '启动') { throw "快捷方式目标不像启动器：$目标" }
+            Write-Host "快捷方式名字与目标都正确：$目标"
           } finally { Pop-Location }
 
       - name: 启动程序并抓日志
