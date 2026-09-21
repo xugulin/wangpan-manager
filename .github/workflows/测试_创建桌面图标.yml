@@ -1,0 +1,125 @@
+name: 测试 创建桌面图标（Windows 真机）
+
+# ============================================================================
+# 干什么：在真 Windows（windows-latest）上跑「创建桌面图标.bat / .vbs」，并诊断
+# 快捷方式到底为什么建不出来。
+#
+# 为什么单独一个工作流：
+#   「测试 Windows 发布包」要先把 466 MB 的包下下来才能测这一件事，一轮好几分钟；
+#   而这个脚本改一行就要验一次，所以单独做一个**只 checkout 源码**的快工作流。
+#
+# 背景（真机实测）：在 windows-latest 上跑包里的 创建桌面图标.bat，
+#   VBS 走到的是**兜底分支** —— `[OK] desktop copy created: ...\????.exe`，
+#   也就是 WScript.Shell.CreateShortcut(...).Save 失败了（桌面没有 .lnk）。
+#   同一个脚本在 Wine 里是成功的，所以必须拿真机诊断：是中文名的问题，
+#   还是这个会话里根本没有 shell（非交互 runner）。
+#
+# 触发：Actions → 测试 创建桌面图标（Windows 真机）→ Run workflow。
+# ============================================================================
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '构建/包内容/创建桌面图标.vbs'
+      - '构建/包内容/创建桌面图标.bat'
+      - '构建/包内容/启动.bat'
+      - '.github/workflows/测试_创建桌面图标.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  shortcut:
+    name: 在中英文混合路径下建桌面快捷方式
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: 取源码
+        uses: actions/checkout@v4
+
+      - name: 准备"中文 + 空格"路径
+        shell: pwsh
+        run: |
+          $dir = 'D:\a\_temp\中文 路径 测试\网盘管理-V1.0.7-Windows'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item '构建\包内容\创建桌面图标.vbs' $dir -Force
+          Copy-Item '构建\包内容\创建桌面图标.bat' $dir -Force
+          Copy-Item '构建\包内容\启动.bat' $dir -Force
+          Remove-Item "$env:USERPROFILE\Desktop\*.lnk" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$env:USERPROFILE\Desktop\*.exe" -Force -ErrorAction SilentlyContinue
+          Write-Host "目录内容："
+          Get-ChildItem $dir | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: 诊断：WScript.Shell 建快捷方式（ASCII 名 vs 中文名）
+        shell: pwsh
+        run: |
+          $diag = @'
+          Option Explicit
+          Dim shell, fso, desktop, name, lnk, i
+          Set shell = CreateObject("WScript.Shell")
+          Set fso = CreateObject("Scripting.FileSystemObject")
+          desktop = shell.SpecialFolders("Desktop")
+          WScript.Echo "desktop      = [" & desktop & "]"
+          WScript.Echo "desktopExists= " & fso.FolderExists(desktop)
+          WScript.Echo "userProfile  = [" & shell.ExpandEnvironmentStrings("%USERPROFILE%") & "]"
+          WScript.Echo "arg          = [" & WScript.Arguments(0) & "]"
+          For i = 0 To 1
+            If i = 0 Then
+              name = "AsciiTestName"
+            Else
+              name = WScript.Arguments(0)
+            End If
+            On Error Resume Next
+            Err.Clear
+            Set lnk = shell.CreateShortcut(fso.BuildPath(desktop, name & ".lnk"))
+            If Err.Number <> 0 Then
+              WScript.Echo "[CreateShortcut 失败] " & name & " -> " & Err.Number & " : " & Err.Description
+            Else
+              lnk.TargetPath = "C:\Windows\System32\notepad.exe"
+              lnk.Save
+              If Err.Number <> 0 Then
+                WScript.Echo "[Save 失败] " & name & " -> " & Err.Number & " : " & Err.Description
+              Else
+                WScript.Echo "[OK] " & name & " -> " & fso.BuildPath(desktop, name & ".lnk")
+              End If
+            End If
+            On Error GoTo 0
+          Next
+          '@
+          Set-Content -LiteralPath 'D:\a\_temp\diag.vbs' -Value $diag -Encoding Default
+          Write-Host "== cscript 诊断（ASCII 名 / 中文名各试一次）=="
+          & cscript.exe //nologo 'D:\a\_temp\diag.vbs' '网盘管理'
+          Write-Host "exit=$LASTEXITCODE"
+
+      - name: 跑包里的 创建桌面图标.bat（中文 + 空格路径）
+        shell: pwsh
+        run: |
+          $dir = 'D:\a\_temp\中文 路径 测试\网盘管理-V1.0.7-Windows'
+          Push-Location $dir
+          Write-Host "== 运行 创建桌面图标.bat =="
+          $out = & cmd.exe /c "创建桌面图标.bat" 2>&1 | Out-String
+          Write-Host $out
+          Pop-Location
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          Write-Host "桌面（$desktop）内容："
+          Get-ChildItem $desktop | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: 汇总（有没有生成 .lnk、名字对不对）
+        shell: pwsh
+        run: |
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          $lnk = Get-ChildItem $desktop -Filter '*.lnk' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $lnk) {
+            Write-Host "::error::桌面没有 .lnk（快捷方式没建出来，只做了复制兜底）"
+            exit 1
+          }
+          Write-Host "生成：$($lnk.Name)"
+          $sh = New-Object -ComObject WScript.Shell
+          $sc = $sh.CreateShortcut($lnk.FullName)
+          Write-Host "目标：$($sc.TargetPath)"
+          if ($lnk.BaseName -ne '网盘管理') {
+            Write-Host "::error::快捷方式名字不对（期望 网盘管理，实际 $($lnk.BaseName)）"
+            exit 1
+          }
+          Write-Host "✅ 快捷方式名与目标都正确"
