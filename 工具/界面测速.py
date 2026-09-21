@@ -23,7 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication, QWidget     # noqa: E402
 
-应用 = QApplication([])
+# ⚠️ 必须跟真实启动一样过一遍 _调优应用（关可访问性桥 / Windows 用 Fusion 基样式 /
+#    显式字体族 / 高DPI 策略）—— 以前这里直接 QApplication([])，量的是**没调优**的版本，
+#    真机 CI 上因此一直量到"建主窗口 54 秒"这种数字，跟用户实际跑的不是一回事。
+from v8_3.界面.主窗口 import _调优应用     # noqa: E402
+应用 = _调优应用(QApplication([]))
 
 
 def 泵(秒: float = 0.02) -> None:
