@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from .后台线程 import 账号状态线程, 文件操作线程
+from .定时 import 安全单发
 
 #: 方式键 → (按钮文字, 图标)
 方式标题 = {
@@ -694,7 +695,7 @@ class 登录对话框(QDialog):
             self.主窗口.刷新网盘状态(self.标识)
         except Exception:
             pass
-        self.关闭计时 = QTimer.singleShot(1500, self.accept)
+        self.关闭计时 = 安全单发(self, 1500, self.accept)
 
     def _打开原GUI(self):
         规格 = self.动作.规格(self.标识)
@@ -978,7 +979,7 @@ class 登录对话框(QDialog):
         self.发送验证码按钮.setEnabled(False)
         self.发送验证码按钮.setText(f"⏳ {self._短信倒计时}s")
         self._短信倒计时 -= 1
-        QTimer.singleShot(1000, self._滴答倒计时)
+        安全单发(self, 1000, self._滴答倒计时)
 
     def _发送失败(self, 错误):
         self.发送验证码按钮.setEnabled(True)

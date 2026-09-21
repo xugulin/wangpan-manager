@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 from .浏览器引擎 import 浏览器引擎, 规范cookie
+from .定时 import 安全单发
 
 #: 内置浏览器的 Chromium 开关（必须在建第一个 QWebEngineView **之前**设好）
 os.environ.setdefault(
@@ -307,7 +308,7 @@ class QtWebEngine引擎(浏览器引擎):
             self._页面.runJavaScript(脚本, 收到)
         except Exception:
             return None
-        QTimer.singleShot(2500, 循环.quit)      # 兜底：最多等 2.5 秒
+        安全单发(循环, 2500, 循环.quit)      # 兜底：最多等 2.5 秒
         循环.exec()
         return 结果["值"]
 

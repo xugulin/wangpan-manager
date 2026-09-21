@@ -949,7 +949,7 @@ class 播放页面(QWidget):
             # 必须先让视频容器有原生窗口，再把句柄交给 libvlc
             self.视频.show()
             self.视频.update()
-            QTimer.singleShot(0, self._起播二段)
+            安全单发(self, 0, self._起播二段)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "播放失败", str(e))
 
@@ -1169,8 +1169,7 @@ class 播放页面(QWidget):
                 if 次数 <= 10:
                     self._AI写(f"[显示] 播放窗口还没在屏幕上，暂不收回（第 {次数} 次，"
                              f"0.5 秒后重试）")
-                    from PySide6.QtCore import QTimer as _T
-                    _T.singleShot(500, self._自愈画面)
+                    安全单发(self, 500, self._自愈画面)
                     return
                 self._AI写("[显示] 窗口迟迟没上屏，直接清掉游离窗口（画面改用它自己的窗口）")
         except Exception:
@@ -1217,7 +1216,7 @@ class 播放页面(QWidget):
                 self._AI写("[显示] 视频窗口 2.5 秒仍未映射，已中止起播（不是播放失败，"
                          "请把窗口拉到前台后重新点 ▶）")
                 return
-            QTimer.singleShot(90, self._起播二段)
+            安全单发(self, 90, self._起播二段)
             return
         # 句柄为 0 且是桌面平台时拦住：libvlc 会**自己开一个 VLC 窗口**放画面，
          # 那个窗口不归本程序管（实测：标题栏 "VLC media player"、比屏幕还大）。

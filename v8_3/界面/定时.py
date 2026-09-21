@@ -41,10 +41,21 @@ def 安全单发(宿主, 毫秒: int, 回调: Callable, *参数) -> QTimer | Non
     try:
         定时 = QTimer(宿主)
         定时.setSingleShot(True)
-        if 参数:
-            定时.timeout.connect(lambda: 回调(*参数))
-        else:
-            定时.timeout.connect(回调)
+
+        # ⚠️ 先**安全地**把定时器自己回收掉再执行回调：
+        #    回调里很可能把宿主窗口/页面关掉（父对象一死，这个 QTimer 就没了），
+        #    而 Qt 此刻正处在"这个定时器自己的 timerEvent"里继续往回走 ——
+        #    实测会崩在 `QTimerInfoList::activateTimers → notifyInternal2`（SEGV）。
+        #    用 deleteLater 让回收发生在事件循环的安全点上，就没有这个问题。
+        #    注意参数要**从闭包带过来**（timeout 信号不带参数，写 `回调(*_a)` 会丢参）。
+        def 到点了():
+            try:
+                定时.deleteLater()
+            except Exception:  # noqa: BLE001
+                pass
+            回调(*参数)
+
+        定时.timeout.connect(到点了)
         定时.start(max(0, int(毫秒)))
         return 定时
     except Exception:  # noqa: BLE001 - 定时只是优化，失败不该影响主流程

@@ -199,8 +199,10 @@ jobs:
           try {
             $py = Join-Path $app '运行环境\python\python.exe'
             if (-not (Test-Path -LiteralPath $py)) { $py = Join-Path $app '运行环境\venv\Scripts\python.exe' }
-            # 注意：这段**不能**依赖系统装没装 VLC —— runner 上本来就没装
-            & $py -c "import sys; sys.path.insert(0,'.'); from v8_3.播放 import vlc绑定 as m; d=m.自带库目录(); print('自带目录：', d); print('可用：', m.可用(), '| 原因：', m.不可用原因()); print('加载：', m.VLC库.取().路径 if m.可用() else '-'); sys.exit(0 if m.可用() else 1)"
+            # ⚠️ 检查脚本用**包里自带的那个文件**（工具/检查内置vlc.py，UTF-8），
+            #    不要用 python -c：Windows 的 python -c 走命令行编码（cp1252/GBK），
+            #    源码里的中文会抛 UnicodeEncodeError —— 实测把 CI 卡红过一次。
+            & $py (Join-Path $app '工具\检查内置vlc.py')
             if ($LASTEXITCODE -ne 0) { throw "内置 VLC 加载失败（播放会不可用）" }
             Write-Host "内置 VLC 可用 ✓"
           } finally { Pop-Location }

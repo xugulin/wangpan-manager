@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 from .浏览器引擎 import (
     浏览器引擎, 假引擎, 建引擎, 规范cookie, 取cookie值, 拼cookie头,
 )
+from .定时 import 安全单发
 
 #: 各网盘的入口地址与"必需 cookie"
 网盘入口 = {
@@ -230,7 +231,7 @@ class 内置浏览器登录窗口(QDialog):
         self.引擎.打开(入口)
         # 兜底：SPA 的 loadFinished 不一定按时来（实测百度网盘首页经常不触发），
         # 所以打开后 4 秒自己查一次：还在转/是白板就重载一次（只救一次）。
-        QTimer.singleShot(4000, self._四秒后看一看)
+        安全单发(self, 4000, self._四秒后看一看)
 
     def _切到短信登录(self) -> None:
         """把登录框切到「短信登录」页。
@@ -274,8 +275,8 @@ class 内置浏览器登录窗口(QDialog):
                 self.状态标签.setText("✅ 已切到「短信登录」：填手机号 → 点发送验证码 → 填验证码")
                 self._填手机号()          # 顺手帮用户把手机号填上
                 return
-            QTimer.singleShot(500, lambda: 试(剩余 - 1))
-        QTimer.singleShot(600, lambda: 试(12))
+            安全单发(self, 500, lambda: 试(剩余 - 1))
+        安全单发(self, 600, lambda: 试(12))
 
     #: 自动填手机号最多重试几次（输入框是异步渲染的，但要有个上限）
     填号重试上限 = 8
@@ -317,7 +318,7 @@ class 内置浏览器登录窗口(QDialog):
                 "：点「发送验证码」→ 收到后填验证码 → 登录")
         elif 结果 == "nofield":
             # 输入框还没渲染出来：再等一会儿重试（有次数上限）
-            QTimer.singleShot(600, lambda: self._填手机号(第几次 + 1))
+            安全单发(self, 600, lambda: self._填手机号(第几次 + 1))
 
     def _加载完(self, 好: bool) -> None:
         if not self._已回调:
@@ -426,7 +427,7 @@ class 内置浏览器登录窗口(QDialog):
         """
         if self._已回调:
             return
-        QTimer.singleShot(400, self._查凭证)
+        安全单发(self, 400, self._查凭证)
 
     def _查凭证(self) -> None:
         """看凭证够不够；够了就自动回调（用户不用手动点）。
@@ -531,7 +532,7 @@ class 内置浏览器登录窗口(QDialog):
                 self.状态标签.setText(f"⚠️ 回填凭证失败：{e}")
                 self._已回调 = False
                 return
-        QTimer.singleShot(800, self.accept)
+        安全单发(self, 800, self.accept)
 
     # ---------------- 工具 ----------------
 

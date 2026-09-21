@@ -30,6 +30,7 @@ from ..核心.模型 import 规范路径, 拼路径, 显示名
 from ..播放.媒体信息 import 视频后缀, 是视频文件
 from .后台线程 import 账号状态线程, 列目录线程, 文件操作线程
 from .跨盘直传对话框 import 跨盘直传对话框
+from .定时 import 安全单发
 
 图标映射 = {
     '.pdf': '📄', '.doc': '📄', '.docx': '📄',
@@ -509,7 +510,7 @@ class 网盘页面(QWidget):
         if not self._退出登录():
             return
         self.主窗口.追加日志(f"[{self.名称}] 已请求重新登录…")
-        QTimer.singleShot(800, self._统一登录)
+        安全单发(self, 800, self._统一登录)
 
     #: 登录后"立即列目录"允许的重试次数：桥进程里那份会话仓库要重读一次盘，
     #: 偶尔第一枪会撞上未登录（errno:-6）。重试一次即可稳定出列表，
@@ -684,7 +685,7 @@ class 网盘页面(QWidget):
             self._登录后重试剩余 = 剩余 - 1
             self.主窗口.状态消息(
                 f"[{self.名称}] {路径} 第一次没列出来（{error短(错误, 60)}），正在重试…")
-            QTimer.singleShot(600, self.加载当前目录)
+            安全单发(self, 600, self.加载当前目录)
             return
         self.主窗口.状态消息(f"[{self.名称}] 加载失败：{error短(错误)}")
         self.主窗口.追加日志(f"[{self.名称}] 列目录失败 {路径}：{错误}")

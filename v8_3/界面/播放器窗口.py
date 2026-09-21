@@ -428,7 +428,7 @@ class 播放器窗口(QWidget):
                 self._写日志("[显示] 独立窗口 2.5 秒仍未映射，已中止起播；"
                           "把窗口拉到前台后重新点 ▶")
                 return True
-            QTimer.singleShot(90, self.起播)
+            安全单发(self, 90, self.起播)
             return True
         句柄 = self._安全句柄()
         if 句柄 == 0 and 是桌面平台() and not self._允许自带窗口:
@@ -870,7 +870,7 @@ class 播放器窗口(QWidget):
         if not self._已映射():
             self._等待映射中 = True
             self.状态标签.setText("⏳ 等待窗口就绪…")
-            QTimer.singleShot(90, self.接管播放)
+            安全单发(self, 90, self.接管播放)
             return True          # 同上：别让调用方误判成失败而关掉窗口
         句柄 = self._安全句柄()
         if 句柄 == 0 and 是桌面平台() and not self._允许自带窗口:
@@ -997,7 +997,7 @@ class 播放器窗口(QWidget):
                         self.会话.跳转(秒)
                 except Exception:  # noqa: BLE001
                     pass
-            QTimer.singleShot(900, _跳)
+            安全单发(self, 900, _跳)
             self._写日志(f"[显示] 画面已收回独立窗口（从 {位置:.0f}s 继续）")
         self.定时器.start()
 
@@ -1529,7 +1529,7 @@ class 播放器窗口(QWidget):
         self._置顶()
         self._同步视图勾选()
         # 全屏/窗口化会重建原生窗口，画面有可能又"分离"→ 稍后确认并自愈
-        QTimer.singleShot(600, self._确认画面在本窗口)
+        安全单发(self, 600, self._确认画面在本窗口)
         try:
             if self.会话 and self.会话.播放器:
                 self.会话.播放器.绑定窗口(self._安全句柄())
@@ -1712,7 +1712,7 @@ class 播放器窗口(QWidget):
         if 状态 in ("已结束", "错误") and self.清单.当前项():
             if not self._续播中:
                 self._续播中 = True
-                QTimer.singleShot(300, self._续播)
+                安全单发(self, 300, self._续播)
         elif 状态 in ("播放中", "正在播放"):
             self._续播中 = False
         # 自动调优（后台线程，别冻界面）
@@ -1735,7 +1735,7 @@ class 播放器窗口(QWidget):
         try:
             self.清单播完了()
         finally:
-            QTimer.singleShot(1500, lambda: setattr(self, "_续播中", False))
+            安全单发(self, 1500, lambda: setattr(self, "_续播中", False))
 
     def 交接信息(self) -> dict:
         """关窗前把"接着播需要的东西"打包给页面（直链有时效，别让页面重取）。
