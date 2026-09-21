@@ -338,6 +338,17 @@ class VLC库:
                                                  ctypes.c_void_p]
         L.libvlc_media_player_get_media.restype = ctypes.c_void_p
         L.libvlc_media_player_get_media.argtypes = [ctypes.c_void_p]
+        #: Windows 的"把画面挂到哪个窗口"是**另一个 API**：``set_hwnd``。
+        #: X11 用 ``set_xwindow``（drawable-xid）；Windows 的 vout 只认
+        #: ``drawable-hwnd``——只调 set_xwindow 的话它看不到窗口，于是
+        #: ``Win32VoutCreateWindow`` 自己开一个顶层窗口（真机 CI 日志实测）。
+        #: Linux 的 libvlc 通常没有这个符号，取不到就算了。
+        try:
+            L.libvlc_media_player_set_hwnd.restype = None
+            L.libvlc_media_player_set_hwnd.argtypes = [ctypes.c_void_p,
+                                                       ctypes.c_void_p]
+        except Exception:  # noqa: BLE001
+            pass
         L.libvlc_media_player_set_xwindow.argtypes = [ctypes.c_void_p,
                                                    ctypes.c_uint32]
         L.libvlc_media_player_play.restype = ctypes.c_int
@@ -545,7 +556,9 @@ class VLC:
         实例视频输出 = str(实例视频输出 or "").strip()
         if 实例视频输出:
             参数.append(f"--vout={实例视频输出}")
-        # ⚠️ 嵌入**只有一条路**：``libvlc_media_player_set_xwindow(窗口号)``。
+        # ⚠️ 嵌入的 API **分平台**：X11 用 ``set_xwindow``，Windows 用 ``set_hwnd``
+        #    （Windows 上只调 set_xwindow 会让 VLC 自己开窗口 —— 真机 CI 实测）。
+        #    下面这张表是 X11 上的实测矩阵：
         #    真机矩阵实测（用户这台机器，光鸭 4K60 HEVC 直链 + vaapi，2026-09-21）：
         #
         #    ==================================================  ==================  ========
@@ -609,10 +622,29 @@ class VLC:
                      "建议重新起播（会自动重建实例）")
         self.窗口句柄 = 句柄
         if self.窗口句柄 and self._播放器:
-            # VLC 3.x：X11 用 set_xwindow；失败也不致命（可能还没起 vout）
+            # ⚠️ 两个平台是**两个不同的 API**（真机 CI 抓出来的）：
+            #
+            #   * **X11**：``libvlc_media_player_set_xwindow(window_id)``
+            #     → VLC 打印 ``looking for vout window module matching "embed-xid,any"`` ✓
+            #   * **Windows**：必须用 ``libvlc_media_player_set_hwnd(hwnd)``。
+            #     只调 set_xwindow 的话 Windows 的 vout 看不到窗口（那是 drawable-xid，
+            #     它只认 drawable-hwnd），于是 ``Win32VoutCreateWindow`` **自己开一个
+            #     顶层窗口** —— 用户看到的"视频游离在 GUI 之外"就是这个。
+            #     CI 日志原文：``using vout display module "direct3d11"`` +
+            #     ``Win32VoutCreateWindow`` + 多出一个 "VLC (Direct3D11 output)" 窗口。
             try:
-                self._lib.libvlc_media_player_set_xwindow(self._播放器,
-                                                       self.窗口句柄)
+                用户 = getattr(self._lib, "libvlc_media_player_set_hwnd", None)
+                if os.name == "nt" and 用户 is not None:
+                    用户(self._播放器, ctypes.c_void_p(self.窗口句柄))
+                    # 双保险：Windows 也把 drawable-hwnd 告诉实例（某些版本只认这个）
+                    try:
+                        self._lib.libvlc_media_player_set_xwindow(
+                            self._播放器, self.窗口句柄)
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    self._lib.libvlc_media_player_set_xwindow(self._播放器,
+                                                           self.窗口句柄)
             except Exception as e:  # pragma: no cover
                 self._日志(f"[播放] 绑定窗口失败：{e}")
 

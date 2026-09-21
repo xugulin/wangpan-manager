@@ -28,6 +28,7 @@ libvlc 的**绝大多数选项只能在起播前生效**（网络缓存、硬解
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -902,6 +903,19 @@ class 播放会话:
         {"嵌入输出": "xcb_xv", "理由": "已换成 XVideo 输出（另一种能嵌进别人窗口的输出）"},
     )
 
+    @classmethod
+    def _本次回退阶梯(cls) -> tuple[dict, ...]:
+        """按平台挑回退阶梯。
+
+        Windows 上第二级（换成 ``xcb_xv``）**没有意义** —— VLC 在 Windows 上根本
+        没有这个模块，换过去只会"找不到输出"（真机 CI 日志里就是
+        ``no vout display modules matched``）。所以 Windows 只保留"改用软件解码"这一级；
+        真正把画面收回来的手段是重新 ``set_hwnd`` 绑窗口（见 播放出口.交接）。
+        """
+        if os.name == "nt":
+            return (cls.画面回退阶梯[0],)
+        return cls.画面回退阶梯
+
     def 安全回退画面(self, 标题: str = "", 尺寸: str = "") -> bool:
         """画面跑到 libvlc 自己开的窗口里时，按阶梯**换配置重载**。
 
@@ -910,11 +924,12 @@ class 播放会话:
         """
         if self.播放器 is None:
             return False
+        阶梯 = self._本次回退阶梯()
         级 = int(getattr(self, "_画面回退级", 0))
-        if 级 >= len(self.画面回退阶梯):
+        if 级 >= len(阶梯):
             return False
         self._画面回退级 = 级 + 1
-        参数 = dict(self.画面回退阶梯[级])
+        参数 = dict(阶梯[级])
         换输出 = str(参数.pop("嵌入输出", "") or "")
         if 换输出:
             try:
@@ -924,7 +939,7 @@ class 播放会话:
         参数["来源"] = "规则"
         尾巴 = f"（{标题}｜{尺寸}）" if 标题 else ""
         self._日志(f"[显示] ⚠️ 发现画面在 libvlc 自己开的窗口里{尾巴}，"
-                 f"{参数.get('理由')}并重载（第 {级 + 1}/{len(self.画面回退阶梯)} 级，"
+                 f"{参数.get('理由')}并重载（第 {级 + 1}/{len(阶梯)} 级，"
                  f"从当前位置继续）")
         try:
             # ⚠️ 这段跑在"画面自检"后台线程里：重载必须交给界面线程做

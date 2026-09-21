@@ -1310,3 +1310,57 @@ class 视频输出钉法平台测试(unittest.TestCase):
              mock.patch("os.name", "nt"):
             self.assertEqual(会话._想要的实例输出(12345), "",
                              "Windows 上不要给 libvlc 实例钉输出模块")
+
+
+class 平台窗口绑定API测试(unittest.TestCase):
+    """真机 CI 抓到的病根：Windows 上 VLC 只调 ``set_xwindow`` 是**看不到窗口**的
+    （那是 drawable-xid，Windows 的 vout 只认 drawable-hwnd），于是它
+    ``Win32VoutCreateWindow`` 自己开一个顶层窗口 —— 用户看到的"视频游离在 GUI 之外"。
+    Windows 必须走 ``libvlc_media_player_set_hwnd``。
+    """
+
+    def test_windows调用set_hwnd(self):
+        from unittest import mock
+        from v8_3.播放 import vlc绑定
+        调用: list[tuple] = []
+
+        class 假库:
+            def libvlc_media_player_set_hwnd(self, 播放器, 句柄):
+                调用.append(("hwnd", 播放器, 句柄.value if hasattr(句柄, "value") else 句柄))
+
+            def libvlc_media_player_set_xwindow(self, 播放器, 句柄):
+                调用.append(("xwindow", 播放器, 句柄))
+
+        器 = vlc绑定.VLC.__new__(vlc绑定.VLC)
+        器._lib = 假库()
+        器._播放器 = 1234
+        器.窗口句柄 = 0
+        器.用实例drawable = False
+        器._日志 = lambda *_: None
+        with mock.patch.object(vlc绑定.os, "name", "nt"):
+            器.绑定窗口(4321)
+        self.assertTrue(any(方式 == "hwnd" for 方式, *_ in 调用),
+                        f"Windows 上必须调 set_hwnd（实际：{调用}）")
+        self.assertIn(("hwnd", 1234, 4321), 调用)
+
+    def test_linux仍走set_xwindow(self):
+        from unittest import mock
+        from v8_3.播放 import vlc绑定
+        调用: list[tuple] = []
+
+        class 假库:
+            def libvlc_media_player_set_hwnd(self, 播放器, 句柄):   # 存在也不该用
+                调用.append(("hwnd", 播放器, 句柄))
+
+            def libvlc_media_player_set_xwindow(self, 播放器, 句柄):
+                调用.append(("xwindow", 播放器, 句柄))
+
+        器 = vlc绑定.VLC.__new__(vlc绑定.VLC)
+        器._lib = 假库()
+        器._播放器 = 1234
+        器.窗口句柄 = 0
+        器.用实例drawable = False
+        器._日志 = lambda *_: None
+        with mock.patch.object(vlc绑定.os, "name", "posix"):
+            器.绑定窗口(4321)
+        self.assertEqual(调用, [("xwindow", 1234, 4321)])
