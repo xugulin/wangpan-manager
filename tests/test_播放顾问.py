@@ -132,11 +132,23 @@ class 顾问基类(unittest.TestCase):
     """每个用例一个独立临时目录的学习库，互不干扰、也不碰项目 数据/。"""
 
     def setUp(self):
-        self._临时 = tempfile.TemporaryDirectory(prefix="播放顾问测试_")
+        # ⚠️ ignore_cleanup_errors：Windows 上"文件还被占用"就删不掉（Linux 允许删
+        #    已打开的文件，所以这个坑只在真机 Windows 上冒出来 —— CI 里一次 69 个 ERROR：
+        #    PermissionError: [WinError 32] ... AI播放学习.db）。顾问对象是在
+        #    addCleanup 里关的，而 tearDown 比 addCleanup 先跑，所以这里必须容错。
+        self._临时 = tempfile.TemporaryDirectory(prefix="播放顾问测试_",
+                                           ignore_cleanup_errors=True)
         self.库路径 = os.path.join(self._临时.name, "AI播放学习.db")
         self.日志: list[str] = []
+        self._连接们: list[sqlite3.Connection] = []
 
     def tearDown(self):
+        # 自己开的 sqlite 连接要显式关（不然 Windows 上文件一直被占）
+        for 连接 in self._连接们:
+            try:
+                连接.close()
+            except Exception:  # noqa: BLE001
+                pass
         self._临时.cleanup()
 
     def 造顾问(self, AI助手=None, 本地模型=None, 启用AI=True) -> 播放顾问:
@@ -149,6 +161,7 @@ class 顾问基类(unittest.TestCase):
     def 连接(self) -> sqlite3.Connection:
         连接 = sqlite3.connect(self.库路径)
         连接.row_factory = sqlite3.Row
+        self._连接们.append(连接)          # tearDown 里统一关，别占着文件
         return 连接
 
 

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from pathlib import Path
+from pathlib import PurePosixPath
 
 #: 百度明确禁止的字符（服务端原文：`文件名中不能包含?|"><:*等特殊字符`）
 百度非法字符 = '\\/:*?"<>|'
@@ -71,7 +71,7 @@ def 需要规避(网盘: str, 名称: str) -> tuple[bool, str]:
     if not 名称:
         return False, ""
     # 只看文件名部分：路径里的 "/" 是目录分隔，不属于"名字非法"
-    名称 = Path(名称).name
+    名称 = PurePosixPath(名称).name      # 同 规避名称：网盘路径永远是 "/" 分隔
     限制 = 取限制(网盘)
     非法 = str(限制.get("非法字符") or "")
     if 非法 and any(ch in 非法 for ch in 名称):
@@ -94,7 +94,11 @@ def 规避名称(网盘: str, 名称: str) -> tuple[str, str]:
     if not 需要:
         return 名称, ""
     限制 = 取限制(网盘)
-    主干 = Path(名称)
+    # ⚠️ 必须用 **PurePosixPath**（网盘路径永远是 "/" 分隔），不能用 Path：
+    #    Windows 上 Path("a:b.txt") 会把 "a:" 当成盘符（name 只剩 "b.txt"）、
+    #    Path("a\b.txt") 把 "\" 当目录分隔符 —— 这两个非法字符就逃过改名了。
+    #    真机 Windows CI 实测到了（改名后名字里仍有 ":"，上传必然失败）。
+    主干 = PurePosixPath(名称)
     目录 = 名称[:len(名称) - len(主干.name)]
     基名 = 主干.name
     后缀 = 主干.suffix

@@ -145,6 +145,51 @@ try:
 except Exception as e:  # noqa: BLE001
     print("微基准失败：", e)
 
+# ⑦ 分控件类型量"建 + 首帧" —— AI 页在真 Windows 上要 24 秒（Linux 0.4 秒），
+#    而建普通 QLabel 只要 0.2ms/个，所以贵的一定是**某类控件**。逐个类型量出来。
+try:
+    from PySide6.QtWidgets import (QComboBox, QGroupBox, QLabel, QPlainTextEdit,
+                                   QPushButton, QScrollArea, QTableWidget,
+                                   QTableWidgetItem, QTextEdit, QVBoxLayout,
+                                   QWidget)
+    print("\n⑦ 分控件类型（建 + 首帧）：")
+
+    def 量控件(名: str, 造):
+        底 = QWidget()
+        布局 = QVBoxLayout(底)
+        t0 = time.time()
+        件们 = 造(布局)
+        建 = (time.time() - t0) * 1000
+        底.resize(700, 500)
+        t0 = time.time()
+        底.grab()
+        画 = (time.time() - t0) * 1000
+        底.deleteLater()
+        泵(0.05)
+        print(f"{建 + 画:9.1f} ms（建 {建:7.1f} + 首帧 {画:7.1f}）  {名}")
+
+        结果[f"控件-{名}"] = (建 + 画) / 1000.0
+
+    量控件("QLabel ×100", lambda 局: [局.addWidget(QLabel(f"标签{i}")) for i in range(100)])
+    量控件("QPushButton ×50", lambda 局: [局.addWidget(QPushButton(f"按钮{i}")) for i in range(50)])
+    量控件("QGroupBox ×20", lambda 局: [局.addWidget(QGroupBox(f"分组{i}")) for i in range(20)])
+    量控件("QScrollArea ×10", lambda 局: [局.addWidget(QScrollArea()) for i in range(10)])
+    量控件("QTextEdit ×10", lambda 局: [局.addWidget(QTextEdit()) for i in range(10)])
+    量控件("QPlainTextEdit ×10", lambda 局: [局.addWidget(QPlainTextEdit()) for i in range(10)])
+    量控件("QComboBox ×20", lambda 局: [局.addWidget(QComboBox()) for i in range(20)])
+
+    def 造表(局):
+        表 = QTableWidget(36, 6)
+        for r in range(36):
+            for c in range(6):
+                表.setItem(r, c, QTableWidgetItem(f"{r}-{c}"))
+        局.addWidget(表)
+        return [表]
+
+    量控件("QTableWidget 36×6", 造表)
+except Exception as e:  # noqa: BLE001
+    print("分类型微基准失败：", e)
+
 print("\n=== 汇总（按耗时排序）===")
 for 名, 耗 in sorted(结果.items(), key=lambda x: -x[1]):
     print(f"{耗 * 1000:9.1f} ms  {名}")
