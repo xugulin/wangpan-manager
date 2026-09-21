@@ -900,7 +900,10 @@ class 嵌入播放输出测试(unittest.TestCase):
         假.取音量.return_value = 100
         会话.播放器 = 假
         会话.直链信息 = {"url": "http://例子.invalid/x.mp4", "headers": {}}
-        with mock.patch.object(会话, "_日志", lambda *a, **k: None):
+        # 本机没装 VLC 时（CI 的 Windows runner 就没有）不该因此跳过 ——
+        # 这条测的是"起播流程先停住"，跟 libvlc 在不在无关，所以把可用性打桩。
+        with mock.patch.object(会话, "_日志", lambda *a, **k: None), \
+             mock.patch("v8_3.播放.播放核心.vlc可用", lambda: True):
             会话.起播(12345)
         假.停止并等待.assert_called_once()
         self.assertEqual(假.绑定窗口.call_args[0][0], 12345)
@@ -915,6 +918,7 @@ class 嵌入播放输出测试(unittest.TestCase):
         会话.播放器 = 旧实例
         会话.直链信息 = {"url": "http://例子.invalid/x.mp4", "headers": {}}
         with mock.patch.object(会话, "_日志", lambda *a, **k: None), \
+             mock.patch("v8_3.播放.播放核心.vlc可用", lambda: True), \
              mock.patch("v8_3.播放.播放核心.VLC") as 新VLC:
             新VLC.return_value.播放.return_value = True
             新VLC.return_value.取音量.return_value = 100
