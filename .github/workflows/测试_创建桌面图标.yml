@@ -119,20 +119,20 @@ jobs:
             exit 1
           }
           Write-Host "生成：网盘管理.lnk"
-          # ⚠️ 读目标**不能**用 WScript.Shell：它跟写入一样按系统 ANSI 代码页处理路径，
-          #    英文版 Windows 上读中文目标会返回空串（上一轮就是这么误判成"空壳"的）。
-          #    这里直接查 .lnk 文件里的 UTF-16 字符串（StringData 段就是 UTF-16 存的）。
-          $bytes = [IO.File]::ReadAllBytes($lnk)
-          $txt = [Text.Encoding]::Unicode.GetString($bytes)
-          $命中 = ([regex]::Matches($txt, '启动')).Count
-          Write-Host "UTF-16 里出现「启动」次数：$命中"
-          if ($命中 -lt 1) {
-            Write-Host "::error::.lnk 里找不到启动器路径（空壳 .lnk，双击没反应）"
+          # 校验目标：**必须用原生 Unicode 接口**（IShellLinkW）读。
+          # 用 WScript.Shell.CreateShortcut(...).TargetPath 会踩同一个 ANSI 坑 ——
+          # 它读中文目标返回空串，上一轮就是这样把**好的**快捷方式误判成"空壳"。
+          # 这里直接复用包里那个兜底脚本的 -Read 模式（同一套 IShellLinkW）。
+          $helper = '构建\包内容\建快捷方式_兜底.ps1'
+          $读 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $helper -Read $lnk 2>&1 | Out-String
+          Write-Host "IShellLinkW 读回：$($读.Trim())"
+          if ($读 -notmatch '\[OK\] target=') {
+            Write-Host "::error::.lnk 里读不到目标（空壳 .lnk，双击没反应）"
             exit 1
           }
-          if ($txt -notmatch 'bat|exe|py') {
-            Write-Host "::error::.lnk 里看不到可执行目标"
+          if ($读 -notmatch '启动') {
+            Write-Host "::error::快捷方式目标不是启动器：$读"
             exit 1
           }
-          Write-Host "参考：WScript.Shell 读到的目标 = [$((New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath)]（ANSI 限制，可能是空）"
+          Write-Host "参考（ANSI 读法，可能是空，正常）：[$((New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath)]"
           Write-Host "✅ 快捷方式名与目标都正确"

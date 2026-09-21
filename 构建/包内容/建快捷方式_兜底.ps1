@@ -21,29 +21,43 @@
 #       第 3 行 = 工作目录（包目录）
 # 输出：stdout 一行 `[OK] ...` 或 `[!] ...`，退出码 0/1。
 # ============================================================================
+param(
+    # 只读模式：给一个 .lnk 的路径，把里面存的**目标**打印出来（校验用）。
+    # 为什么需要它：`WScript.Shell.CreateShortcut(...).TargetPath` 跟写入一样按系统
+    # ANSI 代码页处理路径，英文版 Windows 上读中文目标会返回空串 —— 拿它校验会把
+    # **好的**快捷方式误判成空壳。这里用同一套 IShellLinkW（原生 Unicode）读。
+    [string]$Read = ''
+)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $cfg = Join-Path $env:TEMP 'wangpan-shortcut.txt'
-if (-not (Test-Path -LiteralPath $cfg)) {
-    Write-Output '[!] missing config file'
-    exit 1
-}
-$行 = Get-Content -LiteralPath $cfg -Encoding Unicode
-if ($行.Count -lt 3) {
-    Write-Output '[!] config file needs 3 lines'
-    exit 1
+if (-not $Read) {
+    if (-not (Test-Path -LiteralPath $cfg)) {
+        Write-Output '[!] missing config file'
+        exit 1
+    }
+    $行 = Get-Content -LiteralPath $cfg -Encoding Unicode
+    if ($行.Count -lt 3) {
+        Write-Output '[!] config file needs 3 lines'
+        exit 1
+    }
+} else {
+    $行 = @('', '', '')
 }
 $lnkPath = $行[0].Trim()
 $target = $行[1].Trim()
 $workDir = $行[2].Trim()
-if (-not $lnkPath -or -not $target) {
-    Write-Output '[!] empty lnkPath/target'
-    exit 1
-}
-if (-not (Test-Path -LiteralPath $target)) {
-    Write-Output "[!] target not found: $target"
-    exit 1
+
+if (-not $Read) {
+    if (-not $lnkPath -or -not $target) {
+        Write-Output '[!] empty lnkPath/target'
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $target)) {
+        Write-Output "[!] target not found: $target"
+        exit 1
+    }
 }
 
 $源码 = @'
@@ -119,6 +133,19 @@ public static class WangpanLnk
 try {
     if (-not ('WangpanLnk' -as [type])) {
         Add-Type -TypeDefinition $源码 -Language CSharp | Out-Null
+    }
+    if ($Read) {
+        if (-not (Test-Path -LiteralPath $Read)) {
+            Write-Output "[!] lnk not found: $Read"
+            exit 1
+        }
+        $目标 = [WangpanLnk]::ReadTarget($Read)
+        if ($目标) {
+            Write-Output "[OK] target=$目标"
+            exit 0
+        }
+        Write-Output '[!] shortcut has no target (empty shell?)'
+        exit 1
     }
     $desktop = [Environment]::GetFolderPath('Desktop')
     $dir = Split-Path -Parent $lnkPath
