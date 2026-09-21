@@ -119,6 +119,32 @@ try:
 except Exception as e:  # noqa: BLE001
     print("工具栏测宽失败：", e)
 
+# ⑥ 微基准：建标签/填文字到底卡在哪 —— Windows 上 AI 页构造要 24 秒，刷新又 24 秒。
+#    三个对照：纯中文 / 带 emoji（Windows 要查彩色字体回退）/ 纯 ASCII，
+#    每个都量"建 200 个 + 真正布局绘制一次"的耗时。
+try:
+    from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+    print("\n⑥ 建标签 + 首帧（200 个一组）：")
+    for 名, 文本 in (("纯中文", "模型设置{}"), ("带 emoji", "🤖 模型设置{}"),
+                   ("纯 ASCII", "model-{}")):
+        底 = QWidget()
+        布局 = QVBoxLayout(底)
+        t0 = time.time()
+        标签们 = [QLabel(文本.format(i)) for i in range(200)]
+        for 标 in 标签们:
+            布局.addWidget(标)
+        建 = (time.time() - t0) * 1000
+        底.resize(600, 400)
+        t0 = time.time()
+        底.grab()                      # 触发真正的样式匹配 + 布局 + 绘制
+        画 = (time.time() - t0) * 1000
+        底.deleteLater()
+        泵(0.05)
+        print(f"{建:9.1f} ms 建 200 个 + {画:9.1f} ms 首帧    {名}")
+        结果[f"建标签-{名}"] = (建 + 画) / 1000.0
+except Exception as e:  # noqa: BLE001
+    print("微基准失败：", e)
+
 print("\n=== 汇总（按耗时排序）===")
 for 名, 耗 in sorted(结果.items(), key=lambda x: -x[1]):
     print(f"{耗 * 1000:9.1f} ms  {名}")

@@ -1195,6 +1195,21 @@ def _调优应用(应用):
     所有开关都是"失败就跳过"，不影响功能。
     """
     try:
+        # Windows：把"中文 + emoji"字体族**显式**列给 Qt。
+        # 不列的话，每个 emoji 都要走一遍"字体回退查找"（彩色字体更贵），
+        # 而本项目界面里 emoji 上千个 —— 真机 windows-latest 实测：
+        # AI 页建控件 24 秒、刷新又 24 秒（同一份代码 Linux 只要 0.4 秒）。
+        # 显式列出后 Qt 按顺序直接取字体，不再逐字符回退查询。
+        import sys as _sys
+        if _sys.platform.startswith("win"):
+            from PySide6.QtGui import QFont
+            字体 = QFont()
+            字体.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei",
+                            "Segoe UI", "Segoe UI Emoji"])
+            应用.setFont(字体)
+    except Exception:
+        pass
+    try:
         from PySide6.QtCore import Qt
         # 不要可访问性桥（Windows 上最明显的卡顿来源之一；可用环境变量强制打开）
         import os as _os

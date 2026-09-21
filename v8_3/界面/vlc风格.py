@@ -613,23 +613,33 @@ def 构建工具栏(动作表: dict, 父=None, 隐藏项=()) -> QToolBar:
                 pass
             return int(栏.sizeHint().width() or 0) <= 宽 - 4
 
-        for 模式 in 栏.模式们:
-            设置模式(模式, 宽)
-            if 装得下():
-                return 模式
-        # 连图标档都装不下（窄窗口 / Windows 字体更宽）：继续收 ——
-        # 先收音量滑条（音量还有静音键和 ↑↓ 快捷键），再按顺序收「菜单里也有」的按钮
-        设置模式("图标", 宽)
-        栏.音量滑条.setVisible(False)
-        栏.音量标签.setVisible(False)
-        if not 装得下():
+        def 逐个收起() -> bool:
+            """按顺序收起"菜单里也有"的入口，收一个看一次；装得下就 True。"""
             for 键 in 可收起顺序:
                 动作 = 栏.动作索引.get(键)
                 if 动作 is not None:
                     动作.setVisible(False)
                 if 装得下():
-                    break
-        return "图标"
+                    return True
+            return 装得下()
+
+        # 逐档试：**装不下先收次要入口，而不是急着掉档** ——
+        # Windows 上中文字体 + emoji 更宽（完整档要 1704px、精简档 1463px），
+        # 而用户要的是"速度和面板必须有文字"，所以宁可不显示"循环/随机/上一个/下一个"
+        # （它们右键菜单里都有），也要把文字档位保住。
+        for 模式 in 栏.模式们:
+            设置模式(模式, 宽)
+            if 装得下():
+                return 模式
+            if 模式 == "图标":
+                # 图标档再收：先收音量滑条（音量还有静音键 + ↑↓），再收那几个入口
+                栏.音量滑条.setVisible(False)
+                栏.音量标签.setVisible(False)
+                if 装得下():
+                    return 模式
+            if 逐个收起():
+                return 模式
+        return 栏.当前模式
 
     栏.设置模式 = 设置模式
     栏.按宽度自适应 = 按宽度自适应

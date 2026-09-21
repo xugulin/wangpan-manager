@@ -277,6 +277,12 @@ class AI状态页面(QWidget):
         if 键 not in 顺序:
             return
         self.当前AI页签 = 键
+        if 键 == "商店" and getattr(self, "_市场待绘", False):
+            self._市场待绘 = False
+            try:
+                self._重绘市场卡片()      # 之前自动加载时省下来的那一步
+            except Exception:  # noqa: BLE001
+                pass
         try:
             self.AI页签堆叠.setCurrentIndex(顺序[键])
         except Exception:
@@ -488,13 +494,14 @@ class AI状态页面(QWidget):
             return
         if not 强制 and 市场.联网被禁用():
             # 自检/离线模式：只用策展目录，绝不联网
-            self._填市场(市场.构建目录(联网=False), 注明="（离线策展目录）")
+            self._填市场(市场.构建目录(联网=False), 注明="（离线策展目录）",
+                     立即绘制=False)
             return
         if not 强制:
             缓存 = 市场.读取缓存()
             if 缓存:
                 时间 = 市场.缓存时间()
-                self._填市场(缓存)
+                self._填市场(缓存, 立即绘制=False)
                 self.市场状态标签.setText(
                     f"📦 已加载缓存的目录：{len(缓存)} 个模型"
                     f"（缓存于 {time.strftime('%m-%d %H:%M', time.localtime(时间))}；"
@@ -536,7 +543,8 @@ class AI状态页面(QWidget):
         self.市场状态标签.setText(f"❌ 刷新目录失败：{错误}（仍可用缓存/策展目录）")
         市场 = self._市场模块()
         if 市场 is not None:
-            self._填市场(市场.构建目录(联网=False), 注明="（离线策展目录）")
+            self._填市场(市场.构建目录(联网=False), 注明="（离线策展目录）",
+                     立即绘制=False)
 
     def _市场刷新完成(self, 条目们) -> None:
         市场 = self._市场模块()
@@ -547,7 +555,7 @@ class AI状态页面(QWidget):
         self.市场状态标签.setText(
             f"✅ 目录已更新：共 {len(条目们)} 个模型，其中 {离线数} 个已向官方库"
             f"核到体积（{time.strftime('%H:%M:%S')}）")
-        self._填市场(条目们)
+        self._填市场(条目们, 立即绘制=False)
 
     # ---------------- 渲染 ----------------
 
@@ -561,7 +569,7 @@ class AI状态页面(QWidget):
             pass
         return 市场.默认权重
 
-    def _填市场(self, 条目们, 注明: str = "") -> None:
+    def _填市场(self, 条目们, 注明: str = "", 立即绘制: bool = True) -> None:
         市场 = self._市场模块()
         if 市场 is None:
             return
@@ -574,7 +582,14 @@ class AI状态页面(QWidget):
             已装 = {}
         self._市场已装 = dict(已装 or {})
         市场.合并已装状态(self._市场条目, self._市场已装)
-        self._重绘市场卡片()
+        # ⚠️ 卡片是有代价的：12 张卡 ≈120 个控件。真机 Windows 上"建控件 + 首帧"
+        #    在 AI 页里要 24 秒（Linux 只要 0.4 秒），而用户打开 AI 页先看的是
+        #    「AI状态」页签 —— 所以**自动加载时先不画**，等真的点到「模型商店」再画。
+        if 立即绘制 or getattr(self, "当前AI页签", "状态") == "商店":
+            self._重绘市场卡片()
+            self._市场待绘 = False
+        else:
+            self._市场待绘 = True
         self._刷新内置ollama提示()
         if 注明:
             self.市场状态标签.setText(
