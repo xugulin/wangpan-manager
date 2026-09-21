@@ -30,6 +30,7 @@ on:
       - 'v8_3/播放/**'
       - 'v8_3/AI/**'          # AI 页也在这条链上（探测本地服务卡住过一次，60 秒）
       - '工具/界面测速.py'
+      - '工具/主题测速.py'
       - '.github/workflows/测试界面Windows.yml'
 
 permissions:
@@ -78,6 +79,18 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen   # 离屏是纯软件渲染，数字通常更难看，用来对照
         run: python 工具/界面测速.py
+
+      # ---- 主题样式表的"全局层"值多少钱：同几页再来一遍，但把全局规则换成调色板 ----
+      # 背景：清掉整套 QSS 后切页从 12.3 秒掉到 40 毫秒 —— 贵的就是这张全局样式表。
+      # 这一跑给出"换调色板能省多少"的真机数字，用来定默认值。
+      - name: 界面逐项计时（真 Windows · 全局层=调色板）
+        env:
+          QT_QPA_PLATFORM: ''          # 原生窗口，跟用户实际一样
+          V8_3_主题全局层: 调色板
+        run: python 工具/界面测速.py
+
+      - name: 主题全局层三档对照（合成控件树）
+        run: python 工具/主题测速.py
 
       - name: 单测（Windows 上跑一遍）
         run: python -m unittest discover -s tests -t .

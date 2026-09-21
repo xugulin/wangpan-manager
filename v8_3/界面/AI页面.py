@@ -38,7 +38,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
     QGroupBox,
-    QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
@@ -99,6 +100,82 @@ class AI状态页面(QWidget):
 
     def _时段图标(self, 时段: str) -> str:
         return self.图标_空闲 if 时段 == "空闲" else self.图标_高峰
+
+    # ==================== 小屏适配（窗口变窄就重排） ====================
+
+    #: 三列并排除了卡片本身还要占的间距/边距
+    _状态页余量 = 12 * 2 + 24
+
+    def _状态页需要宽(self) -> int:
+        """三列并排的**舒适下限**：三张卡各自"想要的宽度"之和 + 间距。
+
+        取 ``sizeHint()``（而不是 ``minimumSizeHint()``）：价格表的硬最小宽只有
+        几十像素（它会自己压缩列宽、把字裁掉），真要显示全 6 列需要 ~640 像素 ——
+        按最小值算就会在该堆叠的时候还硬排三列（实测 1024 宽的窗口上价格表被
+        窗口边缘裁掉一半）。用 sizeHint 还有一个好处：Windows 字体比 Linux 宽 30%，
+        阈值跟着字体一起长，不需要写死像素。
+        """
+        需要 = 0
+        for 卡 in (getattr(self, "预算卡片", None), getattr(self, "状态卡片", None),
+                  getattr(self, "价格卡片", None)):
+            if 卡 is None:
+                continue
+            try:
+                需要 += max(卡.sizeHint().width(), 卡.minimumSizeHint().width())
+            except Exception:  # noqa: BLE001
+                continue
+        return int(需要 + self._状态页余量)
+
+    def 自适应宽度(self, 宽: int) -> None:
+        """主窗口把可用宽度送进来 → 决定状态页是"三列并排"还是"上下堆叠"。"""
+        try:
+            self._重排状态页(int(宽))
+        except Exception:  # noqa: BLE001 - 重排失败不该影响用
+            pass
+
+    def _重排状态页(self, 宽: int = 0) -> None:
+        """按宽度重排四张卡片（同一批控件换位置，不重建 —— 重建太贵）。
+
+        * 宽：预算 | 状态 | 价格 三列，详情在价格下面（原来的样子）；
+        * 窄：预算 / 状态 一行两列，价格、详情各占一整行。
+
+        ``宽<=0``（构建时还不知道窗口多宽）按"宽"摆，随后主窗口会送真实宽度。
+        """
+        窄 = bool(宽) and 宽 < self._状态页需要宽()
+        模式 = "窄" if 窄 else "宽"
+        if getattr(self, "_状态排布", "") == 模式:
+            return
+        格 = getattr(self, "状态网格", None)
+        if 格 is None:
+            return
+        self._状态排布 = 模式
+        卡们 = (self.预算卡片, self.状态卡片, self.价格卡片, self.详情卡片)
+        for 卡 in 卡们:
+            格.removeWidget(卡)
+        for 列 in range(3):
+            格.setColumnStretch(列, 0)
+        for 行 in range(3):
+            格.setRowStretch(行, 0)
+        if 窄:
+            格.addWidget(self.预算卡片, 0, 0)
+            格.addWidget(self.状态卡片, 0, 1)
+            格.addWidget(self.价格卡片, 1, 0, 1, 2)
+            格.addWidget(self.详情卡片, 2, 0, 1, 2)
+            格.setColumnStretch(0, 1)
+            格.setColumnStretch(1, 1)
+            格.setRowStretch(2, 1)
+        else:
+            格.addWidget(self.预算卡片, 0, 0)
+            格.addWidget(self.状态卡片, 0, 1)
+            格.addWidget(self.价格卡片, 0, 2)
+            格.addWidget(self.详情卡片, 1, 2)
+            格.setColumnStretch(2, 1)
+            格.setRowStretch(1, 1)
+        for 卡 in 卡们:
+            try:
+                卡.updateGeometry()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _抓取器(self):
         运行时 = self.运行时
@@ -216,17 +293,19 @@ class AI状态页面(QWidget):
         状态页布局 = QVBoxLayout(状态页)
         状态页布局.setContentsMargins(0, 0, 0, 0)
         状态页布局.setSpacing(10)
-        三列 = QHBoxLayout()
-        三列.setSpacing(12)
-        三列.addWidget(self.量("预算区", self._建预算区))
-        三列.addWidget(self.量("状态区", self._建状态区))
-        右侧 = QVBoxLayout()
-        右侧.addWidget(self.量("价格区", self._建价格区))
-        右侧.addWidget(self.量("详情区", self._建详情区), 1)
-        右容器 = QWidget()
-        右容器.setLayout(右侧)
-        三列.addWidget(右容器, 1)
-        状态页布局.addLayout(三列, 1)
+        # 四张卡片先建出来，**摆法**交给 _重排状态页()：
+        # 窗口够宽就三列并排（预算 | 状态 | 价格+详情），窄了就改成上下堆叠。
+        # 为什么必须这样：小分辨率笔记本上三列并排会超出窗口，右边的价格表被
+        # 窗口边缘裁掉 —— 用户既看不见也滚不到（1366×768 缩放 125% 就是这种情况）。
+        self.预算卡片 = self.量("预算区", self._建预算区)
+        self.状态卡片 = self.量("状态区", self._建状态区)
+        self.价格卡片 = self.量("价格区", self._建价格区)
+        self.详情卡片 = self.量("详情区", self._建详情区)
+        self.状态网格 = QGridLayout()
+        self.状态网格.setSpacing(12)
+        状态页布局.addLayout(self.状态网格, 1)
+        self._状态排布 = ""
+        self._重排状态页()
         底部 = QHBoxLayout()
         # 文案缩短：原来"🔄 刷新余额并记账"在状态页底部会被裁掉（自检量到超出视口）
         self.刷新余额按钮 = QPushButton("🔄 刷新余额")
@@ -587,7 +666,8 @@ class AI状态页面(QWidget):
         if 市场 is None:
             return
         self._市场条目 = list(条目们 or [])
-        # 本机已装状态（ollama list）——决定「安装/卸载/更新」三个按钮谁可用
+        # 本机已装状态（直接扫模型仓库目录，不起 ollama 子进程）——决定
+        # 「安装/卸载/更新」三个按钮谁可用
         try:
             客户端 = self.本地客户端()
             已装 = 客户端.已装模型() if 客户端 is not None else {}
@@ -623,15 +703,51 @@ class AI状态页面(QWidget):
               "想连 CUDA 后端一起要（N 卡加速）：设环境变量 "
               "V8_3_本地模型_带GPU后端=1 再点这个按钮。")
         try:
-            from ..AI.本地模型 import 内置运行时说明, 内置运行时就位
-            说明 = 内置运行时说明()
+            from ..AI.本地模型 import (内置运行时说明, 内置运行时就位,
+                                      读基座版本缓存, 项目内可执行文件)
+            # 只读缓存：**绝不**在界面线程里跑 `ollama --version`（Windows 上
+            # 第一次拉起没签名的 exe 要等 Defender 扫完，20 秒起步）。
+            说明 = 内置运行时说明(允许执行=False)
             缺 = not 内置运行时就位()
+            待预热 = 内置运行时就位() and not 读基座版本缓存(项目内可执行文件())
         except Exception as e:  # noqa: BLE001
-            说明, 缺 = f"状态未知：{e}", False
+            说明, 缺, 待预热 = f"状态未知：{e}", False, False
         现状 = f"\n当前：{说明}"
         if 缺:
             现状 += "\n⚠️ 基座缺失/被删了：点这个按钮补一份官方基座。"
         self.运行时按钮.setToolTip(头顶 + 现状 + 尾巴)
+        if 待预热:
+            self._预热基座版本()
+
+    def _预热基座版本(self) -> None:
+        """后台跑一次 ``ollama --version`` 把版本号落缓存，回来再刷新提示。
+
+        为什么要这么绕：界面线程里跑它就是卡（见上），所以界面只读缓存；
+        缓存空的时候由这里补一次，用户第二次看提示就有版本号了。
+        """
+        if getattr(self, "_基座预热中", False):
+            return
+        self._基座预热中 = True
+        try:
+            from ..AI.本地模型 import 预热基座版本
+        except Exception:  # noqa: BLE001
+            return
+
+        def 干():
+            return 预热基座版本()
+
+        def 完(_版本):
+            self._基座预热中 = False
+            try:
+                self._刷新内置ollama提示()
+            except Exception:  # noqa: BLE001
+                pass
+
+        线程 = 任务线程(干, 父=self)
+        线程.成功.connect(完)
+        线程.失败.connect(lambda _错: setattr(self, "_基座预热中", False))
+        self._登记线程(线程)
+        线程.start()
 
     def _重绘市场卡片(self) -> None:
         市场 = self._市场模块()
@@ -880,7 +996,9 @@ class AI状态页面(QWidget):
         from ..AI.本地模型 import (下载便携运行时, 内置运行时版本,
                                   相对项目路径, 项目内可执行文件)
         可执行 = 项目内可执行文件()
-        旧版本 = 内置运行时版本()
+        # 只读缓存：这里跑在界面线程（用户点按钮的瞬间），不能同步起子进程。
+        # 更新完成后 `下载便携运行时` 会真跑一次新版并落缓存，提示自然是新的。
+        旧版本 = 内置运行时版本(允许执行=False)
         现状 = f"v{旧版本}" if 旧版本 else ("未就位" if not 可执行.is_file() else "版本未知")
         确认 = QMessageBox.question(
             self, "更新内置 ollama",
@@ -1543,12 +1661,13 @@ class AI状态页面(QWidget):
         self._登记线程(线程)
         线程.start()
 
-    #: "本机装了哪些本地模型"的缓存秒数：模型商店装/卸完会立刻清缓存，
-    #: 平时刷新页面不必每次去起 ollama 子进程。
-    已装模型缓存秒 = 5.0
+    #: "本机装了哪些本地模型"的缓存秒数：模型商店装/卸完会立刻清缓存。
+    #: 现在底层是**直接读磁盘上的模型仓库**（毫秒级、不起子进程），
+    #: 缓存只是省掉同一帧里的重复扫描。
+    已装模型缓存秒 = 2.0
 
     def _已装本地模型(self, 强制: bool = False) -> list[str]:
-        """本机**已安装**的本地模型列表（来自 ollama list，带短缓存）。
+        """本机**已安装**的本地模型列表（读磁盘仓库，带短缓存，不跑 ``ollama``）。
 
         为什么不用摘要里的"模型列表"：那个在没装服务时会退回"推荐模型"，
         分不清"没装模型"和"服务没起来"。用户要求"没有本地模型时下拉框为空"

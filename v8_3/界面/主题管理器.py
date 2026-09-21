@@ -10,6 +10,7 @@ V8_3 不 import 也不修改 V8 的任何文件），并补充了 V8_3 新增的
     from v8_3.界面.主题管理器 import 主题管理器
     app.setStyleSheet(主题管理器.获取样式表("Dracula"))
 """
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -35,6 +36,68 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen
 
 #: 运行时生成的界面小图标放这儿（**现画现用**，项目不带任何图片资源）
 图标目录 = Path(__file__).resolve().parents[2] / "数据" / "图标"
+
+#: 主题的"全局那一层"（每个控件都要沾的：背景色 / 文字色 / 字号）怎么落地。
+#:
+#: * ``样式表``：QSS 里写一条 ``QWidget {...}``（老写法）；
+#: * ``调色板``：背景/文字/选中色走 ``QPalette``、字号走应用字体，QSS 里
+#:   **不再有**那条全局规则；
+#: * ``无字号``：保留全局规则、只把 ``font-size`` 拿掉（字号交给应用字体）。
+#:
+#: 为什么要分档：真机 Windows 上"切到播放页 12.3 秒，而清掉整套 QSS 只要 40 毫秒"
+#: —— 贵的就是这张全局样式表。一条 ``QWidget{}`` 规则会让**每个**控件都做一遍
+#: 样式匹配 + 重新 polish（字号一变还会连锁触发整棵树重算 sizeHint）。
+#: 三档用 ``工具/主题测速.py`` 在真机上量过，再改这里的默认值。
+全局层 = os.environ.get("V8_3_主题全局层", "样式表")
+
+#: 全局字号（像素）。要跟老写法 ``QWidget { font-size: 13px }`` 一致 ——
+#: 换成应用字体之后字号不能变，否则整套界面的高度全变。
+全局字号像素 = 13
+
+
+def 应用全局外观(应用, 主题名: str = "") -> None:
+    """把"全局那一层"落到 ``QApplication``（调色板 + 字号）。
+
+    幂等：多调几次没关系。只在 :data:`全局层` 不是 ``样式表`` 时才真的需要用，
+    但调色板本身跟 QSS 不冲突，所以调用方不必判断。
+    """
+    try:
+        from PySide6.QtGui import QFont, QPalette
+    except Exception:  # noqa: BLE001 - 无 GUI 环境下不致命
+        return
+    主题 = 主题定义.get(主题名) or 主题定义[主题管理器.默认主题]
+    c = 主题["颜色"]
+    调色板 = QPalette()
+    配 = {
+        QPalette.ColorRole.Window: c["背景"],
+        QPalette.ColorRole.WindowText: c["文字"],
+        QPalette.ColorRole.Base: c["卡片"],
+        QPalette.ColorRole.AlternateBase: c.get("悬停") or c["卡片"],
+        QPalette.ColorRole.Text: c["文字"],
+        QPalette.ColorRole.Button: c["卡片"],
+        QPalette.ColorRole.ButtonText: c["文字"],
+        QPalette.ColorRole.ToolTipBase: c["卡片"],
+        QPalette.ColorRole.ToolTipText: c["文字"],
+        QPalette.ColorRole.Highlight: c["选中背景"],
+        QPalette.ColorRole.HighlightedText: c["选中文字"],
+        QPalette.ColorRole.PlaceholderText: c["次要文字"],
+    }
+    for 角色, 值 in 配.items():
+        try:
+            调色板.setColor(角色, QColor(值))
+        except Exception:  # noqa: BLE001
+            continue
+    for 角色 in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text,
+                QPalette.ColorRole.ButtonText):
+        调色板.setColor(QPalette.ColorGroup.Disabled, 角色, QColor(c["禁用文字"]))
+    try:
+        应用.setPalette(调色板)
+        字体 = QFont(应用.font())
+        if 字体.pixelSize() != 全局字号像素:
+            字体.setPixelSize(全局字号像素)
+            应用.setFont(字体)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _箭头图片(颜色: str) -> str:
@@ -439,7 +502,33 @@ class 主题管理器:
         return cls._生成样式表(主题["颜色"], 主题["类型"])
 
     @classmethod
+    def 获取样式表_档(cls, 档: str, 主题名: str = "") -> str:
+        """按指定"全局层"档位生成样式表（对照实验/工具用，**不改**模块默认值）。
+
+        真实应用只走 :meth:`获取样式表`（读 :data:`全局层`）；这个入口给
+        ``工具/主题测速.py`` 在真机上把三档并排量出来用。
+        """
+        global 全局层
+        旧 = 全局层
+        全局层 = str(档 or 旧)
+        try:
+            return cls.获取样式表(主题名 or cls.默认主题)
+        finally:
+            全局层 = 旧
+
+    @classmethod
     def _生成样式表(cls, c: dict, 类型: str) -> str:
+        # 全局那一层（背景/文字色/字号）按 全局层 开关落地：
+        #   · 样式表：一条 QWidget{} —— 每个控件都要匹配一次，真机 Windows 上最贵；
+        #   · 调色板：这几条挪到 QPalette + 应用字体（见 应用全局外观），QSS 里删掉；
+        #   · 无字号：留着全局规则，但把 font-size 拿掉（字号交给应用字体）。
+        全局块 = ""
+        if 全局层 != "调色板":
+            字号 = "    font-size: 13px;\n" if 全局层 != "无字号" else ""
+            全局块 = (f"QWidget {{\n"
+                    f"    background-color: {c['背景']};\n"
+                    f"    color: {c['文字']};\n"
+                    f"{字号}}}")
         # 关于下拉箭头：**必须**用 QSS 的 image 画，而且必须写明定位。
         #
         # 实测（离屏渲染 + 统计 drawPrimitive 调用）：
@@ -489,11 +578,7 @@ class 主题管理器:
  * ============================================================ */
 
 /* ---------------- 全局 ---------------- */
-QWidget {{
-    background-color: {c['背景']};
-    color: {c['文字']};
-    font-size: 13px;
-}}
+{全局块}
 QMainWindow {{
     background-color: {c['背景']};
 }}

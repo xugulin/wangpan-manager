@@ -48,6 +48,9 @@ __all__ = [
     "项目根目录", "项目便携目录", "项目内可执行文件", "相对项目路径",
     "内置运行时就位", "内置运行时版本", "内置运行时说明",
     "便携版下载地址", "下载便携运行时", "精简推理后端", "带GPU后端",
+    # 界面线程安全的只读接口（不跑子进程、不联网）
+    "模型仓库候选目录", "已装模型_磁盘",
+    "基座版本缓存路径", "读基座版本缓存", "写基座版本缓存", "预热基座版本",
 ]
 
 #: 默认拉取/使用的模型（1.5B 在纯 CPU 上也能跑动，约 1.1 GB）
@@ -282,23 +285,106 @@ def _跑版本(可执行: Path, 超时秒: float = 15.0) -> str:
     return 匹配.group(1) if 匹配 else ""
 
 
-def 内置运行时版本(超时秒: float = 15.0) -> str:
-    """内置 ollama 的版本号（如 ``0.34.1``）；没就位或跑不起来返回空串。"""
+def 基座版本缓存路径() -> Path:
+    """内置基座版本号的落盘缓存（重启后也不用再跑一次 ``--version``）。"""
+    return 项目根目录() / "数据" / "本地模型" / "基座版本.json"
+
+
+def _文件指纹(可执行: Path) -> tuple[float, int]:
+    """``(修改时间, 大小)``：基座被换掉/更新过就自动作废旧缓存。"""
+    try:
+        信息 = 可执行.stat()
+        return float(信息.st_mtime), int(信息.st_size)
+    except Exception:  # noqa: BLE001
+        return 0.0, 0
+
+
+_版本锁 = threading.Lock()
+_版本内存: dict[str, str] = {}
+
+
+def _版本键(可执行: Path) -> str:
+    时间, 大小 = _文件指纹(可执行)
+    return f"{可执行.name}|{时间:.0f}|{大小}"
+
+
+def 读基座版本缓存(可执行: Path) -> str:
+    """只读缓存里的版本号；没缓存/基座换过了返回空串（**不跑子进程**）。"""
+    键 = _版本键(可执行)
+    with _版本锁:
+        if 键 in _版本内存:
+            return _版本内存[键]
+    try:
+        数据 = json.loads(基座版本缓存路径().read_text(encoding="utf-8"))
+        值 = str((数据 or {}).get(键) or "")
+    except Exception:  # noqa: BLE001 - 缓存坏了当没有
+        值 = ""
+    with _版本锁:
+        _版本内存[键] = 值
+    return 值
+
+
+def 写基座版本缓存(可执行: Path, 版本: str) -> None:
+    """把版本号写进内存 + 落盘（只留最近几条，不让缓存文件长胖）。"""
+    键 = _版本键(可执行)
+    with _版本锁:
+        _版本内存[键] = str(版本 or "")
+    路径 = 基座版本缓存路径()
+    try:
+        路径.parent.mkdir(parents=True, exist_ok=True)
+        旧 = {}
+        try:
+            旧 = dict(json.loads(路径.read_text(encoding="utf-8")) or {})
+        except Exception:  # noqa: BLE001
+            旧 = {}
+        旧[键] = str(版本 or "")
+        for 多余 in list(旧)[:-8]:
+            旧.pop(多余, None)
+        路径.write_text(json.dumps(旧, ensure_ascii=False, indent=1),
+                      encoding="utf-8")
+    except Exception:  # noqa: BLE001 - 写不进去不影响本次结果
+        pass
+
+
+def 内置运行时版本(超时秒: float = 15.0, 允许执行: bool = False) -> str:
+    """内置 ollama 的版本号（如 ``0.34.1``）；没就位或跑不起来返回空串。
+
+    ⚠️ 默认 ``允许执行=False`` 是**故意的**：一个刚下载下来的、没有签名的
+    ``ollama.exe`` 第一次被拉起时，Windows Defender 会先把它整个扫一遍
+    （真机 CI 上量到 20 秒以上），界面线程直接冻住。所以默认只查内存/磁盘缓存，
+    命中就毫秒级返回；只有明确知道自己在后台时才传 ``允许执行=True``
+    （或直接用 :func:`预热基座版本`）真跑一次 ``--version``。
+    """
     可执行 = 项目内可执行文件()
     if not 可执行.is_file():
         return ""
-    return _跑版本(可执行, 超时秒=超时秒)
+    缓存 = 读基座版本缓存(可执行)
+    if 缓存:
+        return 缓存
+    if not 允许执行:
+        return ""
+    版本 = _跑版本(可执行, 超时秒=超时秒)
+    if 版本:
+        写基座版本缓存(可执行, 版本)
+    return 版本
 
 
-def 内置运行时说明(超时秒: float = 5.0) -> str:
+def 预热基座版本(超时秒: float = 15.0) -> str:
+    """后台线程用：真跑一次 ``--version`` 并把结果落缓存（界面只读缓存）。"""
+    return 内置运行时版本(超时秒=超时秒, 允许执行=True)
+
+
+def 内置运行时说明(超时秒: float = 5.0, 允许执行: bool = False) -> str:
     """给界面用的一行说明（出现的是项目相对路径，不是绝对路径）。
 
-    默认超时压得比较短：它会被界面刷新调用，不能因为基座卡住就把界面顶住。
+    ``允许执行`` 默认 **False**：界面刷新只读缓存，绝不在这里起子进程
+    （原因见 :func:`内置运行时版本`）。后台线程想拿到真实版本就传 True，
+    或先调 :func:`预热基座版本`。
     """
     可执行 = 项目内可执行文件()
     if not 可执行.is_file():
         return "内置 ollama 未就位（点「⬆️ 更新内置ollama」拉一份官方基座）"
-    版本 = 内置运行时版本(超时秒=超时秒)
+    版本 = 内置运行时版本(超时秒=超时秒, 允许执行=允许执行)
     return f"内置 ollama {'v' + 版本 if 版本 else '（版本未知）'}｜{相对项目路径(可执行)}"
 
 
@@ -329,6 +415,81 @@ def 模型环境() -> dict:
     except Exception:
         pass
     return 环境
+
+
+def 模型仓库候选目录() -> list[Path]:
+    """可能放着模型权重的仓库目录（列表顺序即优先级）。
+
+    * ``OLLAMA_MODELS`` 环境变量（用户自己指过就听他的）；
+    * 项目内 ``数据/本地模型/模型``（我们拉起的服务端就是用它）；
+    * ``~/.ollama/models``（用户系统里那份 ollama 的默认仓库）。
+    """
+    目录: list[Path] = []
+    自己 = (os.environ.get("OLLAMA_MODELS") or "").strip()
+    if 自己:
+        目录.append(Path(自己))
+    目录.append(模型仓库目录())
+    try:
+        目录.append(Path.home() / ".ollama" / "models")
+    except Exception:  # noqa: BLE001 - 取不到家目录就算了
+        pass
+    去重: list[Path] = []
+    for 项 in 目录:
+        if 项 not in 去重:
+            去重.append(项)
+    return 去重
+
+
+def 已装模型_磁盘(仓库: Path | None = None) -> dict[str, dict]:
+    """**直接读磁盘**列出已装模型：``{名字:标签: {"大小": 字节, "修改时间": str}}``。
+
+    为什么要自己读目录，而不是 ``ollama list``：那是**起一个子进程**。
+    界面线程里起它 = 卡界面（真机 Windows 上第一次拉起没签名的 ``ollama.exe``，
+    Defender 要先扫一遍，量到过 20+ 秒）。ollama 的仓库格式很稳定：
+
+    ``<仓库>/manifests/<注册表>/<库>/<名字>/<标签>`` 是 JSON 清单，
+    里面 ``layers``/``config`` 给出各层大小与摘要，实体在 ``<仓库>/blobs/<摘要>``。
+
+    只在**所有层都下全了**的时候才算"已装"（半截下载的 ``-partial`` 不算），
+    这样界面上的「已装/未装」跟真实能不能跑一致。
+    """
+    根们 = [仓库] if 仓库 is not None else 模型仓库候选目录()
+    结果: dict[str, dict] = {}
+    for 根 in 根们:
+        try:
+            清单根 = Path(根) / "manifests"
+            if not 清单根.is_dir():
+                continue
+            文件们 = [f for f in 清单根.rglob("*") if f.is_file()]
+        except Exception:  # noqa: BLE001 - 目录读不了当没有
+            continue
+        for 文件 in 文件们:
+            try:
+                相对 = 文件.relative_to(清单根).parts
+                if len(相对) < 3:
+                    continue          # 至少要 <注册表>/<库>/<名字>/<标签>
+                名字, 标签 = 相对[-2], 相对[-1]
+                模型名 = f"{名字}:{标签}"
+                if 模型名 in 结果:
+                    continue
+                清单 = json.loads(文件.read_text(encoding="utf-8"))
+                层们 = list(清单.get("layers") or [])
+                配置 = 清单.get("config") or {}
+                大小 = sum(int(x.get("size") or 0) for x in 层们 if isinstance(x, dict))
+                大小 += int(配置.get("size") or 0)
+                摘要们 = [str(x.get("digest") or "") for x in 层们
+                        if isinstance(x, dict) and x.get("digest")]
+                if 摘要们 and not all(
+                        (Path(根) / "blobs" / 摘要.replace(":", "-", 1)).is_file()
+                        for 摘要 in 摘要们):
+                    continue          # 层没下全：不算已装
+                结果[模型名] = {
+                    "大小": 大小,
+                    "修改时间": time.strftime(
+                        "%Y-%m-%d %H:%M", time.localtime(文件.stat().st_mtime))}
+            except Exception:  # noqa: BLE001 - 单个清单坏了不拖累其它
+                continue
+    return 结果
 
 
 def _找可执行文件() -> str:
@@ -1089,11 +1250,49 @@ class 本地模型客户端:
 
     # ---------------- 模型市场（本机已装 / 装·卸·升级） ----------------
 
-    def 已装模型(self) -> dict[str, dict]:
+    def 已装模型(self, 允许命令行: bool = False) -> dict[str, dict]:
         """本机已下载的模型：``{模型名: {"大小": 字节, "修改时间": str}}``。
 
         ollama 没装/没跑时返回空字典（不抛异常，界面按"未安装"处理）。
+
+        ⚠️ **界面线程用默认值**（``允许命令行=False``）：它只读磁盘上的模型仓库
+        （毫秒级），读不到就再问一下**已经在跑**的本机服务。以前这里第一件事就是
+        ``subprocess.run(["ollama", "list"], timeout=30)`` —— 那是同步起子进程，
+        在 Windows 上第一次拉起没有签名的 ``ollama.exe`` 要等 Defender 扫完，
+        真机 CI 上把 AI 页顶住了 24 秒（三个调用点叠加），界面整个冻住。
+        只有在后台线程里（安装/卸载/升级完成之后想拿服务端的权威结果）才传 True。
         """
+        # ① 磁盘上的仓库：最快，也最真实（半截下载的不算已装）
+        try:
+            磁盘 = 已装模型_磁盘()
+        except Exception:  # noqa: BLE001
+            磁盘 = {}
+        if 磁盘:
+            return 磁盘
+        # ② 本机服务已经在跑 → 问它 /api/tags（只戳 ollama 端口，短超时）
+        服务端 = self._服务端地址(超时秒=探测超时秒)
+        if 服务端:
+            try:
+                客户端 = self._客户端(超时秒=5.0)
+                try:
+                    响应 = 客户端.get(f"{服务端}/api/tags")
+                    响应.raise_for_status()
+                    结果 = {}
+                    for m in (响应.json() or {}).get("models", []):
+                        名字 = str(m.get("name") or "")
+                        if 名字:
+                            结果[名字] = {
+                                "大小": int(m.get("size") or 0),
+                                "修改时间": str(m.get("modified_at") or "")}
+                    if 结果:
+                        return 结果
+                finally:
+                    客户端.close()
+            except Exception:  # noqa: BLE001
+                pass
+        # ③ 兜底：`ollama list`（**只允许后台线程走这里**）
+        if not 允许命令行:
+            return {}
         可执行 = _找可执行文件()
         if 可执行:
             try:
@@ -1106,29 +1305,6 @@ class 本地模型客户端:
                         return 结果
             except Exception:
                 pass
-        # 退路：本机服务在跑就问它的 /api/tags
-        try:
-            客户端 = self._客户端(超时秒=5.0)
-            try:
-                for _提供方, 地址 in self._候选地址():
-                    try:
-                        响应 = 客户端.get(f"{地址}/api/tags")
-                        响应.raise_for_status()
-                        结果 = {}
-                        for m in (响应.json() or {}).get("models", []):
-                            名字 = str(m.get("name") or "")
-                            if 名字:
-                                结果[名字] = {
-                                    "大小": int(m.get("size") or 0),
-                                    "修改时间": str(m.get("modified_at") or "")}
-                        if 结果:
-                            return 结果
-                    except Exception:
-                        continue
-            finally:
-                客户端.close()
-        except Exception:
-            pass
         return {}
 
     def _服务端地址(self, 超时秒: float = 2.5) -> str:

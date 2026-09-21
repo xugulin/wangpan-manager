@@ -595,17 +595,116 @@ class 内置ollama基座测试(unittest.TestCase):
         临时, 根 = self._搭一个项目(已有版本="0.1.0")
         self.addCleanup(临时.cleanup)
         from v8_3.AI import 本地模型 as 模块
-        补 = mock.patch.object(模块, "项目便携目录",
-                              lambda: 根 / "运行环境" / "本地模型")
-        补.start()
-        self.addCleanup(补.stop)
-        说明 = 模块.内置运行时说明()
-        self.assertIn("v0.1.0", 说明)
-        self.assertIn("运行环境/本地模型", 说明)
+        with tempfile.TemporaryDirectory() as 缓存目录:
+            补 = mock.patch.object(模块, "项目便携目录",
+                                 lambda: 根 / "运行环境" / "本地模型")
+            补.start()
+            self.addCleanup(补.stop)
+            补2 = mock.patch.object(模块, "基座版本缓存路径",
+                                  lambda: Path(缓存目录) / "基座版本.json")
+            补2.start()
+            self.addCleanup(补2.stop)
+            # 界面线程默认不允许起子进程 → 先由后台"预热"把版本落缓存
+            self.assertEqual(模块.内置运行时说明(), "内置 ollama （版本未知）"
+                            f"｜{模块.相对项目路径(根 / '运行环境' / '本地模型' / 'bin' / 'ollama')}")
+            模块.预热基座版本()
+            说明 = 模块.内置运行时说明()
+            self.assertIn("v0.1.0", 说明)
+            self.assertIn("运行环境/本地模型", 说明)
         # 界面文案里绝不出现绝对路径（临时项目在项目外，所以这里用真项目再验一次）
         真说明 = 模块.内置运行时说明()
         self.assertNotIn(str(模块.项目根目录()), 真说明)
         self.assertTrue("运行环境" in 真说明 or "未就位" in 真说明, 真说明)
+
+
+class 界面线程不许起子进程测试(unittest.TestCase):
+    """界面线程里**绝不允许**同步跑 ``ollama``（真机 CI 上把界面冻了 24 秒）。
+
+    真机 Windows 上第一次拉起没有签名的 ``ollama.exe``，Defender 要先扫一遍，
+    20 秒起步；而 AI 页构建时会经过三个调用点（刷新本地模型 ×2、模型市场 ×1），
+    叠加起来就是"切一下 AI 页卡半分钟"。这里把"默认参数不碰子进程"钉死：
+    一旦有人改回 ``subprocess.run(["ollama", ...])``，这几条立刻红。
+    """
+
+    def setUp(self):
+        from v8_3.AI import 本地模型 as 模块
+        self.模块 = 模块
+        self.临时 = tempfile.TemporaryDirectory()
+        self.addCleanup(self.临时.cleanup)
+        self.根 = Path(self.临时.name)
+        可执行 = self.根 / "运行环境" / "本地模型" / "ollama"
+        可执行.parent.mkdir(parents=True, exist_ok=True)
+        可执行.write_text('#!/bin/sh\necho "ollama version is 0.1.0"\n',
+                        encoding="utf-8")
+        可执行.chmod(0o755)
+        for 补 in (mock.patch.object(self.模块, "项目便携目录",
+                                   lambda: self.根 / "运行环境" / "本地模型"),
+                   mock.patch.object(self.模块, "模型仓库候选目录",
+                                   lambda: [self.根 / "仓库"]),
+                   mock.patch.object(self.模块, "基座版本缓存路径",
+                                   lambda: self.根 / "基座版本.json")):
+            补.start()
+            self.addCleanup(补.stop)
+        self.模块._版本内存.clear()
+        # 任何子进程都不许起：起了就直接失败
+        self.起过的子进程: list = []
+
+        def 禁止(*a, **k):
+            self.起过的子进程.append(a[0] if a else k.get("args"))
+            raise AssertionError(f"界面线程里起了子进程：{a or k}")
+
+        self.补3 = mock.patch.object(self.模块.subprocess, "run", 禁止)
+        self.补3.start()
+        self.addCleanup(self.补3.stop)
+
+    def test_读版本缓存时不跑子进程(self):
+        """默认（界面用）只读缓存：没缓存就老实说"版本未知"，不偷偷跑一次。"""
+        self.assertEqual(self.模块.内置运行时版本(), "")
+        self.assertIn("版本未知", self.模块.内置运行时说明())
+        self.assertEqual(self.起过的子进程, [])
+
+    def test_预热才跑一次并落缓存(self):
+        """后台预热真跑一次、结果落缓存；之后再读就是纯内存/文件。"""
+        self.补3.stop()                      # 这一次允许起子进程
+        版本 = self.模块.预热基座版本()
+        self.assertEqual(版本, "0.1.0")
+        self.assertTrue((self.根 / "基座版本.json").is_file())
+        self.assertEqual(self.模块.内置运行时版本(), "0.1.0")
+        self.assertEqual(self.模块.内置运行时说明(), self.模块.内置运行时说明())
+
+    def test_已装模型默认不跑ollama列表(self):
+        """``已装模型()`` 默认只读磁盘仓库：没有模型就返回空，绝不起 ``ollama list``。"""
+        客户端 = self.模块.本地模型客户端(本地模型配置())
+        self.assertEqual(客户端.已装模型(), {})
+        self.assertEqual(self.起过的子进程, [])
+
+    def test_已装模型能直接读出磁盘上的模型(self):
+        """仓库里有一份下全的清单 → 不跑子进程也能列出模型与大小。"""
+        仓库 = self.根 / "仓库"
+        (仓库 / "blobs").mkdir(parents=True)
+        (仓库 / "blobs" / "sha256-aaa").write_bytes(b"x" * 1000)
+        (仓库 / "blobs" / "sha256-bbb").write_bytes(b"y" * 500)
+        清单 = 仓库 / "manifests" / "registry.ollama.ai" / "library" / "deepseek-r1" / "1.5b"
+        清单.parent.mkdir(parents=True)
+        清单.write_text(json.dumps({
+            "config": {"size": 500, "digest": "sha256:bbb"},
+            "layers": [{"size": 1000, "digest": "sha256:aaa"}]}), encoding="utf-8")
+        已装 = self.模块.已装模型_磁盘()
+        self.assertEqual(list(已装), ["deepseek-r1:1.5b"])
+        self.assertEqual(已装["deepseek-r1:1.5b"]["大小"], 1500)
+        客户端 = self.模块.本地模型客户端(本地模型配置())
+        self.assertEqual(list(客户端.已装模型()), ["deepseek-r1:1.5b"])
+
+    def test_层没下全的不算已装(self):
+        """半截下载（blob 缺了）不能报成"已装"，否则界面会给出可点的"卸载/更新"。"""
+        仓库 = self.根 / "仓库"
+        (仓库 / "blobs").mkdir(parents=True)
+        清单 = 仓库 / "manifests" / "registry.ollama.ai" / "library" / "qwen3" / "4b"
+        清单.parent.mkdir(parents=True)
+        清单.write_text(json.dumps({
+            "layers": [{"size": 10, "digest": "sha256:没有这个块"}]}),
+            encoding="utf-8")
+        self.assertEqual(self.模块.已装模型_磁盘(), {})
 
 
 if __name__ == "__main__":

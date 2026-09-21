@@ -45,8 +45,8 @@ from ..配置 import (
     项目根,
 )
 from .控件样式 import 安装控件样式
-from .主题管理器 import (主题管理器, 高度_管理按钮, 高度_功能按钮,
-                    高度_网盘按钮)
+from .主题管理器 import (主题管理器, 应用全局外观, 高度_管理按钮,
+                    高度_功能按钮, 高度_网盘按钮)
 from .传输页面 import 传输页面
 from .播放页面 import 播放页面
 from .日志页面 import 日志页面
@@ -211,12 +211,17 @@ class 主窗口(QMainWindow):
             return
         # 留一点边距给标题栏/任务栏，别贴着屏幕边
         宽 = max(760, min(1400, 可用.width() - 60))
-        高 = max(520, min(860, 可用.height() - 90))
+        高 = max(420, min(860, 可用.height() - 90))
+        # ⚠️ 高 DPI 缩放下逻辑分辨率会变小（1366×768 @150% → 911×512），
+        #    上面的下限（760/420）有可能反而**比屏幕还大** —— 再夹一次，
+        #    保证窗口既不会超出屏幕，也不会因为"最小尺寸比屏幕大"被顶出去。
+        宽 = min(宽, 可用.width())
+        高 = min(高, 可用.height())
         self.resize(宽, 高)
         # 最小尺寸再比初始小一档（小屏上也能再往小拉一点；页面本身有滚动区兜底），
         # 大屏上仍是设计值 1080×620，不会因为屏幕大就允许拉得比设计还小。
-        self.setMinimumSize(min(1080, max(720, 宽 - 120)),
-                            min(620, max(460, 高 - 80)))
+        self.setMinimumSize(min(1080, max(640, 宽 - 120), 可用.width()),
+                            min(620, max(420, 高 - 80), 可用.height()))
         self._屏幕尺寸 = (可用.width(), 可用.height())
 
     def _预热页面(self) -> None:
@@ -278,7 +283,35 @@ class 主窗口(QMainWindow):
         外层 = 包一层滚动(页)
         self._页面外框[id(页)] = 外层
         self._页面对象[id(页)] = 页
+        # 新页面建好时窗口可能已经是窄的（懒加载的页就是这时候建的）：
+        # 立刻把当前宽度告诉它，免得它按"宽屏"摆好、等下次 resize 才纠正。
+        self._通知宽度自适应(页, self.堆叠.width() if hasattr(self, "堆叠") else 0)
         return 外层
+
+    def _通知宽度自适应(self, 页, 宽: int) -> None:
+        """把一个宽度告诉页面（页面实现 ``自适应宽度`` 才理它）。"""
+        自适应 = getattr(页, "自适应宽度", None)
+        if not callable(自适应):
+            return
+        try:
+            自适应(int(宽))
+        except Exception:  # noqa: BLE001 - 页面重排失败不该影响主流程
+            pass
+
+    def resizeEvent(self, 事件):  # noqa: N802
+        """窗口尺寸变了 → 让各页面按**新的可用宽度**重排（小屏适配）。
+
+        页面自己会做"同档位不重排"的判断，所以拖动窗口不会反复重建布局。
+        用的是 ``堆叠`` 的宽度（= 去掉左侧导航/边距后的真实可用宽度），
+        而不是窗口宽度 —— 阈值判断才是准的。
+        """
+        super().resizeEvent(事件)
+        try:
+            宽 = self.堆叠.width()
+        except Exception:  # noqa: BLE001
+            return
+        for 页 in list(getattr(self, "_页面对象", {}).values()):
+            self._通知宽度自适应(页, 宽)
 
     def 当前页面(self) -> QWidget:
         """当前显示的**页面本身**（栈里放的是滚动外框，这里还原回去）。
@@ -295,6 +328,9 @@ class 主窗口(QMainWindow):
     def _切到(self, 页: QWidget) -> None:
         """切到某个页面（自动处理"栈里放的是滚动外框"这件事）。"""
         self.堆叠.setCurrentWidget(self._页面外框.get(id(页), 页))
+        # 每次切页都同步一次宽度：懒加载的页是**建好就直接切**的，
+        # 那时候它还没收到过任何 resize，按宽屏摆的在小屏上会溢出。
+        self._通知宽度自适应(页, self.堆叠.width())
 
     def _构建界面(self):
         中央 = QWidget()
@@ -1017,6 +1053,10 @@ class 主窗口(QMainWindow):
         if 应用 is not None:
             # 自绘的勾选框/下拉箭头：第一次必须赶在 setStyleSheet 之前装好基样式
             安装控件样式(应用)
+            # 全局那一层（背景/文字色/字号）：默认走 QSS 的 QWidget 规则，
+            # 但那条规则要每个控件匹配一遍（真机 Windows 上就是"切页卡十几秒"的元凶）。
+            # 设 V8_3_主题全局层=调色板 就改成 QPalette + 应用字体，QSS 里不再有它。
+            应用全局外观(应用, 主题名)
             应用.setStyleSheet(主题管理器.获取样式表(主题名))
         idx = self.主题下拉框.findData(主题名)
         if idx >= 0 and self.主题下拉框.currentIndex() != idx:
