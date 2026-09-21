@@ -1092,6 +1092,36 @@ class 真X11嵌入不游离测试(unittest.TestCase):
         self.assertFalse(找游离窗口(排除窗口号=宿主.句柄()), "缩放后出现游离窗口")
         会话.关闭()
 
+    def test_画面落在视频控件的位置上(self):
+        """自建子窗口必须**对齐视频控件**的位置与尺寸。
+
+        为什么专门测：子窗口挂在**顶层** X 窗口上（非原生 Qt 控件没有自己的 X 窗口），
+        子窗口的 (0,0) 是整个窗口的左上角。不算偏移的话，画面会跑到窗口左上角去盖住
+        左侧导航 —— 那比"多一个窗口"还难看。
+        """
+        import time
+        from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel,
+                                     QVBoxLayout, QWidget)
+        from v8_3.播放.嵌入窗口 import 嵌入宿主, 子窗口位置
+        应用 = QApplication.instance() or QApplication([])
+        窗 = QWidget(); 窗.resize(900, 560)
+        行 = QHBoxLayout(窗); 行.setContentsMargins(50, 30, 20, 20); 行.setSpacing(16)
+        行.addWidget(QLabel("左侧导航"))
+        区 = QWidget(); 区.setMinimumSize(500, 300); 行.addWidget(区, 1)
+        窗.show()
+        self.addCleanup(窗.close)
+        for _ in range(40):
+            应用.processEvents(); time.sleep(0.02)
+        宿主 = 嵌入宿主(区)
+        self.addCleanup(宿主.销毁)
+        句柄 = 宿主.句柄()
+        self.assertTrue(句柄)
+        期望 = 宿主._像素位置()
+        实际 = 子窗口位置(句柄)
+        self.assertLessEqual(abs(实际[0] - 期望[0]), 2, f"x 没对齐：{实际} vs {期望}")
+        self.assertLessEqual(abs(实际[1] - 期望[1]), 2, f"y 没对齐：{实际} vs {期望}")
+        self.assertGreater(期望[0], 10, "这个用例本身要能体现偏移（左边留了 50px）")
+
 
 class 守护不再破坏性处理测试(unittest.TestCase):
     """游离窗口守护**不许**再销毁 libvlc 的窗口。

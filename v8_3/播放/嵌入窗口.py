@@ -40,7 +40,8 @@ import ctypes
 import os
 from typing import Optional
 
-__all__ = ["可以自建", "不可用原因", "嵌入宿主", "建子窗口", "调整子窗口", "销毁子窗口"]
+__all__ = ["可以自建", "不可用原因", "嵌入宿主", "建子窗口", "调整子窗口",
+           "销毁子窗口", "子窗口位置"]
 
 _库 = None
 _加载错误 = ""
@@ -114,7 +115,7 @@ def _已映射(窗口号: int) -> bool:
 
 
 def 建子窗口(父窗口号: int, 宽: int = 640, 高: int = 360,
-          等映射秒: float = 2.5) -> int:
+          x: int = 0, y: int = 0, 等映射秒: float = 2.5) -> int:
     """在 ``父窗口号`` 里建一个朴素子窗口并 map，等它 ``IsViewable``；返回窗口号。
 
     失败返回 0（调用方退回"直接把 Qt 控件窗口交给 libvlc"的老做法）。
@@ -135,7 +136,7 @@ def 建子窗口(父窗口号: int, 宽: int = 640, 高: int = 360,
                                     max(1, int(高)), 0, 0, 0))
         if not 子:
             return 0
-        L.XReparentWindow(_显示, 子, 父, 0, 0)
+        L.XReparentWindow(_显示, 子, 父, int(x), int(y))
         L.XMapWindow(_显示, 子)
         L.XFlush(_显示)
         截止 = time.time() + max(0.1, float(等映射秒))
@@ -154,16 +155,42 @@ def 建子窗口(父窗口号: int, 宽: int = 640, 高: int = 360,
         return 0
 
 
-def 调整子窗口(窗口号: int, 宽: int, 高: int) -> None:
+def 调整子窗口(窗口号: int, 宽: int, 高: int, x: int = 0, y: int = 0) -> None:
     L = _载入()
     if L is None or not int(窗口号 or 0):
         return
     try:
-        L.XMoveResizeWindow(_显示, int(窗口号), 0, 0, max(1, int(宽)),
+        L.XMoveResizeWindow(_显示, int(窗口号), int(x), int(y), max(1, int(宽)),
                           max(1, int(高)))
         L.XFlush(_显示)
     except Exception:  # noqa: BLE001
         pass
+
+
+def 子窗口位置(窗口号: int) -> tuple[int, int]:
+    """子窗口相对父窗口的坐标（自测/诊断用）。"""
+    L = _载入()
+    if L is None or not int(窗口号 or 0):
+        return (0, 0)
+    try:
+        L.XGetGeometry.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                 ctypes.POINTER(ctypes.c_ulong),
+                                 ctypes.POINTER(ctypes.c_int),
+                                 ctypes.POINTER(ctypes.c_int),
+                                 ctypes.POINTER(ctypes.c_uint),
+                                 ctypes.POINTER(ctypes.c_uint),
+                                 ctypes.POINTER(ctypes.c_uint),
+                                 ctypes.POINTER(ctypes.c_uint)]
+        根 = ctypes.c_ulong(); x = ctypes.c_int(); y = ctypes.c_int()
+        宽 = ctypes.c_uint(); 高 = ctypes.c_uint()
+        边 = ctypes.c_uint(); 深 = ctypes.c_uint()
+        if not L.XGetGeometry(_显示, int(窗口号), ctypes.byref(根),
+                            ctypes.byref(x), ctypes.byref(y), ctypes.byref(宽),
+                            ctypes.byref(高), ctypes.byref(边), ctypes.byref(深)):
+            return (0, 0)
+        return (int(x.value), int(y.value))
+    except Exception:  # noqa: BLE001
+        return (0, 0)
 
 
 def 销毁子窗口(窗口号: int) -> None:
@@ -242,7 +269,8 @@ class 嵌入宿主:
             销毁子窗口(self._窗口号)
             self._窗口号 = 0
         宽, 高 = self._像素尺寸()
-        self._窗口号 = 建子窗口(self.控件窗口号(), 宽, 高)
+        x, y = self._像素位置()
+        self._窗口号 = 建子窗口(self.控件窗口号(), 宽, 高, x=x, y=y)
         if not self._窗口号:
             # 自建失败：老实退回控件窗口（并让调用方/日志知道）
             return self.控件窗口号()
@@ -257,12 +285,28 @@ class 嵌入宿主:
         except Exception:  # noqa: BLE001
             return 640, 360
 
+    def _像素位置(self) -> tuple[int, int]:
+        """控件**相对顶层窗口**的左上角（像素）。
+
+        ⚠️ 为什么必须算这个：子窗口是挂在**顶层 X 窗口**上的（非原生 Qt 控件没有自己的
+        X 窗口，``winId()`` 给的就是顶层那个），所以子窗口的 (0,0) 是**整个窗口**的左上角，
+        不是视频控件的左上角。不算偏移的话，画面会跑到窗口左上角去盖住左侧导航。
+        """
+        try:
+            比 = float(self.控件.devicePixelRatio() or 1.0)
+            顶层 = self.控件.window()
+            点 = self.控件.mapTo(顶层, self.控件.rect().topLeft())
+            return int(点.x() * 比), int(点.y() * 比)
+        except Exception:  # noqa: BLE001
+            return 0, 0
+
     def 同步(self) -> None:
-        """把子窗口拉到与控件一致的尺寸（控件 resize/move 后调用）。"""
+        """把子窗口挪到/拉到与控件一致的位置与尺寸（控件 resize/move/换页后调用）。"""
         if not self._窗口号:
             return
         宽, 高 = self._像素尺寸()
-        调整子窗口(self._窗口号, 宽, 高)
+        x, y = self._像素位置()
+        调整子窗口(self._窗口号, 宽, 高, x, y)
 
     def 销毁(self) -> None:
         if self._窗口号:
