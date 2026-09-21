@@ -52,25 +52,34 @@ API = "https://api.github.com"
 
 发布说明模板 = """## 网盘管理 {标签} · 绿色免安装版 🎉
 
-**本次更新（{标签}）：Windows 上画面"游离在 GUI 之外"修好了，并补上真机播放测试。**
+**本次更新（{标签}）：Windows 上"视频游离在 GUI 之外"修好了（真机 CI 抓的病因）。**
 
-Windows 版能播，但视频跑到 VLC 自己开的窗口里放（播放页一片黑）。两层原因：
+Windows 版能播，但画面跑到 VLC 自己开的窗口里放、播放页一片黑。在 **GitHub Actions 的
+Windows runner 上用发布包真播一次**，VLC 自己的日志把病因指得非常清楚，一共三条：
 
-1. **窗口就绪判定在 Windows 上是空转的**：`窗口已映射()` 以前只问 X 服务器
-   （`map_state == IsViewable`）；Windows 上没有 X11 → 直接当"就绪" →
-   **窗口还没真的显示就把 HWND 交给了 libvlc**，VLC 于是自己开一个顶层窗口放画面
-   （和当年 Linux 上那个 bug 同源）。⇒ 补上 Windows 实现
-   （`IsWindow + IsWindowVisible`）并保留"等窗口真的上屏"的重试；
-2. **游离窗口的发现/自愈以前只支持 X11**：`游离窗口.py` 没有 DISPLAY 就整体空转，
-   所以在 Windows 上既发现不了、也纠正不了。⇒ 补上 Windows 后端
-   （`EnumWindows` 枚举本进程顶层窗口，挑出"不是 Qt 窗口、可见、够大"的那个 ——
-   判据不依赖类名/标题，中文界面下 VLC 的标题会变）。会话级巡检因此在 Windows 上
-   也能自动把画面收回来。
+1. **窗口就绪判定在 Windows 上等于没判**：`窗口已映射()` 以前只问 X 服务器
+   （`map_state == IsViewable`），Windows 上没有 X11 → 直接当"就绪" →
+   窗口还没真的显示就把句柄交出去了。⇒ 补 Windows 实现（`IsWindow` + `IsWindowVisible`）。
+2. **嵌入用的 API 在 Windows 上是另一个**：X11 是 `set_xwindow`（drawable-xid），
+   而 Windows 的 vout **只认 drawable-hwnd** —— 只调 `set_xwindow` 时 VLC 认为
+   没给它窗口，于是 `Win32VoutCreateWindow` 自己开一个顶层窗口
+   （日志里那个 `VLC (Direct3D11 output)`）。⇒ Windows 改调
+   `libvlc_media_player_set_hwnd`。
+3. **视频输出模块也被钉错了平台**：嵌入时我们一直钉 X11 的 `xcb_x11`，
+   而 VLC 在 Windows 上没有这个模块 —— 日志是
+   `looking for vout display module matching "xcb_x11"` →
+   `no vout display modules matched`。⇒ Windows 上**不钉**，让 VLC 自己挑
+   `direct3d11`（它是画进给定窗口的，正是嵌入行为）。
+
+另外：**游离窗口的发现/自愈以前只支持 X11**（没有 DISPLAY 就整体空转），所以在 Windows 上
+既发现不了也纠正不了。⇒ 补 Windows 后端（`EnumWindows` 枚举本进程顶层窗口，挑出
+"不是 Qt 窗口、可见、够大"的那个，判据不依赖类名/标题），会话级巡检因此在 Windows 上
+也能自动把画面收回来。
 
 **新增真机播放测试**（`工具/测试播放嵌入.py`，跑在 CI 的 Windows runner 上）：
 用发布包里的真软件、走播放页同一条代码路径播一段随包附带的小视频，断言
-**"有画面 + 没有游离窗口 + 窗口已上屏"**，并打印 libvlc 自己的 vout 日志。
-这类问题只有真播一次才看得见，所以它现在是发布前的必过关卡。
+**"有画面 + 画面在我们窗口里 + 没有游离窗口"**，并打印 VLC 的 vout 日志。
+这一类问题只有真播一次才看得见 —— 它现在是发布前的必过关卡（本次就是它抓出来的）。
 
 **前两版的东西也都在**：Windows 包**内置官方 VLC 3.0.23**（354 个插件，解压即用，
 不用自己装 VLC；打包时缺 libvlc 直接拒绝出包）；**下载 AI 模型不再弹两个大黑框**

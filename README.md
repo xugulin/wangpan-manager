@@ -50,28 +50,38 @@
 
 ## 🆕 V1.0.13 修了什么
 
-**Windows 上画面"游离在 GUI 之外" —— 修好并加了真机播放测试**
+**Windows 上"视频游离在 GUI 之外"修好了 —— 病因是 CI 真机换出来的**
 
-Windows 版能播了，但视频跑到 VLC 自己开的窗口里放（播放页一片黑）。
-根因有两层：
+Windows 版能播，但画面跑到 VLC 自己开的窗口里放、播放页一片黑。在 **GitHub Actions 的
+Windows runner 上用发布包真播一次**（新增的真机播放测试），VLC 自己的日志把病因指得很清楚，
+一共三条：
 
-1. **窗口就绪判定在 Windows 上是空转的**：`窗口已映射()` 以前只问 X 服务器
-   （`map_state == IsViewable`），Windows 上没有 X11 → 直接返回"就绪"，
-   于是**窗口还没真的显示就把 HWND 交给了 libvlc** → VLC 找不到可用父窗口、
-   自己开一个顶层窗口放画面（和当年 Linux 上那个 bug 一模一样）。
-   ⇒ 补上 Windows 实现：`IsWindow + IsWindowVisible`，并沿用原来的"等窗口真的上屏"重试；
-2. **游离窗口的发现/自愈只支持 X11**：`游离窗口.py` 以前没有 DISPLAY 就整体空转，
-   所以在 Windows 上"既发现不了、也纠正不了"。
-   ⇒ 补上 Windows 后端：`EnumWindows` 枚举**本进程**的顶层窗口，挑出"不是 Qt 窗口、
-   可见、够大"的那个（判据不依赖它的类名/标题 —— 中文界面里 VLC 的窗口标题会变成
-   "VLC 媒体播放器"）；`请关闭/销毁` 也都有 Windows 实现。会话级巡检因此能在
-   Windows 上自动把画面收回来。
+1. **窗口就绪判定在 Windows 上等于没判**：`窗口已映射()` 以前只问 X 服务器
+   （`map_state == IsViewable`）。Windows 没有 X11 → 直接当"就绪" → 窗口还没真的显示
+   就把句柄交出去了。⇒ 补 Windows 实现（`IsWindow` + `IsWindowVisible`）；
+2. **嵌入的 API 在 Windows 上是另一个**：X11 用 `set_xwindow`（drawable-xid），
+   而 Windows 的 vout **只认 drawable-hwnd** —— 只调 `set_xwindow` 时 VLC 认为没给它窗口，
+   于是 `Win32VoutCreateWindow` 自己开一个顶层窗口（日志里那个
+   `VLC (Direct3D11 output)`）。⇒ Windows 改调 `libvlc_media_player_set_hwnd`；
+3. **视频输出模块也被钉错了平台**：嵌入时我们一直钉 X11 的 `xcb_x11`，而 VLC 在 Windows 上
+   没有这个模块（日志：`no vout display modules matched`）。⇒ Windows 上**不钉**，
+   让 VLC 自己挑 `direct3d11`（它是画进给定窗口的，正是嵌入行为）。
 
-**新增真机播放测试**（`工具/测试播放嵌入.py`，CI 的 Windows runner 上跑）：
-用发布包里的真软件、走播放页同一条代码路径（`播放出口` + `播放会话`）播一段随包
-附带的小视频，然后断言 **"有画面 + 没有游离窗口 + 窗口已上屏"**，并把 libvlc 自己的
-日志（`VoutDisplayEvent`、`using vout display module …`）打出来。判据写进了
-`v8_3/播放/游离窗口.py:画面在我们窗口里()`，静态检查发现不了这类问题，只能真播。
+另外，**游离窗口的发现/自愈以前只支持 X11**（没有 DISPLAY 就整体空转），Windows 上既发现
+不了也纠正不了。⇒ 补 Windows 后端（`EnumWindows` 枚举本进程顶层窗口，挑出"不是 Qt 窗口、
+可见、够大"的那个，判据不依赖类名/标题）——会话级巡检因此也能在 Windows 上自动收回画面。
+
+**新增真机播放测试** `工具/测试播放嵌入.py`（CI 的 Windows runner 上跑）：用发布包里的真软件、
+走播放页同一条代码路径播随包附带的小视频，断言 **"有画面 + 画面在我们窗口里 + 没有游离窗口"**，
+并打印 VLC 的 vout 日志。真机结果：
+
+```
+平台 = windows｜窗口枚举：Windows｜可用 = True
+窗口句柄 = 262444｜已映射 = True｜窗口就绪 = True
+播放中：进度 1.0s｜出画面 = True｜画面在我们窗口里 = True｜游离窗口 = 无
+VLC: using vout display module "direct3d11"｜VoutDisplayEvent 'resize' 938x578
+✅ 画面确实画在我们的窗口里（没有游离窗口）
+```
 
 ---
 
