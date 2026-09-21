@@ -47,15 +47,32 @@ __all__ = ["可嵌入窗口", "准备嵌入显示", "显示说明", "禁用强�
 嵌入视频输出默认 = "xcb_x11"
 
 
+#: Windows 上**不要**钉（让 libvlc 自己挑）
+#:
+#: 这是真机 CI 抓出来的：Windows 上我们照样钉了 ``xcb_x11``，而 VLC 在 Windows 上
+#: 根本没有这个模块 —— 日志里就是
+#: ``looking for vout display module matching "xcb_x11": 12 candidates`` →
+#: ``no vout display modules matched`` → 于是它**自己开一个顶层窗口**（Direct3D11
+#: 输出）放画面，用户看到的就是"视频游离在 GUI 之外"。
+#: Windows 上正确的做法是什么都不钉：VLC 会挑 ``direct3d11``，而它是**画进给定
+#: HWND** 的（正是我们要的嵌入行为）。
+Windows上不钉 = True
+
+
 def 嵌入视频输出() -> str:
     """嵌入播放时要钉死的视频输出模块；返回空串 = 不钉（让 libvlc 自己挑）。
 
-    可用 ``V8_3_嵌入视频输出`` 覆盖（设成空串/"auto"/"default" 就是不钉）。
-    想看 GPU 的 GL 输出（4K60 省 CPU）请用播放页的「独立窗口」模式：
+    * **Windows**：默认不钉（见 :data:`Windows上不钉` 的说明）——
+      钉 X11 的模块名会让 VLC 找不到输出、自己开窗口；
+    * **X11/Linux**：默认钉 :data:`嵌入视频输出默认`（``xcb_x11``）；
+    * 可用 ``V8_3_嵌入视频输出`` 覆盖（设成空串/"auto"/"default" 就是不钉）。
+      想看 GPU 的 GL 输出（4K60 省 CPU）请用播放页的「独立窗口」模式：
     那条路句柄是 0/独立窗口，本来就不钉。
     """
     值 = os.environ.get("V8_3_嵌入视频输出")
     if 值 is None:
+        if os.name == "nt" and Windows上不钉:
+            return ""
         return 嵌入视频输出默认
     值 = str(值).strip()
     if 值.lower() in ("", "auto", "default", "none", "0"):

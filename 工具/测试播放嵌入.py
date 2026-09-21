@@ -102,6 +102,14 @@ def main() -> int:
     会话 = 播放会话(出口=出口, 取适配器=lambda *_: None, 日志回调=说,
                 探测直链开关=False, 探测媒体开关=False, 顾问=None,
                 AI决策后台=False)
+    # ⚠️ 真程序里界面会给会话装"后台线程 → 界面线程"的泵（播放页/独立窗口都会装）。
+    #    这里也要装，否则画面自检线程自己去做重载，会被"非界面线程不发窗口号"拦下。
+    会话.装主线程泵()
+    from PySide6.QtCore import QTimer as _QTimer
+    泵定时器 = _QTimer(窗)
+    泵定时器.setInterval(25)
+    泵定时器.timeout.connect(会话.排空主线程队列)
+    泵定时器.start()
     会话.直链信息 = {"url": str(素材), "headers": {}}
     if not 会话.起播(句柄):
         说("✗ 起播失败")

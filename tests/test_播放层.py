@@ -1269,3 +1269,44 @@ class 守护不再破坏性处理测试(unittest.TestCase):
             日志=lambda *_: None)
         守护._交给宿主([(99, "VLC media player")])
         self.assertEqual(len(收到), 1, "发现游离窗口要交给宿主的处理函数")
+
+
+class 视频输出钉法平台测试(unittest.TestCase):
+    """真机 CI 抓到的病根：Windows 上照样钉了 ``xcb_x11``，而 VLC 在 Windows 上
+    没有这个模块 —— 日志是 ``looking for vout display module matching "xcb_x11"``
+    → ``no vout display modules matched`` → 它自己开一个顶层窗口放画面（用户看到的
+    "视频游离在 GUI 之外"）。
+    """
+
+    def test_windows默认不钉(self):
+        from unittest import mock
+        from v8_3.播放 import 显示环境
+        with mock.patch.dict(显示环境.os.environ, {}, clear=True), \
+             mock.patch.object(显示环境.os, "name", "nt"):
+            self.assertEqual(显示环境.嵌入视频输出(), "",
+                             "Windows 上钉 X11 模块名会让 VLC 自己开窗口")
+
+    def test_linux仍钉xcb_x11(self):
+        from unittest import mock
+        from v8_3.播放 import 显示环境
+        with mock.patch.dict(显示环境.os.environ, {}, clear=True), \
+             mock.patch.object(显示环境.os, "name", "posix"):
+            self.assertEqual(显示环境.嵌入视频输出(), 显示环境.嵌入视频输出默认)
+
+    def test_用户显式指定优先(self):
+        from unittest import mock
+        from v8_3.播放 import 显示环境
+        with mock.patch.dict(显示环境.os.environ,
+                            {"V8_3_嵌入视频输出": "xcb_xv"}, clear=True), \
+             mock.patch.object(显示环境.os, "name", "nt"):
+            self.assertEqual(显示环境.嵌入视频输出(), "xcb_xv")
+
+    def test_有窗口时Windows不传给实例(self):
+        from unittest import mock
+        from v8_3.播放.播放核心 import 播放会话
+        会话 = 播放会话(取适配器=lambda *_: None, 日志回调=None,
+                    探测直链开关=False, 探测媒体开关=False)
+        with mock.patch.dict("os.environ", {}, clear=True), \
+             mock.patch("os.name", "nt"):
+            self.assertEqual(会话._想要的实例输出(12345), "",
+                             "Windows 上不要给 libvlc 实例钉输出模块")
