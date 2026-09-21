@@ -44,8 +44,13 @@ if not errorlevel 1 (
 echo.
 echo [!] Shortcut was not created. Falling back to copying the launcher...
 set "LAUNCH="
+rem Look for the launcher: *.exe first, then *.bat -- but never this helper script
+rem itself. Wine test showed the wildcard order is not guaranteed and it happily
+rem copied this helper .bat to the desktop instead of the launcher.
 for %%F in ("%HERE%\*.exe") do if not defined LAUNCH set "LAUNCH=%%~fF"
-if not defined LAUNCH for %%F in ("%HERE%\*.bat") do if not defined LAUNCH set "LAUNCH=%%~fF"
+if not defined LAUNCH for %%F in ("%HERE%\*.bat") do (
+  if not defined LAUNCH if /i not "%%~fF"=="%~f0" set "LAUNCH=%%~fF"
+)
 for %%D in ("%USERPROFILE%\Desktop") do set "DESK=%%~fD"
 if defined LAUNCH if defined DESK (
   copy /y "%LAUNCH%" "%DESK%\" >nul 2>&1
