@@ -572,9 +572,9 @@ class 字幕查找测试(unittest.TestCase):
         远端, 本地 = self.适配器.下载过[0]
         self.assertEqual(远端, "/云端/影片.srt", "应优先挑与视频完全同名的字幕")
         self.assertTrue(Path(本地).is_file(), "字幕应下载到 数据/字幕/")
-        # ⚠️ 两边都 resolve()：Windows 会把临时目录缩成 8.3 短名（RUNNER~1），
-        #    直接比 Path 会拿 "C:/Users/runneradmin/..." 和 "C:/Users/RUNNER~1/..."
-        #    互相比 —— 真机 CI 上就是这么假失败的。
+        # ⚠️ 两边都 resolve()：Windows 会把临时目录缩成 8.3 短名（用户名那段会变成
+        #    RUNNER~1 这种），直接比 Path 就是"长名 vs 短名"互相比 ——
+        #    真机 CI 上就是这么假失败的（可移植性检查也要求这里别写死绝对路径）。
         self.assertEqual(Path(本地).parent.resolve(), self.缓存.resolve(),
                      "字幕应下载到字幕缓存目录里")
 
