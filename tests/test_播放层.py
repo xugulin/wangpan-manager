@@ -279,6 +279,20 @@ class 解析探测结果测试(unittest.TestCase):
 # ==================== 5. libvlc 绑定的类型安全（崩过程序的那一类） ====================
 
 
+def _本机有libvlc() -> bool:
+    """本机能不能真的加载 libvlc（下面几条断言都要拿真库来验）。
+
+    ⚠️ CI（windows-latest）上**没装 VLC**，以前这里直接 ERROR 而不是跳过 ——
+    整个工作流的单测步骤因此永远是红的，真出问题反而看不见。
+    """
+    try:
+        vlc绑定.VLC库.取()
+        return True
+    except Exception:  # noqa: BLE001 - 缺库/缺依赖都算"本机没有"
+        return False
+
+
+@unittest.skipUnless(_本机有libvlc(), "本机没有 libvlc（VLC 运行库），跳过绑定类型检查")
 class 绑定类型安全测试(unittest.TestCase):
     """**不崩**是这里的核心断言：错类型要抛异常，不能把句柄截断。"""
 

@@ -49,6 +49,12 @@ def _找个外来解释器() -> Path | None:
 
 外来解释器 = _找个外来解释器()
 
+#: 这台机器上有没有"项目自带解释器"。
+#: 单测里几条断言的前提就是"本套测试是用项目解释器跑的"（开发机/用户机都成立），
+#: 而 CI（windows-latest + 系统 python）里 运行环境/ 是 .gitignore 掉的、根本不存在 ——
+#: 那时候这些断言没法成立，应当**跳过**而不是红（否则工作流永远失败，没人看信号）。
+缺项目解释器 = not 项目解释器.is_file()
+
 
 class 路径常量测试(unittest.TestCase):
     def test_路径都落在项目内(self):
@@ -58,6 +64,7 @@ class 路径常量测试(unittest.TestCase):
         self.assertEqual(主环境, 期望环境)
         self.assertEqual(项目解释器, 环境解释器(主环境))
 
+    @unittest.skipIf(缺项目解释器, "本机没有项目自带解释器（CI 用系统 python 跑）")
     def test_项目解释器存在且可执行(self):
         self.assertTrue(项目解释器.is_file(), f"缺少项目内解释器：{项目解释器}")
         self.assertTrue(os.access(项目解释器, os.X_OK),
@@ -65,6 +72,7 @@ class 路径常量测试(unittest.TestCase):
 
 
 class 判断与开关测试(unittest.TestCase):
+    @unittest.skipIf(缺项目解释器, "本机没有项目自带解释器（CI 用系统 python 跑）")
     def test_跑在项目环境里时判定为真(self):
         # 本套测试本身就是用 运行环境/venv/bin/python 跑的
         self.assertTrue(
@@ -86,6 +94,7 @@ class 判断与开关测试(unittest.TestCase):
             else:
                 os.environ["V8_3_不自动换解释器"] = 旧
 
+    @unittest.skipIf(缺项目解释器, "本机没有项目自带解释器（CI 用系统 python 跑）")
     def test_已在对的环境时不换(self):
         self.assertTrue(在主环境里())
         保证 = sys.executable
@@ -99,6 +108,8 @@ class 真跑一遍测试(unittest.TestCase):
     def test_外来解释器跑工具脚本会自举(self):
         if 外来解释器 is None:
             self.skipTest("机器上找不到项目外的 python 作对照")
+        if 缺项目解释器:
+            self.skipTest("本机没有项目自带解释器（CI 用系统 python 跑）")
         脚本 = 项目根 / "工具" / "自检.py"
         self.assertTrue(脚本.is_file())
         结果 = subprocess.run(

@@ -591,6 +591,7 @@ class 内置ollama基座测试(unittest.TestCase):
         self.assertEqual(模块.精简推理后端(), (0, []))
         self.assertTrue(库.is_dir())
 
+    @unittest.skipIf(os.name == "nt", "假基座是 POSIX 脚本，Windows 上跑不起来")
     def test_说明里给出项目相对路径(self):
         临时, 根 = self._搭一个项目(已有版本="0.1.0")
         self.addCleanup(临时.cleanup)
@@ -632,11 +633,18 @@ class 界面线程不许起子进程测试(unittest.TestCase):
         self.临时 = tempfile.TemporaryDirectory()
         self.addCleanup(self.临时.cleanup)
         self.根 = Path(self.临时.name)
-        可执行 = self.根 / "运行环境" / "本地模型" / "ollama"
+        # 文件名要跟平台一致：``项目内可执行文件()`` 在 Windows 上找的是 ollama.exe，
+        # 造一个没有 .exe 的假基座会让"未就位"分支先命中（Windows CI 上就是这么红的）。
+        名字 = "ollama.exe" if os.name == "nt" else "ollama"
+        可执行 = self.根 / "运行环境" / "本地模型" / 名字
         可执行.parent.mkdir(parents=True, exist_ok=True)
-        可执行.write_text('#!/bin/sh\necho "ollama version is 0.1.0"\n',
-                        encoding="utf-8")
-        可执行.chmod(0o755)
+        if os.name == "nt":
+            可执行.write_bytes(b"MZ")          # Windows 上没法用文本冒充可执行文件
+        else:
+            可执行.write_text('#!/bin/sh\necho "ollama version is 0.1.0"\n',
+                            encoding="utf-8")
+            可执行.chmod(0o755)
+        self.可执行 = 可执行
         for 补 in (mock.patch.object(self.模块, "项目便携目录",
                                    lambda: self.根 / "运行环境" / "本地模型"),
                    mock.patch.object(self.模块, "模型仓库候选目录",
@@ -658,12 +666,21 @@ class 界面线程不许起子进程测试(unittest.TestCase):
         self.addCleanup(self.补3.stop)
 
     def test_读版本缓存时不跑子进程(self):
-        """默认（界面用）只读缓存：没缓存就老实说"版本未知"，不偷偷跑一次。"""
+        """默认（界面用）只读缓存：没缓存就老实说"取不到"，不偷偷跑一次。"""
         self.assertEqual(self.模块.内置运行时版本(), "")
-        self.assertIn("版本未知", self.模块.内置运行时说明())
+        说明 = self.模块.内置运行时说明()
+        self.assertNotIn("v0.1.0", 说明)      # 没缓存就不许报出版本号
         self.assertEqual(self.起过的子进程, [])
 
-    def test_预热才跑一次并落缓存(self):
+    def test_写进缓存之后只读缓存(self):
+        """缓存里有了版本号（预热线程/上次启动写的）→ 读它就是纯内存/文件操作。"""
+        self.模块.写基座版本缓存(self.可执行, "0.1.0")
+        self.assertEqual(self.模块.内置运行时版本(), "0.1.0")
+        self.assertIn("v0.1.0", self.模块.内置运行时说明())
+        self.assertEqual(self.起过的子进程, [])
+
+    @unittest.skipIf(os.name == "nt", "Windows 上没法用文本脚本冒充能跑的 ollama.exe")
+    def test_预热会真跑一次并落缓存(self):
         """后台预热真跑一次、结果落缓存；之后再读就是纯内存/文件。"""
         self.补3.stop()                      # 这一次允许起子进程
         版本 = self.模块.预热基座版本()
