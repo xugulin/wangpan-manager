@@ -43,6 +43,8 @@ import v8_3.界面.主题管理器 as 主题模块                              
 class 全局层档位测试(unittest.TestCase):
     def test_默认档是调色板(self):
         """默认必须走调色板档 —— 老写法在真机上贵 1.6~3 倍（见模块注释）。"""
+        if os.environ.get("V8_3_主题全局层"):
+            self.skipTest("有人显式设了 V8_3_主题全局层（对照实验），这条不适用")
         档 = os.environ.get("V8_3_主题全局层") or "调色板"
         self.assertEqual(档, "调色板",
                          "主题全局层的默认档被改回样式表了：真机实测它会把"

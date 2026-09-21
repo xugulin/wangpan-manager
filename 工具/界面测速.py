@@ -132,6 +132,11 @@ try:
           ("AI 页", lambda: 窗口.切换到AI页()),
           ("敏感词页", lambda: 窗口.切换到敏感词页())]
     应用.setStyleSheet("")          # 清掉主题：QSS 的样式匹配与绘制全没了
+    try:                            # 让"主题已装过"的记忆也失效（否则重装会被幂等挡掉）
+        import v8_3.界面.主窗口 as _M
+        _M._上次样式表 = None
+    except Exception:
+        pass
     泵(0.3)
     print("\n⑧ 清掉主题 QSS 后再切一次（对照 QSS 的代价）：")
     for 名, 动作 in 重页:

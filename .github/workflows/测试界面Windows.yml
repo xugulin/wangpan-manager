@@ -46,6 +46,9 @@ jobs:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: 'utf-8'
       QT_QPA_PLATFORM: 'offscreen'
+      # 崩了要能看到 Python 层的 traceback（2026-09-21 有一次单测"跑着跑着直接结束、
+      # 连 Ran N tests 都没打印"，就是靠这个下次能直接定位）
+      PYTHONFAULTHANDLER: '1'
 
     steps:
       - name: 取源码
