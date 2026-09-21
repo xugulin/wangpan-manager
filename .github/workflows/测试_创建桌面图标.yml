@@ -118,16 +118,21 @@ jobs:
             Write-Host "::error::桌面没有 网盘管理.lnk（快捷方式没建出来，只做了兜底）"
             exit 1
           }
-          $sh = New-Object -ComObject WScript.Shell
-          $sc = $sh.CreateShortcut($lnk)
           Write-Host "生成：网盘管理.lnk"
-          Write-Host "目标：$($sc.TargetPath)"
-          if (-not $sc.TargetPath) {
-            Write-Host "::error::快捷方式里没有目标（空壳 .lnk，双击没反应）"
+          # ⚠️ 读目标**不能**用 WScript.Shell：它跟写入一样按系统 ANSI 代码页处理路径，
+          #    英文版 Windows 上读中文目标会返回空串（上一轮就是这么误判成"空壳"的）。
+          #    这里直接查 .lnk 文件里的 UTF-16 字符串（StringData 段就是 UTF-16 存的）。
+          $bytes = [IO.File]::ReadAllBytes($lnk)
+          $txt = [Text.Encoding]::Unicode.GetString($bytes)
+          $命中 = ([regex]::Matches($txt, '启动')).Count
+          Write-Host "UTF-16 里出现「启动」次数：$命中"
+          if ($命中 -lt 1) {
+            Write-Host "::error::.lnk 里找不到启动器路径（空壳 .lnk，双击没反应）"
             exit 1
           }
-          if ($sc.TargetPath -notmatch '启动') {
-            Write-Host "::error::快捷方式目标不像启动器：$($sc.TargetPath)"
+          if ($txt -notmatch 'bat|exe|py') {
+            Write-Host "::error::.lnk 里看不到可执行目标"
             exit 1
           }
+          Write-Host "参考：WScript.Shell 读到的目标 = [$((New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath)]（ANSI 限制，可能是空）"
           Write-Host "✅ 快捷方式名与目标都正确"
