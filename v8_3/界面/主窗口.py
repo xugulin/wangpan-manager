@@ -1117,10 +1117,43 @@ class 主窗口(QMainWindow):
 
     # ==================== 关闭 ====================
 
-    #: 关窗时"等在飞行中的桥调用"的总预算（秒）。桥调用超时是分钟级，
-    #: 真等满会像卡死；实测正常调用 1~3 秒就回来，给 20 秒足够，
-    #: 实在等不动的会在后面"关闭适配器 → 再等一轮"里被快速放掉。
-    关窗等待预算秒 = 20.0
+    #: 关窗时"等在飞行中的桥调用"的预算（秒）。
+    #:
+    #: ⚠️ 这里以前是 **20 秒**（后面还有一轮 6 秒）。只要关窗时有后台线程在跑
+    #: （AI 页预热基座版本、模型市场刷新目录、凭证核对、正在传输……），点右上角的 ×
+    #: 就会**卡住十几到二十几秒**，而且窗口还杵在屏幕上（Qt 是先跑 closeEvent 再隐藏），
+    #: 用户看到的就是"点了 × 不退出"（实测：一个 30 秒的线程 → close() 阻塞 26 秒）。
+    #: 现在只等一小会儿（够正常的桥调用落地），剩下的线程摘下来交给进程退出收掉
+    #: —— 见 :meth:`_脱离还在跑的线程`。
+    关窗等待预算秒 = 1.0
+
+    #: 关掉适配器之后再等一轮的收尾预算（秒）
+    关窗收尾预算秒 = 0.6
+
+    def _脱离还在跑的线程(self) -> int:
+        """把仍在运行的线程从窗口/页面上摘下来，返回摘掉的数量。
+
+        为什么必须这么做：`QThread: Destroyed while thread '' is still running`
+        会**直接 abort 进程**（不是 Python 异常，try/except 抓不住）。
+        以前收尾时写的是 `self._活动线程.clear()` —— 那恰好是丢掉最后一个引用，
+        运行中的线程随时被回收（实测：关窗后必崩，日志里那句
+        "QThread: Destroyed while thread '' is still running" 就是它）。
+
+        现在：``setParent(None)`` 让 Qt 不随窗口销毁它，再记进模块级
+        :data:`遗留线程` 让 Python 也不回收它；进程退出时由
+        :func:`_收尾退出` 一起结束。这样"点 × 立刻退出"和"不 abort"可以同时成立。
+        """
+        剩 = 0
+        for 线 in self._所有在跑的线程():
+            try:
+                线.setParent(None)
+                遗留线程.append(线)
+                剩 += 1
+            except Exception:  # noqa: BLE001 - 已经失效的对象跳过
+                continue
+        if 剩:
+            _注册遗留线程收尾()
+        return 剩
 
     def _所有在跑的线程(self) -> list:
         """主窗口 + 各网盘页 + 登录对话框 + AI 页里所有还在跑的 QThread。"""
@@ -1164,7 +1197,7 @@ class 主窗口(QMainWindow):
         return 剩
 
     def closeEvent(self, 事件):
-        """关窗：**先让在飞的调用落地，再让 Qt 销毁控件**。
+        """关窗：**先让窗口消失，再尽快把该落的落地，别让用户等**。
 
         现场崩溃（2026-09-19 02:01:33）：
             QThread: Destroyed while thread '' is still running
@@ -1172,10 +1205,27 @@ class 主窗口(QMainWindow):
         原因是关窗时还有一个 `账号状态线程` 卡在适配器调用里（future.result），
         而 Qt 在销毁父控件时把它的 C++ 对象一起删了 —— Qt 遇到"运行中的
         QThread 被销毁"会直接 abort，这**不是 Python 异常，try/except 抓不住**。
-        所以顺序必须是：停轮询 → 等在飞线程 → 关适配器（让还卡着的快速失败）
-        → 再等一轮 → 才交给 Qt 销毁。
+
+        用户反馈（2026-09-21）：**点右上角的 × 不能立即退出**。原因是这里的等待预算
+        是 20 秒 + 6 秒，而 Qt 又是先跑完 closeEvent 才隐藏窗口 —— 只要关窗时有后台
+        线程在跑（AI 页预热基座版本、模型市场刷新、凭证核对、正在传输），
+        窗口就僵在那里十几二十秒。实测：一个 30 秒的线程 → close() 阻塞 26 秒。
+
+        现在的顺序：**立刻隐藏窗口** → 关闸门 → 停轮询 → 短等（1 秒）→ 关适配器
+        → 再短等（0.6 秒）→ 各页收尾（存盘/关库）→ 把还在跑的线程**摘下来**
+        → 交给 Qt 销毁。整段最多 ~1.6 秒，剩下的线程由 :func:`_收尾退出` 在进程
+        退出时一并结束（用户不会再看到"关了窗进程还在"）。
         """
-        # ⓪ 先关上"关窗闸门"：之后界面线程不再发起任何适配器调用
+        # ⓪ 立刻隐藏窗口：用户点 × 就该"马上就没了"。收尾（等桥调用/关适配器/存配置）
+        #    在隐藏之后做，窗口不会僵在屏幕上；真的崩了也只是没有窗口，不会吓到人。
+        应用 = QApplication.instance()
+        try:
+            self.hide()
+            if 应用 is not None:
+                应用.processEvents()
+        except Exception:
+            pass
+        # ① 关上"关窗闸门"：之后界面线程不再发起任何适配器调用
         #    （否则关了适配器又会被重建、还会造出新的运行中线程 → Qt abort）
         try:
             from .后台线程 import 进入关闭态
@@ -1196,15 +1246,15 @@ class 主窗口(QMainWindow):
                     计时.stop()
             except Exception:
                 pass
-        # ③ 等在飞的桥调用落地（给足预算，别让它们带着"运行中"被删）
+        # ③ 短等一下在飞的桥调用（能落地的落地；落不了的后面收）
         self._等在跑的线程(self.关窗等待预算秒)
         # ④ 关适配器：还卡着的调用会立刻报"适配器已关闭"而退出
         try:
             self.动作.关闭()
         except Exception:
             pass
-        # ⑤ 再等一轮，把④放掉的线程收干净
-        self._等在跑的线程(6.0)
+        # ⑤ 再短等一轮，把④放掉的线程收干净
+        self._等在跑的线程(self.关窗收尾预算秒)
         try:
             if self._传输页面 is not None:
                 self._传输页面.关闭()
@@ -1215,11 +1265,19 @@ class 主窗口(QMainWindow):
                 页.关闭()
             except Exception:
                 pass
-        self._活动线程.clear()
         try:
             保存配置(self.配置, self.配置路径)
         except Exception:
             pass
+        # ⑥ 还没停的线程：摘下来（**不能**clear，那会把运行中的 QThread 交给 GC → abort）
+        剩下 = self._脱离还在跑的线程()
+        if 剩下:
+            try:
+                self.追加日志(
+                    f"[界面] 关窗：还有 {剩下} 个后台线程没停（多半卡在网络/子进程上），"
+                    "已从窗口摘下来，进程退出时一并结束 —— 不再让关窗卡住")
+            except Exception:
+                pass
         super().closeEvent(事件)
 
 
@@ -1305,6 +1363,85 @@ def _调优应用(应用):
     return 应用
 
 
+#: 关窗时没能停下来的线程（已经从窗口/页面上摘下来）。
+#: 为什么要留这个清单：QThread 被销毁时还在运行 → Qt 直接 abort。
+#: 留引用 = 不回收 = 不 abort；进程退出时由 _收尾退出 一起结束。
+遗留线程: list = []
+
+#: 是否已经注册过"解释器收尾前强制退出"（只注册一次）
+_已注册遗留收尾 = False
+
+
+def _在测试进程里() -> bool:
+    """当前是不是在单测进程里（unittest / pytest）。
+
+    ⚠️ 测试进程里**绝不** os._exit：那会把 unittest 的失败码吃掉
+    （`FAILED` 也会变成 exit 0），比崩溃更坏 —— CI 就再也看不见真的失败。
+    我们的关窗测试自己会把线程停掉，所以不会走到"运行中的 QThread 被回收"那一步。
+    """
+    import sys as _sys
+    return any(_sys.modules.get(名) is not None for 名 in ("unittest", "pytest"))
+
+
+def _注册遗留线程收尾() -> None:
+    """注册一个 atexit：解释器收尾**之前**把进程结束掉。
+
+    为什么还需要它（已经有了 :func:`_收尾退出`）：Python 解释器收尾时会清掉模块全局，
+    :data:`遗留线程` 里那些 QThread 包装对象被回收 —— 而它们**还在运行**，
+    Qt 遇到这种情况会 `Fatal Python error: Aborted`（实测：关窗后核心转储）。
+    atexit 跑在模块清理之前，正好拦住这个时机（窗口/配置/日志这时都已经收好了）。
+    """
+    global _已注册遗留收尾
+    if _已注册遗留收尾 or _在测试进程里():
+        return
+    _已注册遗留收尾 = True
+    import atexit
+    atexit.register(_收尾退出, 0, 0.2)
+
+
+def _收尾退出(退出码: int = 0, 宽限秒: float = 1.0) -> None:
+    """事件循环结束后，尽快把进程结束掉（给遗留线程最多 `宽限秒` 秒）。
+
+    为什么需要：那些线程卡在网络/子进程调用上（超时是分钟级），Python 与 Qt 都等不动。
+    窗口已经关了、配置已存、日志已落盘，这时唯一该做的就是**立刻结束进程** ——
+    否则用户会看到"点了 ×，任务管理器里进程还在"，再点图标又起不来新的（或起一堆）。
+    """
+    import os as _os
+    import sys as _sys
+    import time as _time
+    截止 = _time.time() + max(0.0, float(宽限秒))
+    for 线 in list(遗留线程):
+        try:
+            剩 = 截止 - _time.time()
+            if 剩 <= 0.05:
+                break
+            线.wait(int(剩 * 1000))
+        except Exception:  # noqa: BLE001
+            continue
+    还在跑 = 0
+    for 线 in list(遗留线程):
+        try:
+            if 线.isRunning():
+                还在跑 += 1
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        _sys.stdout.flush()
+        _sys.stderr.flush()
+    except Exception:
+        pass
+    if 还在跑:
+        # 只打印，不再等：卡住的线程不会因为"再等一会儿"就好
+        try:
+            print(f"[界面] 退出：仍有 {还在跑} 个后台线程在跑"
+                  "（不再等待，直接结束进程）", flush=True)
+        except Exception:  # noqa: BLE001 - stdout 可能已经关了
+            pass
+        if _在测试进程里():
+            return          # 见 _在测试进程里()：别把测试的失败码吃掉
+        _os._exit(int(退出码 or 0))
+
+
 def 运行界面(AI运行时=None, 主题: str = "", 启动日志=None):
     import sys as _sys
     应用 = QApplication.instance() or QApplication(_sys.argv)
@@ -1316,4 +1453,8 @@ def 运行界面(AI运行时=None, 主题: str = "", 启动日志=None):
             pass
     窗口 = 主窗口(AI运行时=AI运行时, 主题=主题, 启动日志=启动日志)
     窗口.show()
-    return 应用.exec()
+    退出码 = 应用.exec()
+    # 事件循环结束 = 用户已经点了 ×（或程序自己退出）：把遗留线程放一小会儿就收工，
+    # 保证进程"点了就走"，不会留一个没有窗口的僵尸在任务管理器里。
+    _收尾退出(退出码)
+    return 退出码
