@@ -219,8 +219,17 @@ jobs:
             $pyw = Join-Path $app '运行环境\python\pythonw.exe'
             if (-not (Test-Path -LiteralPath $pyw)) { $pyw = Join-Path $app '运行环境\venv\Scripts\pythonw.exe' }
             if (-not (Test-Path -LiteralPath $pyw)) { throw "包内找不到 pythonw.exe（GUI 子系统解释器）" }
+            # ⚠️ pythonw.exe 是 GUI 子系统程序：PowerShell **不会等它**，
+            #    $LASTEXITCODE 是上一条命令留下的（实测把这一步误判成失败）。
+            #    所以判定读脚本自己写的结果文件。
+            $结果文件 = Join-Path $app '数据\不弹黑框检查.txt'
+            if (Test-Path -LiteralPath $结果文件) { Remove-Item -LiteralPath $结果文件 -Force }
             & $pyw (Join-Path $app '工具\检查不弹黑框.py')
-            if ($LASTEXITCODE -ne 0) { throw "起子进程会弹黑框（下载模型时会冒出黑窗口）" }
+            Start-Sleep -Seconds 3
+            if (-not (Test-Path -LiteralPath $结果文件)) { throw "黑框检查没写出结果文件" }
+            $结论 = Get-Content -LiteralPath $结果文件 -TotalCount 1
+            Write-Host "黑框检查结论：$结论"
+            if ($结论 -notmatch '通过') { throw "起子进程会弹黑框（下载模型时会冒出黑窗口）" }
           } finally { Pop-Location }
 
       - name: 启动程序并抓日志

@@ -102,16 +102,32 @@ def main() -> int:
         return 进程.returncode, (进程.stdout or "").strip()
 
     码1, 出1 = 经GUI父进程跑(对照脚本)
-    print(f"（对照）裸 subprocess：{出1 or '（无输出）'}｜退出码 {码1}")
     码2, 出2 = 经GUI父进程跑(我们脚本)
-    print(f"（我们）v8_3.进程.起：{出2 or '（无输出）'}｜退出码 {码2}")
+    对照拿到控制台 = ("CONSOLE 0" not in 出1)
+    我们拿到控制台 = ("CONSOLE 0" not in 出2)
+    print(f"（对照）裸 subprocess：{出1 or '（无输出）'}｜退出码 {码1}"
+          f"｜{'拿到了控制台窗口（就是那个黑框）' if 对照拿到控制台 else '没拿到控制台'}")
+    print(f"（我们）v8_3.进程.起：{出2 or '（无输出）'}｜退出码 {码2}"
+          f"｜{'❌ 还是拿到了控制台' if 我们拿到控制台 else '✅ 没有控制台窗口'}")
 
-    if 码2 != 0:
+    判定 = "通过" if not 我们拿到控制台 else "失败"
+    结果行 = (f"{判定}\n"
+            f"对照（裸起）拿到控制台：{对照拿到控制台}\n"
+            f"我们（v8_3.进程.起）拿到控制台：{我们拿到控制台}\n"
+            f"对照输出：{出1}\n我们输出：{出2}\n")
+    try:                       # 退出码在 GUI 子系统下不可靠（pwsh 不等待），
+        结果文件 = 项目根 / "数据" / "不弹黑框检查.txt"   # 所以同时写文件给 CI 判定
+        结果文件.parent.mkdir(parents=True, exist_ok=True)
+        结果文件.write_text(结果行, encoding="utf-8")
+        print(f"结果已写入：{结果文件}")
+    except Exception as 错:  # noqa: BLE001
+        print(f"（结果文件写不了：{错}）")
+    if 我们拿到控制台:
         print("✗ 我们的起法仍然让子进程拿到了控制台窗口（会弹黑框）")
         return 1
-    if 码1 == 0:
-        print("⚠️ 对照那条也拿到了无控制台的结果（这台机器上 Windows 行为不同），"
-              "但我们的实现明确带了 CREATE_NO_WINDOW，按通过处理")
+    if not 对照拿到控制台:
+        print("⚠️ 这台机器上裸起也没拿到控制台（判据没法对照），"
+              "但我们明确带了 CREATE_NO_WINDOW，按通过处理")
     print("✅ 起子进程不会弹黑框（CREATE_NO_WINDOW 生效）")
     return 0
 
